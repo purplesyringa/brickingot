@@ -102,7 +102,7 @@ pub fn extend_arrows(arrows: &mut Vec<Arrow>) {
     // extended like so:
     //                    =============>
     // So instead of storing arrows themselves in the stack, we can store unoriented unions of
-    // arrows, and resolution will work correctly:
+    // arrows, and then resolution will work correctly:
     //     -----   -----  ---------
     //
     // Clearly, backward conflicts cannot be introduced because we don't modify upward arrows. New
@@ -118,128 +118,177 @@ pub fn extend_arrows(arrows: &mut Vec<Arrow>) {
         let arrow_min = arrow.from.min(arrow.to);
         let arrow_max = arrow.from.max(arrow.to);
         while stack.pop_if(|(min, _)| *min >= arrow_min).is_some() {}
-        if arrow.to > arrow.from {
-            if let Some((min, _)) = stack.pop_if(|(_, max)| *max > arrow_min) {
-                // Notably, this assignment doesn't invalidate the sorting order, which allows us to
-                // avoid re-sorting on stage 3.
-                arrow.from = min;
+        if let Some((min, max)) = stack.last_mut()
+            && *max > arrow_min
+        {
+            *max = arrow_max;
+            if arrow.to > arrow.from {
+                arrow.from = *min;
             }
         } else {
-            if let Some((_, max)) = stack.last_mut()
-                && *max > arrow_min
-            {
-                *max = arrow_max;
-                continue;
-            }
+            stack.push((arrow_min, arrow_max));
         }
-        stack.push((arrow_min, arrow_max));
     }
 
-    // Stage 3. We again perform a sweeping line approach.
+    // Stage 3. We again perform a sweeping line approach, but a trickier one than before.
     //
-    // We maintain that:
-    // - There are only forward conflicts among the already handled arrows.
-    // - There are only head-to-head conflicts among arrows that haven't yet been handled.
-    // - There are only head-to-head and certain backward conflicts between arrows that have and
-    //   haven't been handled.
+    // The main problem here is ensuring that adding the dispatcher arrow doesn't introduce any new
+    // conflicts, or at least any head-to-head conflicts among the set of already handled arrows.
+    // The simplest counter-example is
     //
-    // When an upward arrow arrives, we need to find downward arrows containing the arrival's head.
-    // Arrows nested within other arrows are unnecessary to track, but note that there can still be
-    // forward conflicts:
-    //     --------->
-    //         -------->
-    //           <---------------
-    // To resolve both conflicts, we need to extend the head until the tail of the first arrow (and
-    // add the corresponding dispatch arrow):
-    //     --------->
-    //         -------->
-    //     <---------------------
-    //     ----->
-    // ...and that holds even if the original picture looked like this:
-    //     --------->
-    //         -------->
-    //                <----------
-    // ...so we need to track the union of the downward arrows.
+    //          ------------->
+    //     ---------------------------->
+    //                 <-----------
+    //             <-------------------------
     //
-    // We've used a stack for operations like this one so far, but it breaks down because an input
-    // like
-    //     ---->    ---->    ---->    --->
-    //                <-----------------------
-    // requires us to retrieve an element below the top of the stack without removing everything
-    // above it, which is not something we can do as efficiently. But not all hope is lost: the
-    // elements above the retrieved one could only be useful to an input like
-    //     ---->    ---->    ---->    --->
-    //                <-----------------------
-    //                         <------------------
-    // ...but the input of this stage doesn't contain backward conflicts, which means we can safely
-    // remove those elements.
+    // ...where, if the shorter upward arrow is handled first, the longer upward arrow gets two
+    // conflicts -- a backward one with the longer upward arrow and a head-to-head conflict with
+    // the dispatch arrow:
     //
-    // The other major pain here is a situation like this:
-    //     ------------>
-    //             <----------
+    //          ------------->
+    //     ---------------------------->
     //          <------------------
-    // The smaller head-to-head collision will be resolved first, producing the following arrows:
-    //     ------------>
-    //     <------------------          \
-    //     ------->                      - backward conflict
-    //          <------------------     /
-    // This is the only case when a backward conflict can be introduced, and that complicates
-    // things, but this conflict will automatically disappear when the larger head-to-head collision
-    // is resolved:
-    //     ------------>
-    //     <------------------
+    //          ------>
+    //             <-------------------------
+    //
+    // Because of the backward conflict, attempting to resolve the head-to-head conflict will then
+    // result in a situation where not just a *forward* conflict happens between dispatch arrows
+    // (which is already a bad thing because elongating the dispatch arrow would require moving the
+    // dispatcher, but that would also mean the arrow pointing *into* the dispatcher needs its head
+    // moved), but also a *head-to-head* conflict is introduced between the new dispatch arrow and
+    // the old upward arrow:
+    //
+    //          ------------->
+    //     ---------------------------->
+    //          <------------------
+    //          ------>
+    //     <---------------------------------
+    //     ------->
+    //
+    // We must therefore handle arrows in such an order that similar head-to-head cannot be ever
+    // introduced, and that requires us to handle the outmost upward arrow first, which results
+    // exclusively in a forward conflict, where only the non-dispatch arrow arrow needs to be
+    // extended:
+    //
+    //          ------------->
+    //     ---------------------------->
+    //     <---------------------------------
     //     ------->
     //     <-----------------------
-    //     ---->
-    // ...so this is only temporary.
+    //     ----------->
     //
-    // That's the only conflict that elongating the arrow can introduce, but we also need to
-    // consider the dispatcher arrow. A forward conflict can be introduced in the following case:
-    //     ------------->
-    //            <----------
-    //         ------>
-    // (after:)
-    //     ------------->
-    //     <-----------------
-    //     ------>
-    //         ------>
-    // ...which we'll handle on stage 4 (we can't handle it *now* because we'd have to touch already
-    // processed arrows, and that could happen multiple times, increasing complexity to quadratic).
-    // A *head-to-head* conflict can be introduced in the following case:
-    //     ---------->
-    //           <--------
-    //        <-------------
-    // (after:)
-    //     ---------->
-    //     <--------------
-    //     ----->
-    //        <-------------
-    // But this is a conflict with a yet unhandled arrow, so it will be resolved when that arrow is
-    // checked -- and that's not a "new" conflict in the sense that that arrow would have been fixed
-    // up regardless.
+    // We formalize this approach by handling arrows in the order of their *minimal* coordinates,
+    // which complicates the sweeping line code, but avoids this problem.
     //
-    // We'll need to push into `arrows`, so the iteration is a bit unidiomatic.
-    stack.clear();
+    // Here's the general approach. It mostly mirrors the approach from the previous stages, but the
+    // details are tricky, so let's formalize it.
+    // - We're moving arrows from the set of unhandled arrows to the set of handled arrows one by
+    //   one in the order of minimal coordinates. We maintain an auxiliary data structure on the set
+    //   of handled arrows.
+    // - We do not *commit* certain changes to arrows. In particular, the output may contain
+    //   unresolved forward conflicts (and *only* forward conflicts). Those conflicts will be
+    //   resolved on stage 4. However, the auxiliary data structure is built on the hypothetical
+    //   arrow set where those conflicts have already been resolved. In other words, the output
+    //   containing conflicts is merely an optimization that enables us to patch the already
+    //   outputted data when older arrows are modified (but the auxiliary structure still needs to
+    //   be updated).
+    //
+    // An arriving upward arrow `a <- b` can only have a head-to-head conflict with already handled
+    // arrows `* -> c`, where `a < c < b`. We don't need to keep track of `*` because it's
+    // guaranteed to be `< a` due to scan order (`<=`, actually, so we need to nudge the sorting
+    // order a bit). There can be multiple such arrows, all nested:
+    //
+    //      ----------------->  (1)
+    //       ------------->     (2)
+    //          -------->       (3)
+    //               <-------   collides with (2) and (3), but not (1)
+    //
+    // There can also be arrows in the tree "to the left" of the arrows in the diagram, which we
+    // cannot collide with, but no arrows "to the right".
+    //
+    // To resolve such a conflict, we find the outmost arrow we collide with and extend our head to
+    // its tail:
+    //
+    //      ----------------->
+    //       ------------->
+    //          -------->
+    //       <---------------
+    //       ------->
+    //
+    // This will, in turn, create forward conflicts with nested arrows, (3) in this case. We will
+    // resolve this conflict implicitly, but not patch the output, because there could be a linear
+    // number of such arrows:
+    //
+    //      ----------------->
+    //       ------------->
+    //       ----------->
+    //       <---------------
+    //       ------->
+    //
+    // To see why dispatcher arrows cannot be extended during this forward conflict resolution,
+    // notice that the minimum coordinates of all further inputs are greater than the dispatcher's
+    // head, meaning that it won't be interacted with.
+    //
+    // When a downward arrow `a -> b` arrives, we know for a fact that it can't have a forward
+    // conflict with any existing arrow, because all existed arrows have been added when they had
+    // minimal coordiantes `< a`, meaning that there must have already been a forward conflict in
+    // the input for this to happen.
+    //
+    // For our auxiliary data structure, we could store a stack of nested downward arrows; this is
+    // effectively the set of arrows obtained by travelling downward from the tree root if, at each
+    // point we only visit the rightmost child. This is trivial to populate, but we also need to
+    // handle transforms like this one:
+    //
+    //     ------------------------>                ------------------------>   \
+    //        ----------------->        ===>           ----------------->       |  data structure
+    //           ----------->                          -------------->          |
+    //            ----->                               --------->               /
+    //              <-------------                           <-------------     <- query
+    //
+    // In effect, this is a mass-update query on a tail of the stack. It does not allow us to
+    // *remove* the updated elements from the stack, meaning that they may also be accessed on the
+    // later iterations, bumping complexity to quadratic. But there's a fix.
+    //
+    // Updating arrows like this can be seen as merging them together. Let the stack store pairs
+    // {tail, heads}. Handling the query then requires us to merge some `heads` from the end of the
+    // stack into `heads` of a single arrow.
+    //
+    // Crucially, the absence of backward conflicts in the input guarantees that any arrow that has
+    // been extended during this stage won't ever be extended in this fashion again. This means that
+    // while handling the query, the moved `heads` sets will only contain one element.
+    //
+    // We'll need to push into `arrows`, so the iteration is a bit unidiomatic. `heads` are stored
+    // in decreasing order.
+    arrows.sort_by_key(|arrow| (arrow.from.min(arrow.to), Reverse(arrow.from.max(arrow.to))));
+    let mut stack2: Vec<(usize, Vec<usize>)> = Vec::new();
     for i in 0..arrows.len() {
         let arrow = &mut arrows[i];
         let arrow_min = arrow.from.min(arrow.to);
-        while stack.pop_if(|(from, _)| *from >= arrow_min).is_some() {}
+        while stack2
+            .pop_if(|(_, heads)| {
+                while heads.pop_if(|head| *head <= arrow_min).is_some() {}
+                heads.is_empty()
+            })
+            .is_some()
+        {}
         if arrow.to > arrow.from {
-            if let Some((_, to)) = stack.last_mut()
-                && *to > arrow_min
-            {
-                *to = arrow.to;
-            } else {
-                stack.push((arrow.from, arrow.to));
-            }
+            stack2.push((arrow.from, vec![arrow.to]));
         } else {
-            if let Some((from, to)) = stack.last_mut()
-                && *to > arrow_min
+            let mut merged_heads = Vec::new();
+            while stack2.len() >= 2 && *stack2[stack2.len() - 2].1.last().unwrap() < arrow.from {
+                let (_, heads) = stack2.pop().unwrap();
+                assert_eq!(heads.len(), 1);
+                merged_heads.push(heads[0]);
+            }
+            if let Some((tail, heads)) = stack2.last_mut()
+                && *heads.last().unwrap() < arrow.from
             {
-                arrow.to = *from;
+                heads.extend(merged_heads.iter().rev());
+                let to = arrow.to;
+                arrow.to = *tail;
                 arrows.push(Arrow {
-                    from: *from,
-                    to: arrow_min,
+                    from: *tail,
+                    to,
                     kind: ArrowKind::Dispatch,
                 });
             }
@@ -264,6 +313,8 @@ pub fn extend_arrows(arrows: &mut Vec<Arrow>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{rngs::SmallRng, RngCore, SeedableRng};
+    use std::collections::HashSet;
 
     fn test_arrows(arrows: &[(usize, usize)], expected: &[(usize, usize)]) {
         let mut arrows = arrows
@@ -320,7 +371,61 @@ mod tests {
         test_arrows(&[(1, 3), (4, 2)], &[(1, 3), (4, 1), (1, 2)]);
     }
 
-    // Mostly examples from comments above, expanded
+    // Ensures that collisions are handled correctly with arrows in-between
+    #[test]
+    fn skips() {
+        // ----------> --->
+        //    --->  --------->
+        test_arrows(
+            &[(1, 5), (6, 7), (2, 3), (4, 8)],
+            &[(1, 5), (6, 7), (2, 3), (1, 8)],
+        );
+        // <---------- --->
+        //    --->  --------->
+        test_arrows(
+            &[(5, 1), (6, 7), (2, 3), (4, 8)],
+            &[(5, 1), (6, 7), (2, 3), (1, 8)],
+        );
+        // <---------- <---
+        //    <---  <---------
+        test_arrows(
+            &[(5, 1), (7, 6), (3, 2), (8, 4)],
+            &[(8, 1), (7, 6), (3, 2), (8, 4)],
+        );
+        // ----------> --->
+        //    --->  <---------
+        test_arrows(
+            &[(1, 5), (6, 7), (2, 3), (8, 4)],
+            &[(1, 5), (6, 7), (2, 3), (8, 1), (1, 4)],
+        );
+    }
+
+    // Tests that arrows with matching heads/tails are not overexpanded
+    #[test]
+    fn equal() {
+        for small_is_first in [false, true] {
+            for small_is_left in [false, true] {
+                for small_is_downward in [false, true] {
+                    for large_is_downward in [false, true] {
+                        let mut first = (1, 3);
+                        let mut second = if small_is_left { (1, 2) } else { (2, 3) };
+                        if large_is_downward {
+                            core::mem::swap(&mut first.0, &mut first.1);
+                        }
+                        if small_is_downward {
+                            core::mem::swap(&mut second.0, &mut second.1);
+                        }
+                        if small_is_first {
+                            core::mem::swap(&mut first, &mut second);
+                        }
+                        test_arrows(&[first, second], &[first, second]);
+                    }
+                }
+            }
+        }
+    }
+
+    // Non-trivial examples from comments in `extend_arrows`
     #[test]
     fn interactions() {
         // ------------------->
@@ -394,5 +499,117 @@ mod tests {
         //            <----------
         //         ------>
         test_arrows(&[(1, 5), (6, 3), (2, 4)], &[(1, 5), (6, 1), (1, 4), (1, 3)]);
+    }
+
+    // Counter-examples found by stress test
+    #[test]
+    fn counterexamples() {
+        // Non-trivial head-to-head conflicts
+        test_arrows(
+            &[(1, 4), (0, 6), (5, 3), (7, 2)],
+            &[(0, 4), (0, 6), (5, 0), (7, 0), (0, 2), (0, 3)],
+        );
+
+        // Stack order in head-to-head conflict resolution (ensures `.rev()` is not missed)
+        test_arrows(
+            &[(5, 2), (0, 8), (0, 4), (0, 7), (9, 1)],
+            &[(5, 0), (0, 8), (0, 4), (0, 7), (9, 0), (0, 1), (0, 2)],
+        );
+
+        // Broken forward conflict resolution
+        test_arrows(
+            &[(9, 7), (1, 6), (0, 3), (5, 2), (1, 8)],
+            &[(9, 0), (0, 6), (0, 3), (5, 0), (0, 8), (0, 2), (0, 7)],
+        );
+    }
+
+    #[test]
+    fn stress() {
+        let mut rng = SmallRng::seed_from_u64(1);
+
+        for step in 0..100000 {
+            let mut arrows: [_; 7] =
+                core::array::from_fn(|_| (rng.next_u32() as usize, rng.next_u32() as usize));
+
+            if step % 3 == 0 {
+                // Test aliasing edges
+                for (from, to) in &mut arrows {
+                    *from &= 15;
+                    *to &= 15;
+                }
+                if arrows.iter().any(|(from, to)| from == to) {
+                    continue;
+                }
+            }
+
+            let mut expanded_arrows = arrows
+                .iter()
+                .enumerate()
+                .map(|(i, &(from, to))| Arrow {
+                    from,
+                    to,
+                    kind: ArrowKind::Try { handler_index: i },
+                })
+                .collect();
+
+            extend_arrows(&mut expanded_arrows);
+
+            expanded_arrows.sort_by_key(|arrow| match arrow.kind {
+                ArrowKind::Try { handler_index } => handler_index,
+                ArrowKind::Dispatch => usize::MAX,
+                _ => unreachable!(),
+            });
+
+            let dispatches: HashSet<(usize, usize)> = expanded_arrows[arrows.len()..]
+                .iter()
+                .map(|expanded_arrow| {
+                    assert_eq!(
+                        expanded_arrow.kind,
+                        ArrowKind::Dispatch,
+                        "non-dispatch arrow",
+                    );
+                    assert!(
+                        expanded_arrow.from < expanded_arrow.to,
+                        "non-downward dispatch",
+                    );
+                    (expanded_arrow.from, expanded_arrow.to)
+                })
+                .collect();
+
+            for (i, (arrow, expanded_arrow)) in arrows.iter().zip(&expanded_arrows).enumerate() {
+                assert_eq!(
+                    expanded_arrow.kind,
+                    ArrowKind::Try { handler_index: i },
+                    "wrong arrow kind",
+                );
+                let is_expansion = if arrow.0 < arrow.1 {
+                    expanded_arrow.from <= arrow.0 && arrow.1 == expanded_arrow.to
+                } else {
+                    if expanded_arrow.to < arrow.1 {
+                        assert!(
+                            dispatches.contains(&(expanded_arrow.to, arrow.1)),
+                            "not able to dispatch {} -> {}",
+                            expanded_arrow.to,
+                            arrow.1,
+                        );
+                    }
+                    expanded_arrow.from >= arrow.0 && arrow.1 >= expanded_arrow.to
+                };
+                assert!(is_expansion, "not an expansion");
+            }
+
+            expanded_arrows
+                .sort_by_key(|arrow| (arrow.from.max(arrow.to), Reverse(arrow.from.min(arrow.to))));
+            let mut stack = Vec::new();
+            for arrow in expanded_arrows {
+                let arrow_min = arrow.from.min(arrow.to);
+                let arrow_max = arrow.from.max(arrow.to);
+                while stack.pop_if(|(min, _)| *min >= arrow_min).is_some() {}
+                if let Some((_, max)) = stack.last() {
+                    assert!(*max <= arrow_min, "non-nested arrows in output");
+                }
+                stack.push((arrow_min, arrow_max));
+            }
+        }
     }
 }
