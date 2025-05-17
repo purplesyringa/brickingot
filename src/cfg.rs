@@ -1,4 +1,4 @@
-use crate::arrows::{extend_arrows, Arrow, ArrowKind};
+use crate::arrows::{Arrow, ArrowKind, extend_arrows};
 use crate::unstructured;
 use thiserror::Error;
 

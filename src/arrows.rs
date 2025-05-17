@@ -313,7 +313,7 @@ pub fn extend_arrows(arrows: &mut Vec<Arrow>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{rngs::SmallRng, RngCore, SeedableRng};
+    use rand::{RngCore, SeedableRng, rngs::SmallRng};
     use std::collections::HashSet;
 
     fn test_arrows(arrows: &[(usize, usize)], expected: &[(usize, usize)]) {

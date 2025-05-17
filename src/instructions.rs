@@ -226,7 +226,7 @@ pub fn get_instruction_stack_adjustment(
         IInc { .. } | IIncW { .. } => 0,
         InstanceOf { .. } => 0,
         JSr { .. } | JSrW { .. } | Ret { .. } | RetW { .. } => {
-            return Err(InstructionPreParseError::JsrUnsupported)
+            return Err(InstructionPreParseError::JsrUnsupported);
         }
         MonitorEnter | MonitorExit => -1,
         New { .. } => 1,

@@ -5,12 +5,12 @@ mod insn2stmt;
 mod instructions;
 mod unstructured;
 
-use crate::cfg::{structurize_cfg, StructurizationError};
-use crate::unstructured::{convert_code_to_stackless, StatementGenerationError};
+use crate::cfg::{StructurizationError, structurize_cfg};
+use crate::unstructured::{StatementGenerationError, convert_code_to_stackless};
 use noak::{
-    error::DecodeError,
-    reader::{attributes::Code, cpool::ConstantPool, Class, Method},
     MStr,
+    error::DecodeError,
+    reader::{Class, Method, attributes::Code, cpool::ConstantPool},
 };
 use thiserror::Error;
 

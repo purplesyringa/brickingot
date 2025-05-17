@@ -1,18 +1,18 @@
 use crate::ast::{BasicStatement, Expression, Str};
-use crate::insn2stmt::{convert_instruction_to_unstructured_ast, InstructionParseError};
+use crate::insn2stmt::{InstructionParseError, convert_instruction_to_unstructured_ast};
 use crate::instructions::{
-    get_instruction_stack_adjustment, get_instruction_successors, InstructionPreParseError,
+    InstructionPreParseError, get_instruction_stack_adjustment, get_instruction_successors,
 };
 
 use core::fmt::{self, Display};
 use displaydoc::Display;
 use noak::{
+    MStr,
     error::DecodeError,
     reader::{
         attributes::{Code, RawInstruction},
         cpool::ConstantPool,
     },
-    MStr,
 };
 use std::collections::HashSet;
 use thiserror::Error;
@@ -34,10 +34,14 @@ pub enum StatementGenerationError {
         error: InstructionParseError,
     },
 
-    #[error("Jump to address {0} jumps into the middle of an instruction (or after the last instruction)")]
+    #[error(
+        "Jump to address {0} jumps into the middle of an instruction (or after the last instruction)"
+    )]
     IllegalJump(u32),
 
-    #[error("Exception handler at address {0} is the middle of an instruction (or after the last instruction)")]
+    #[error(
+        "Exception handler at address {0} is the middle of an instruction (or after the last instruction)"
+    )]
     IllegalExceptionHandler(u32),
 
     #[error("Execution reaches the end of bytecode")]

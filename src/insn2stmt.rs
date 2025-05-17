@@ -10,9 +10,8 @@ use noak::{
     reader::{
         attributes::{ArrayType, RawInstruction},
         cpool::{
-            self,
+            self, ConstantPool, Dynamic, Index, InterfaceMethodRef, Item, MethodHandle, MethodRef,
             value::{FieldRef, NameAndType},
-            ConstantPool, Dynamic, Index, InterfaceMethodRef, Item, MethodHandle, MethodRef,
         },
     },
 };
