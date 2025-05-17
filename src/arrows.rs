@@ -249,55 +249,55 @@ pub fn extend_arrows(arrows: &mut Vec<Arrow>) {
     // *remove* the updated elements from the stack, meaning that they may also be accessed on the
     // later iterations, bumping complexity to quadratic. But there's a fix.
     //
-    // Updating arrows like this can be seen as merging them together. Let the stack store pairs
-    // {tail, heads}. Handling the query then requires us to merge some `heads` from the end of the
-    // stack into `heads` of a single arrow.
+    // Updating arrows like this can be seen as merging them together. Let's separate the stack into
+    // two: one stack will store heads of arrows, while another will store groups of tails of those
+    // same arrows. Handling the query then requires us to merge some elements of the "group" stack
+    // together, which we can do in O(1) amortized.
     //
     // Crucially, the absence of backward conflicts in the input guarantees that any arrow that has
-    // been extended during this stage won't ever be extended in this fashion again. This means that
-    // while handling the query, the moved `heads` sets will only contain one element.
+    // been extended during this stage won't ever be extended in this fashion again.
     //
-    // We'll need to push into `arrows`, so the iteration is a bit unidiomatic. `heads` are stored
-    // in decreasing order.
+    // We'll need to push into `arrows`, so the iteration is a bit unidiomatic.
     arrows.sort_by_key(|arrow| (arrow.from.min(arrow.to), Reverse(arrow.from.max(arrow.to))));
-    let mut stack2: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut heads_stack: Vec<usize> = Vec::new();
+    // Reusing an allocation like this just because the types match (`(start index, tail)` in this
+    // case) is... questionable, but it's fiiiiiiiine, don't worry. :)
+    let mut tails_stack = stack;
+    tails_stack.clear();
     for i in 0..arrows.len() {
         let arrow = &mut arrows[i];
         let arrow_min = arrow.from.min(arrow.to);
-        while stack2
-            .pop_if(|(_, heads)| {
-                while heads.pop_if(|head| *head <= arrow_min).is_some() {}
-                heads.is_empty()
-            })
+        while heads_stack.pop_if(|head| *head <= arrow_min).is_some() {}
+        while tails_stack
+            .pop_if(|(start, _)| *start >= heads_stack.len())
             .is_some()
         {}
         if arrow.to > arrow.from {
-            stack2.push((arrow.from, vec![arrow.to]));
+            tails_stack.push((heads_stack.len(), arrow.from));
+            heads_stack.push(arrow.to);
         } else {
-            let mut merged_heads = Vec::new();
-            while stack2.len() >= 2 && *stack2[stack2.len() - 2].1.last().unwrap() < arrow.from {
-                let (_, heads) = stack2.pop().unwrap();
-                assert_eq!(heads.len(), 1);
-                merged_heads.push(heads[0]);
+            if heads_stack.last().is_none_or(|head| *head >= arrow.from) {
+                continue;
             }
-            if let Some((tail, heads)) = stack2.last_mut()
-                && *heads.last().unwrap() < arrow.from
-            {
-                heads.extend(merged_heads.iter().rev());
-                let to = arrow.to;
-                arrow.to = *tail;
-                arrows.push(Arrow {
-                    from: *tail,
-                    to,
-                    kind: ArrowKind::Dispatch,
-                });
-            }
+            while tails_stack
+                .pop_if(|(start, _)| *start > 0 && heads_stack[*start - 1] < arrow.from)
+                .is_some()
+            {}
+            let tail = tails_stack.last().unwrap().1;
+            let to = arrow.to;
+            arrow.to = tail;
+            arrows.push(Arrow {
+                from: tail,
+                to,
+                kind: ArrowKind::Dispatch,
+            });
         }
     }
 
     // Stage 4. This is effectively an optimized version of stage 2 that completely ignores upward
     // arrows. We need to re-sort because stage 3 can push new downward arrows.
     arrows.sort_by_key(|arrow| (arrow.to, Reverse(arrow.from)));
+    let mut stack = tails_stack; // bring allocation back
     stack.clear();
     for arrow in &mut *arrows {
         if arrow.to > arrow.from {
