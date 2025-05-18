@@ -14,7 +14,6 @@ use noak::{
         cpool::ConstantPool,
     },
 };
-use std::collections::HashSet;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -80,8 +79,6 @@ pub enum Statement<'a> {
     },
     /// {0}
     Switch(Switch<'a>),
-    /// catchpad;
-    Catchpad,
 }
 
 #[derive(Debug)]
@@ -117,8 +114,7 @@ impl Display for ExceptionHandler<'_> {
             self.start,
             self.end,
             self.class
-                .as_ref()
-                .unwrap_or(&Str(MStr::from_mutf8(b"Throwable").unwrap())),
+                .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
             self.target,
         )
     }
@@ -128,26 +124,18 @@ impl Display for ExceptionHandler<'_> {
 pub enum JumpCondition<'a> {
     /// true
     Always,
-    /// ({0}) ==ref ({1})
-    ReferenceEq(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) !=ref ({1})
-    ReferenceNe(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) == null
-    ReferenceNull(Box<Expression<'a>>),
-    /// ({0}) != null
-    ReferenceNonNull(Box<Expression<'a>>),
-    /// ({0}) ==i ({1})
-    IntegerEq(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) >=i ({1})
-    IntegerGe(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) >i ({1})
-    IntegerGt(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) <=i ({1})
-    IntegerLe(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) <i ({1})
-    IntegerLt(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) !=i ({1})
-    IntegerNe(Box<Expression<'a>>, Box<Expression<'a>>),
+    /// ({0}) == ({1})
+    Eq(Box<Expression<'a>>, Box<Expression<'a>>),
+    /// ({0}) != ({1})
+    Ne(Box<Expression<'a>>, Box<Expression<'a>>),
+    /// ({0}) >= ({1})
+    Ge(Box<Expression<'a>>, Box<Expression<'a>>),
+    /// ({0}) > ({1})
+    Gt(Box<Expression<'a>>, Box<Expression<'a>>),
+    /// ({0}) <= ({1})
+    Le(Box<Expression<'a>>, Box<Expression<'a>>),
+    /// ({0}) < ({1})
+    Lt(Box<Expression<'a>>, Box<Expression<'a>>),
 }
 
 pub fn convert_code_to_stackless<'a>(
@@ -237,15 +225,6 @@ pub fn convert_code_to_stackless<'a>(
         }
     }
 
-    // For every exception handler applying to a range [start; end), we insert a Catchpad
-    // instruction at `end`. This is roughly where we'll insert `catch (...)`. Catchpad does not
-    // have any operational semantics and is exclusively used to nudge arrow extension to generate
-    // blocks that are easier to cover with the fewest amount of `try`..`catch` statements.
-    let exception_handler_ends: HashSet<u32> = code
-        .exception_handlers()
-        .map(|handler| handler.end().as_u32())
-        .collect();
-
     // Transform instructions to the AST form. We couldn't do that during DFS because we need to
     // retain the order, and we couldn't fill an array because some opcodes map to multiple AST
     // statements.
@@ -255,10 +234,6 @@ pub fn convert_code_to_stackless<'a>(
     let mut statements = Vec::new();
     let mut insn_to_statement_index = vec![usize::MAX; instructions.len()];
     for (address, insn) in instructions.iter().enumerate() {
-        if exception_handler_ends.contains(&(address as u32)) {
-            statements.push(Statement::Catchpad);
-        }
-
         let Some((insn, _)) = insn else {
             continue;
         };
@@ -302,7 +277,6 @@ pub fn convert_code_to_stackless<'a>(
                 }
                 *default = insn_to_statement_index[*default];
             }
-            Statement::Catchpad => {}
         }
     }
 

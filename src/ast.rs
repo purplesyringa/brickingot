@@ -245,6 +245,12 @@ pub enum BinOp {
     Shr,
     UnsignedShr,
     Compare { fp_negative_on_nan: bool },
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 impl Display for BinOp {
@@ -269,6 +275,12 @@ impl Display for BinOp {
             Self::Compare {
                 fp_negative_on_nan: true,
             } => write!(f, "<=>neg"),
+            Self::Eq => write!(f, "=="),
+            Self::Ne => write!(f, "!="),
+            Self::Lt => write!(f, "<"),
+            Self::Le => write!(f, "<="),
+            Self::Gt => write!(f, ">"),
+            Self::Ge => write!(f, ">="),
         }
     }
 }
@@ -287,9 +299,11 @@ pub enum VariableNamespace {
     Stack,
     /// tmp
     Temporary,
+    /// selector
+    Selector,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Str<'a>(pub &'a MStr);
 
 impl Display for Str<'_> {

@@ -217,6 +217,10 @@ fn zero<'a>() -> Box<Expression<'a>> {
     Box::new(Expression::ConstInt(0))
 }
 
+fn null<'a>() -> Box<Expression<'a>> {
+    Box::new(Expression::Null)
+}
+
 fn field<'a>(object: Option<Box<Expression<'a>>>, field: &FieldRef<'a>) -> Box<Expression<'a>> {
     Box::new(Expression::Field(Field {
         object,
@@ -367,7 +371,7 @@ pub fn convert_instruction_to_unstructured_ast<'a>(
         DStore3 | LStore3 => stmts.push(assign(slot(3), stack.pop2()?)),
 
         // Constants
-        AConstNull => stmts.push(stack.push(Box::new(Expression::Null))),
+        AConstNull => stmts.push(stack.push(null())),
         BIPush { value } => stmts.push(stack.push(Box::new(Expression::ConstByte(*value)))),
         SIPush { value } => stmts.push(stack.push(Box::new(Expression::ConstShort(*value)))),
         FConst0 => stmts.push(stack.push(Box::new(Expression::ConstFloat(0.0)))),
@@ -653,73 +657,73 @@ pub fn convert_instruction_to_unstructured_ast<'a>(
         IfACmpEq { offset } => {
             let b = stack.pop()?;
             let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::ReferenceEq(a, b), *offset as i32));
+            stmts.push(jump(JumpCondition::Eq(a, b), *offset as i32));
         }
         IfACmpNe { offset } => {
             let b = stack.pop()?;
             let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::ReferenceNe(a, b), *offset as i32));
+            stmts.push(jump(JumpCondition::Ne(a, b), *offset as i32));
         }
         IfICmpEq { offset } => {
             let b = stack.pop()?;
             let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::IntegerEq(a, b), *offset as i32));
+            stmts.push(jump(JumpCondition::Eq(a, b), *offset as i32));
         }
         IfICmpNe { offset } => {
             let b = stack.pop()?;
             let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::IntegerNe(a, b), *offset as i32));
+            stmts.push(jump(JumpCondition::Ne(a, b), *offset as i32));
         }
         IfICmpLt { offset } => {
             let b = stack.pop()?;
             let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::IntegerLt(a, b), *offset as i32));
+            stmts.push(jump(JumpCondition::Lt(a, b), *offset as i32));
         }
         IfICmpGe { offset } => {
             let b = stack.pop()?;
             let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::IntegerGe(a, b), *offset as i32));
+            stmts.push(jump(JumpCondition::Ge(a, b), *offset as i32));
         }
         IfICmpGt { offset } => {
             let b = stack.pop()?;
             let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::IntegerGt(a, b), *offset as i32));
+            stmts.push(jump(JumpCondition::Gt(a, b), *offset as i32));
         }
         IfICmpLe { offset } => {
             let b = stack.pop()?;
             let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::IntegerLe(a, b), *offset as i32));
+            stmts.push(jump(JumpCondition::Le(a, b), *offset as i32));
         }
         IfEq { offset } => stmts.push(jump(
-            JumpCondition::IntegerEq(stack.pop()?, zero()),
+            JumpCondition::Eq(stack.pop()?, zero()),
             *offset as i32,
         )),
         IfNe { offset } => stmts.push(jump(
-            JumpCondition::IntegerNe(stack.pop()?, zero()),
+            JumpCondition::Ne(stack.pop()?, zero()),
             *offset as i32,
         )),
         IfLt { offset } => stmts.push(jump(
-            JumpCondition::IntegerLt(stack.pop()?, zero()),
+            JumpCondition::Lt(stack.pop()?, zero()),
             *offset as i32,
         )),
         IfGe { offset } => stmts.push(jump(
-            JumpCondition::IntegerGe(stack.pop()?, zero()),
+            JumpCondition::Ge(stack.pop()?, zero()),
             *offset as i32,
         )),
         IfGt { offset } => stmts.push(jump(
-            JumpCondition::IntegerGt(stack.pop()?, zero()),
+            JumpCondition::Gt(stack.pop()?, zero()),
             *offset as i32,
         )),
         IfLe { offset } => stmts.push(jump(
-            JumpCondition::IntegerLe(stack.pop()?, zero()),
+            JumpCondition::Le(stack.pop()?, zero()),
             *offset as i32,
         )),
         IfNonNull { offset } => stmts.push(jump(
-            JumpCondition::ReferenceNonNull(stack.pop()?),
+            JumpCondition::Ne(stack.pop()?, null()),
             *offset as i32,
         )),
         IfNull { offset } => stmts.push(jump(
-            JumpCondition::ReferenceNull(stack.pop()?),
+            JumpCondition::Eq(stack.pop()?, null()),
             *offset as i32,
         )),
         LookupSwitch(switch) => stmts.push(Statement::Switch(Switch {

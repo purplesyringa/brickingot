@@ -1,6 +1,6 @@
 use core::cmp::Reverse;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ArrowKind {
     Jump {
         stmt_index: usize,
@@ -12,7 +12,7 @@ pub enum ArrowKind {
     Dispatch,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Arrow {
     pub from: usize,
     pub to: usize,

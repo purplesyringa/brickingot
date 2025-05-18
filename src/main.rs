@@ -1,11 +1,15 @@
+#![cfg_attr(false, no_std)]
+
 mod arrows;
 mod ast;
 mod cfg;
 mod insn2stmt;
 mod instructions;
+mod matcher;
 mod unstructured;
 
-use crate::cfg::{StructurizationError, structurize_cfg};
+use crate::cfg::structurize_cfg;
+use crate::matcher::rewrite_control_flow;
 use crate::unstructured::{StatementGenerationError, convert_code_to_stackless};
 use noak::{
     MStr,
@@ -33,9 +37,6 @@ pub enum MethodDecompileError {
 
     #[error("While generating initial statements: {0}")]
     StatementGeneration(#[from] StatementGenerationError),
-
-    #[error("While structurizing CFG: {0}")]
-    Structurization(#[from] StructurizationError),
 
     #[error("`Code` attribute missing")]
     NoCodeAttribute,
@@ -81,7 +82,8 @@ fn decompile_method(
 
     println!("entered {}", pool.retrieve(method.name())?.display());
     let unstructured_program = convert_code_to_stackless(pool, &code)?;
-    structurize_cfg(unstructured_program)?;
+    let stmt = structurize_cfg(unstructured_program);
+    rewrite_control_flow(stmt);
 
     // method attributes: +Code, Exceptions (§4.7.5), Synthetic (§4.7.8), Signature (§4.7.9), Deprecated (§4.7.15), RuntimeVisibleAnnotations (§4.7.16), RuntimeInvisibleAnnotations (§4.7.17), RuntimeVisibleParameterAnnotations (§4.7.18), RuntimeInvisibleParameterAnnotations (§4.7.19), and AnnotationDefault
     // code attributes: LocalVariableTable (§4.7.13), LocalVariableTypeTable (§4.7.14), and +StackMapTable
@@ -90,9 +92,12 @@ fn decompile_method(
 }
 
 fn main() {
-    let raw_bytes = std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/avx.class")
-        .expect("failed to read class file");
+    // let raw_bytes = std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/avx.class")
+    //     .expect("failed to read class file");
     // let raw_bytes = std::fs::read("/home/purplesyringa/mc/public/vineflower-1.11.1-slim/org/jetbrains/java/decompiler/modules/decompiler/exps/InvocationExprent.class").expect("failed to read class file");
+
+    let raw_bytes = std::fs::read("Test.class").expect("failed to read class file");
+
     if let Err(e) = decompile_class_file(&raw_bytes) {
         panic!("class decompilation failed: {e}");
     }
