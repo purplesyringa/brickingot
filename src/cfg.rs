@@ -14,8 +14,19 @@ pub enum Statement<'a> {
         id: usize,
         children: Vec<Statement<'a>>,
     },
+    DoWhile {
+        id: usize,
+        condition: Box<Expression<'a>>,
+        // This could be simulated by swapping `then_children` and `else_children`, but that
+        // reorders statements and thus complicates AST optimization. It could also be implemented
+        // by updating `condition`, but we occasionally need to invert conditions several times, and
+        // just flicking a bool is simpler.
+        condition_inverted: bool,
+        children: Vec<Statement<'a>>,
+    },
     If {
         condition: Box<Expression<'a>>,
+        condition_inverted: bool,
         then_children: Vec<Statement<'a>>,
         else_children: Vec<Statement<'a>>,
     },
@@ -23,10 +34,10 @@ pub enum Statement<'a> {
         key: Box<Expression<'a>>,
         arms: Vec<(i32, Vec<Statement<'a>>)>,
     },
-    JumpToBlockStart {
+    Continue {
         block_id: usize,
     },
-    JumpToBlockEnd {
+    Break {
         block_id: usize,
     },
     Try {
@@ -52,12 +63,41 @@ impl Statement<'_> {
         match self {
             Self::Basic(_) => panic!("cannot append child to basic statement"),
             Self::Block { children, .. } => children.push(child),
+            Self::DoWhile { .. } => panic!("cannot append child to DoWhile"),
             Self::If { .. } => panic!("cannot append child to If"),
             Self::Switch { .. } => panic!("cannot append child to Switch"),
-            Self::JumpToBlockStart { .. } => panic!("cannot append child to JumpToBlockStart"),
-            Self::JumpToBlockEnd { .. } => panic!("cannot append child to JumpToBlockEnd"),
+            Self::Continue { .. } => panic!("cannot append child to Continue"),
+            Self::Break { .. } => panic!("cannot append child to Break"),
             Self::Try { children, .. } => children.push(child),
             Self::TryRangeMarker { .. } => panic!("cannot append child to TryRangeMarker"),
+        }
+    }
+
+    pub fn all_children_mut<'a>(&'a mut self) -> Box<dyn Iterator<Item = &'a mut Self> + 'a> {
+        match self {
+            Self::Basic(_)
+            | Self::Continue { .. }
+            | Self::Break { .. }
+            | Self::TryRangeMarker { .. } => Box::new(core::iter::empty()),
+            Self::Block { children, .. } | Self::DoWhile { children, .. } => {
+                Box::new(children.iter_mut())
+            }
+            Self::If {
+                then_children,
+                else_children,
+                ..
+            } => Box::new(then_children.iter_mut().chain(else_children.iter_mut())),
+            Self::Switch { arms, .. } => Box::new(
+                arms.iter_mut()
+                    .flat_map(|(_, children)| children.iter_mut()),
+            ),
+            Self::Try { children, catches } => Box::new(
+                children.iter_mut().chain(
+                    catches
+                        .iter_mut()
+                        .flat_map(|catch| catch.children.iter_mut()),
+                ),
+            ),
         }
     }
 }
@@ -71,14 +111,39 @@ impl Display for Statement<'_> {
                 for child in children {
                     write!(f, "{child}\n")?;
                 }
-                write!(f, "}} block #{id}")
+                write!(f, "}} block #{id};")
+            }
+            Self::DoWhile {
+                id,
+                condition,
+                condition_inverted,
+                children,
+            } => {
+                write!(f, "do #{id} {{\n")?;
+                for child in children {
+                    write!(f, "{child}\n")?;
+                }
+                write!(f, "}} while (")?;
+                if *condition_inverted {
+                    write!(f, "!({condition})")?;
+                } else {
+                    write!(f, "{condition}")?;
+                }
+                write!(f, ") #{id};")
             }
             Self::If {
                 condition,
+                condition_inverted,
                 then_children,
                 else_children,
             } => {
-                write!(f, "if ({condition}) {{\n")?;
+                write!(f, "if (")?;
+                if *condition_inverted {
+                    write!(f, "!({condition})")?;
+                } else {
+                    write!(f, "{condition}")?;
+                }
+                write!(f, " {{\n")?;
                 for child in then_children {
                     write!(f, "{child}\n")?;
                 }
@@ -98,8 +163,8 @@ impl Display for Statement<'_> {
                 }
                 write!(f, "}}")
             }
-            Self::JumpToBlockStart { block_id } => write!(f, "continue #{block_id};"),
-            Self::JumpToBlockEnd { block_id } => write!(f, "break #{block_id};"),
+            Self::Continue { block_id } => write!(f, "continue #{block_id};"),
+            Self::Break { block_id } => write!(f, "break #{block_id};"),
             Self::Try { children, catches } => {
                 write!(f, "try {{\n")?;
                 for child in children {
@@ -133,6 +198,145 @@ fn selector<'a>() -> Box<Expression<'a>> {
 }
 
 pub fn structurize_cfg(mut program_in: unstructured::Program<'_>) -> Statement<'_> {
+    // The base of our approach to recovering structured control flow is borrowed from the following
+    // paper:
+    //
+    //     Lyle Ramshaw. 1988. Eliminating go to's while preserving program structure.
+    //     J. ACM 35, 4 (Oct. 1988), 893–920. https://doi.org/10.1145/48014.48021
+    //
+    // Let's introduce some terminology very quickly. A *gap* is a location between consecutive
+    // statements. Gap #N corresponds to the gap right before statement #N. An *arrow* is an ordered
+    // pair of gaps, written `x -> y`. `x` cannot equal `y`, but can be greater or lesser.
+    // Statements are written in lines, and so arrows are drawn vertically. An arrow with `x < y` is
+    // called a *downward* or *forward* arrow, and an arrow with `x > y` is called an *upward* or
+    // *backward* arrow. Forward/backward arrows will occasionally be drawn pointing to the
+    // right/left (respectively) for terseness.
+    //
+    // The basic idea is that the control flow of a program can be described as a set of arrows,
+    // where the presence of an arrow `x -> y` allows any statement located between the gaps `x` and
+    // `y` to jump to gap `y`. For example, here's the arrow set for a sample program:
+    //
+    //     print(1);
+    //     goto b;      |
+    // a:  print(2);    v ^
+    // b:  print(3);      |
+    //     goto a;        |
+    //
+    // The crux of the matter is that, as long as the arrows form a tree (i.e. any two arrows that
+    // intersect are nested), the program can be rewritten to not use `goto`. This is achieved by
+    // wrapping the contents of each arrow within `while (true) { ... break; }` and replacing each
+    // upward jump with a (possibly multi-level) `continue` and each downward jump with a (possibly
+    // multi-level) `break`.
+    //
+    // To handle *conflicts* between two intersecting non-nested arrows, we separate the conflicts
+    // into four categories depending on which end the arrows collide on:
+    // 1. Forward conflict:
+    //     -------->
+    //       --------->
+    // 2. Backward conflict:
+    //     <--------
+    //       <---------
+    // 3. Tail-to-tail conflict:
+    //     <--------
+    //       --------->
+    // 4. Head-to-head conflict:
+    //     -------->
+    //       <---------
+    // In the first three cases, the conflict can be resolved by extending some arrow's tail. As
+    // this does not invalidate any jumps (only enables new ones), this operation is valid with
+    // respect to control flow structurization.
+    //
+    // The head-to-head case is noticeably more difficult: no amount of tail extension can fix them.
+    // This corresponds to irreducible control flow that cannot be structurized without duplicating
+    // code, adding synthetic variables, or reordering statements (which we might want to do
+    // earlier, but certaily not now -- and it only works up to a point). Code duplication can lead
+    // to an exponential code size increase and tends to make code with tricky control flow harder
+    // to read anyway, so this leaves us with synthetic variables as the only solution.
+    //
+    // To be specific, head-to-head conflicts are rewritten as follows:
+    //     -------->     normal arrow
+    //       <---------  normal arrow
+    //          ||
+    //          vv
+    //     -------->     normal arrow
+    //     <-----------  jump to dispatcher
+    //     ->            dispatch
+    // A *dispatcher* is inserted at the gap corresponding to the tail of the forward arrow. The
+    // dispatcher reads a synthetic variable where to dispatch, or whether normal control flow needs
+    // to be performed. The synthetic variable is set on each entry to dispatch.
+    //
+    // This covers code generation in principle, but this approach requires major adjustments. The
+    // core of the problem is that *not all arrows in the input must create blocks*. For example, in
+    // a snippet like
+    //     a: loop {
+    //         ...
+    //         if or while ... {
+    //             ...
+    //             break a; or continue a;
+    //             ...
+    //         }
+    //         ...
+    //     }
+    // it's important that the nested block does not get corrupted due to its arrow being extended
+    // to ot conflict with the `break`/`continue` arrow.
+    //
+    //
+    // Consider the following snippet:
+    //     while (cond1) {      ^ |   ^
+    //         f();             | |   |
+    //         if (cond2) {     | | | |
+    //             g();         | | | |
+    //             continue;    | | | |
+    //         }                | | v
+    //         h();             | |
+    //     }                    | v
+    // The arrows here are only approximate, but demonstrate the problem: a conflict arises between
+    // `continue` and the `if` statement it's contained in. If the downward arrow is extended during
+    // treeification, it can no longer be decoded as an `if` statement.
+    //
+    // even if the
+    // `continue` arrow-block is later optimized out, resulting in the following ugly decompilation
+    // output:
+    //     block #1 {
+    //         block #2 {
+    //             if (!cond1) break #1;
+    //             f();
+    //             if (!cond2) break #2;
+    //             g();
+    //             continue #1;
+    //         }
+    //         g();
+    //         continue #1;
+    //     }
+    //
+    //     outer: block {
+    //         f();
+    //         inner: block {
+    //             if (cond1) {
+    //                 break inner;
+    //             }
+    //             g();
+    //             if (cond2) {
+    //                 continue outer;
+    //             }
+    //         }
+    //     }
+    // Note that `if (cond2)` is not a direct child of the outer block, meaning that the `do..while`
+    // loop won't be recovered. Meanwhile, the inner block matches the structure of an `if`
+    // statement, eventually resulting in the following decompilation:
+    //     while (true) {
+    //         f();
+    //         if (!cond1) {
+    //             g();
+    //             if (cond2) {
+    //                 continue;
+    //             }
+    //         }
+    //         break;
+    //     }
+    // There is no atomic rewrite that simplifies this logic: only a particular combination of
+    // rewrites does, and automatically finding such a combination is computationally difficult.
+
     // Arrows are ordered pairs `(x, y)`, written `x -> y` or `y <- x`, indicating "travelling"
     // between gaps. A gap is the space between two statements; the index of a gap is the index of
     // the statement immediately following it. The presence of an arrow `x -> y` indicates that
@@ -430,6 +634,79 @@ pub fn structurize_cfg(mut program_in: unstructured::Program<'_>) -> Statement<'
     // machine, we minimize the impact.
     extend_arrows(&mut arrows);
 
+    // Mapping arrows to structured control flow blocks is trickier than it seems. While some arrows
+    // are produced from real control flow blocks in source code, others are a product of a `break`
+    // or `continue` statement. There is no local way (i.e. without considering interactions with
+    // other arrows) to determine whether an unconditional downward jump was lowered from `break` or
+    // is a part of an `if..else` block lowering, and there's no local way to figure out if
+    // an unconditional upward jump means `continue` or is the ending of a `while` loop.
+    //
+    // Producing a subpar AST and then applying rewrites is not an option either due to the logical
+    // complexity of the rewrites. When decompiled in a straightforward manner, a simple snippet
+    // like:
+    //     do {
+    //         f();
+    //         if (cond1) {
+    //             break;
+    //         }
+    //         g();
+    //     } while (cond2);
+    // ...will be interpreted as:
+    //     outer: block {
+    //         f();
+    //         inner: block {
+    //             if (cond1) {
+    //                 break inner;
+    //             }
+    //             g();
+    //             if (cond2) {
+    //                 continue outer;
+    //             }
+    //         }
+    //     }
+    // Note that `if (cond2)` is not a direct child of the outer block, meaning that the `do..while`
+    // loop won't be recovered. Meanwhile, the inner block matches the structure of an `if`
+    // statement, eventually resulting in the following decompilation:
+    //     while (true) {
+    //         f();
+    //         if (!cond1) {
+    //             g();
+    //             if (cond2) {
+    //                 continue;
+    //             }
+    //         }
+    //         break;
+    //     }
+    // There is no atomic rewrite that simplifies this logic: only a particular combination of
+    // rewrites does, and automatically finding such a combination is computationally difficult.
+    //
+    // It may seem like this problem can be resolved by merging nested arrows with equal heads, but
+    // that isn't true either. Consider a snippet:
+    //     if (cond1) {
+    //         f();
+    //         if (cond2) {
+    //             g();
+    //         }
+    //     }
+    // In compiled code, the conditional jumps `if (!cond1) goto ...;` and `if (!cond2) goto ...;`
+    // point to the same address. If such arrows were merged, the code would get decompiled to:
+    //     do {
+    //         if (!cond1) {
+    //             break;
+    //         }
+    //         f();
+    //         if (!cond2) {
+    //             break;
+    //         }
+    //         g();
+    //     } while (false);
+    //
+    // Decompiling the code correctly requires taking context into account. The idea is that the
+    // right way to decompile an arrow depends exclusively on control flow blocks it's contained in,
+    // and thus code can be decompiled recursively over arrows. In particular, arrows corresponding
+    // to statements that can be decompiled to `continue;` or `break;` from an active block don't
+    // need to create a block themselves, meaning that .
+
     // Arrows can be directly mapped onto structured control flow blocks. This does not immediately
     // produce a beautiful result, but we can prettify the code at a later stage, when an AST is
     // already built. This is a little inefficient, but the interaction with exceptions and the
@@ -502,11 +779,11 @@ pub fn structurize_cfg(mut program_in: unstructured::Program<'_>) -> Statement<'
 
                     last_block_id += 1;
                     if is_down {
-                        jump_impl.push(Statement::JumpToBlockEnd {
+                        jump_impl.push(Statement::Break {
                             block_id: last_block_id,
                         });
                     } else {
-                        jump_impl.push(Statement::JumpToBlockStart {
+                        jump_impl.push(Statement::Continue {
                             block_id: last_block_id,
                         });
                     }
@@ -544,7 +821,7 @@ pub fn structurize_cfg(mut program_in: unstructured::Program<'_>) -> Statement<'
                                 children: Vec::new(),
                                 catches: vec![Catch {
                                     class: handler.class,
-                                    children: vec![Statement::JumpToBlockStart {
+                                    children: vec![Statement::Continue {
                                         block_id: last_block_id,
                                     }],
                                     active_range,
@@ -593,7 +870,7 @@ pub fn structurize_cfg(mut program_in: unstructured::Program<'_>) -> Statement<'
                                     target: selector(),
                                     value: Box::new(Expression::ConstInt(-1)),
                                 }),
-                                Statement::JumpToBlockEnd {
+                                Statement::Break {
                                     block_id: dispatch_to_block[successor],
                                 },
                             ],
@@ -619,6 +896,21 @@ pub fn structurize_cfg(mut program_in: unstructured::Program<'_>) -> Statement<'
                     .remove(&(index, 0))
                     .expect("missing jump arrow");
 
+                let (lhs, rhs, op) = match condition {
+                    JumpCondition::Always => {
+                        for stmt in jump_impl {
+                            root.append_child(stmt);
+                        }
+                        continue;
+                    }
+                    JumpCondition::Eq(a, b) => (a, b, BinOp::Eq),
+                    JumpCondition::Ne(a, b) => (a, b, BinOp::Ne),
+                    JumpCondition::Ge(a, b) => (a, b, BinOp::Ge),
+                    JumpCondition::Gt(a, b) => (a, b, BinOp::Gt),
+                    JumpCondition::Le(a, b) => (a, b, BinOp::Le),
+                    JumpCondition::Lt(a, b) => (a, b, BinOp::Lt),
+                };
+
                 // In a normal situation,
                 //     if (cond) {
                 //         // then body
@@ -631,26 +923,10 @@ pub fn structurize_cfg(mut program_in: unstructured::Program<'_>) -> Statement<'
                 //     goto endif;
                 //     else_body: // else body
                 //     endif:
-                // meaning that the condition needs to be inverted during decompilation. Note that
-                // jump conditions only apply to integers and references, so this rewrite doesn't
-                // have to consider floating-point numbers.
-                let (lhs, rhs, op) = match condition {
-                    JumpCondition::Always => {
-                        for stmt in jump_impl {
-                            root.append_child(stmt);
-                        }
-                        continue;
-                    }
-                    JumpCondition::Eq(a, b) => (a, b, BinOp::Ne),
-                    JumpCondition::Ne(a, b) => (a, b, BinOp::Eq),
-                    JumpCondition::Ge(a, b) => (a, b, BinOp::Lt),
-                    JumpCondition::Gt(a, b) => (a, b, BinOp::Le),
-                    JumpCondition::Le(a, b) => (a, b, BinOp::Gt),
-                    JumpCondition::Lt(a, b) => (a, b, BinOp::Ge),
-                };
-
+                // meaning that the condition needs to be inverted during decompilation.
                 root.append_child(Statement::If {
                     condition: Box::new(Expression::BinOp { lhs, rhs, op }),
+                    condition_inverted: true,
                     then_children: Vec::new(),
                     else_children: jump_impl,
                 });
