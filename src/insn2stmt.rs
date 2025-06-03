@@ -3,7 +3,7 @@ use crate::ast::{
     UnaryOp, VariableNamespace,
 };
 use crate::instructions::{is_double_width, is_type_descriptor_double_width};
-use crate::unstructured::{JumpCondition, Statement, Switch};
+use crate::unstructured::{Statement, Switch};
 use noak::{
     descriptor::{MethodDescriptor, TypeDescriptor},
     error::DecodeError,
@@ -217,6 +217,10 @@ fn zero<'a>() -> Box<Expression<'a>> {
     Box::new(Expression::ConstInt(0))
 }
 
+fn one<'a>() -> Box<Expression<'a>> {
+    Box::new(Expression::ConstInt(1))
+}
+
 fn null<'a>() -> Box<Expression<'a>> {
     Box::new(Expression::Null)
 }
@@ -250,7 +254,7 @@ pub fn convert_instruction_to_unstructured_ast<'a>(
 
     let offset_to_address = |offset: i32| -> u32 { (address as i32 + offset) as u32 };
 
-    let jump = |condition: JumpCondition<'a>, offset: i32| -> Statement<'a> {
+    let jump = |condition: Box<Expression<'a>>, offset: i32| -> Statement<'a> {
         Statement::Jump {
             condition,
             // The preparsing steps ensures all goto destinations are valid instruction addresses.
@@ -652,83 +656,171 @@ pub fn convert_instruction_to_unstructured_ast<'a>(
         Return => stmts.push(Statement::Basic(BasicStatement::ReturnVoid)),
 
         // Jumps
-        Goto { offset } => stmts.push(jump(JumpCondition::Always, *offset as i32)),
-        GotoW { offset } => stmts.push(jump(JumpCondition::Always, *offset)),
+        Goto { offset } => stmts.push(jump(one(), *offset as i32)),
+        GotoW { offset } => stmts.push(jump(one(), *offset)),
         IfACmpEq { offset } => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::Eq(a, b), *offset as i32));
+            let rhs = stack.pop()?;
+            let lhs = stack.pop()?;
+            stmts.push(jump(
+                Box::new(Expression::BinOp {
+                    lhs,
+                    rhs,
+                    op: BinOp::Eq,
+                }),
+                *offset as i32,
+            ));
         }
         IfACmpNe { offset } => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::Ne(a, b), *offset as i32));
+            let rhs = stack.pop()?;
+            let lhs = stack.pop()?;
+            stmts.push(jump(
+                Box::new(Expression::BinOp {
+                    lhs,
+                    rhs,
+                    op: BinOp::Ne,
+                }),
+                *offset as i32,
+            ));
         }
         IfICmpEq { offset } => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::Eq(a, b), *offset as i32));
+            let rhs = stack.pop()?;
+            let lhs = stack.pop()?;
+            stmts.push(jump(
+                Box::new(Expression::BinOp {
+                    lhs,
+                    rhs,
+                    op: BinOp::Eq,
+                }),
+                *offset as i32,
+            ));
         }
         IfICmpNe { offset } => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::Ne(a, b), *offset as i32));
+            let rhs = stack.pop()?;
+            let lhs = stack.pop()?;
+            stmts.push(jump(
+                Box::new(Expression::BinOp {
+                    lhs,
+                    rhs,
+                    op: BinOp::Ne,
+                }),
+                *offset as i32,
+            ));
         }
         IfICmpLt { offset } => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::Lt(a, b), *offset as i32));
+            let rhs = stack.pop()?;
+            let lhs = stack.pop()?;
+            stmts.push(jump(
+                Box::new(Expression::BinOp {
+                    lhs,
+                    rhs,
+                    op: BinOp::Lt,
+                }),
+                *offset as i32,
+            ));
         }
         IfICmpGe { offset } => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::Ge(a, b), *offset as i32));
+            let rhs = stack.pop()?;
+            let lhs = stack.pop()?;
+            stmts.push(jump(
+                Box::new(Expression::BinOp {
+                    lhs,
+                    rhs,
+                    op: BinOp::Ge,
+                }),
+                *offset as i32,
+            ));
         }
         IfICmpGt { offset } => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::Gt(a, b), *offset as i32));
+            let rhs = stack.pop()?;
+            let lhs = stack.pop()?;
+            stmts.push(jump(
+                Box::new(Expression::BinOp {
+                    lhs,
+                    rhs,
+                    op: BinOp::Gt,
+                }),
+                *offset as i32,
+            ));
         }
         IfICmpLe { offset } => {
-            let b = stack.pop()?;
-            let a = stack.pop()?;
-            stmts.push(jump(JumpCondition::Le(a, b), *offset as i32));
+            let rhs = stack.pop()?;
+            let lhs = stack.pop()?;
+            stmts.push(jump(
+                Box::new(Expression::BinOp {
+                    lhs,
+                    rhs,
+                    op: BinOp::Le,
+                }),
+                *offset as i32,
+            ));
         }
         IfEq { offset } => stmts.push(jump(
-            JumpCondition::Eq(stack.pop()?, zero()),
+            Box::new(Expression::BinOp {
+                lhs: stack.pop()?,
+                rhs: zero(),
+                op: BinOp::Eq,
+            }),
             *offset as i32,
         )),
         IfNe { offset } => stmts.push(jump(
-            JumpCondition::Ne(stack.pop()?, zero()),
+            Box::new(Expression::BinOp {
+                lhs: stack.pop()?,
+                rhs: zero(),
+                op: BinOp::Ne,
+            }),
             *offset as i32,
         )),
         IfLt { offset } => stmts.push(jump(
-            JumpCondition::Lt(stack.pop()?, zero()),
+            Box::new(Expression::BinOp {
+                lhs: stack.pop()?,
+                rhs: zero(),
+                op: BinOp::Lt,
+            }),
             *offset as i32,
         )),
         IfGe { offset } => stmts.push(jump(
-            JumpCondition::Ge(stack.pop()?, zero()),
+            Box::new(Expression::BinOp {
+                lhs: stack.pop()?,
+                rhs: zero(),
+                op: BinOp::Ge,
+            }),
             *offset as i32,
         )),
         IfGt { offset } => stmts.push(jump(
-            JumpCondition::Gt(stack.pop()?, zero()),
+            Box::new(Expression::BinOp {
+                lhs: stack.pop()?,
+                rhs: zero(),
+                op: BinOp::Gt,
+            }),
             *offset as i32,
         )),
         IfLe { offset } => stmts.push(jump(
-            JumpCondition::Le(stack.pop()?, zero()),
+            Box::new(Expression::BinOp {
+                lhs: stack.pop()?,
+                rhs: zero(),
+                op: BinOp::Le,
+            }),
             *offset as i32,
         )),
         IfNonNull { offset } => stmts.push(jump(
-            JumpCondition::Ne(stack.pop()?, null()),
+            Box::new(Expression::BinOp {
+                lhs: stack.pop()?,
+                rhs: null(),
+                op: BinOp::Ne,
+            }),
             *offset as i32,
         )),
         IfNull { offset } => stmts.push(jump(
-            JumpCondition::Eq(stack.pop()?, null()),
+            Box::new(Expression::BinOp {
+                lhs: stack.pop()?,
+                rhs: null(),
+                op: BinOp::Eq,
+            }),
             *offset as i32,
         )),
         LookupSwitch(switch) => stmts.push(Statement::Switch(Switch {
             key: stack.pop()?,
-            successors: switch
+            arms: switch
                 .pairs()
                 .map(|pair| (pair.key(), offset_to_address(pair.offset()) as usize))
                 .collect(),
@@ -736,7 +828,7 @@ pub fn convert_instruction_to_unstructured_ast<'a>(
         })),
         TableSwitch(switch) => stmts.push(Statement::Switch(Switch {
             key: stack.pop()?,
-            successors: switch
+            arms: switch
                 .pairs()
                 .map(|pair| (pair.key(), offset_to_address(pair.offset()) as usize))
                 .collect(),

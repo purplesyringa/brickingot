@@ -74,7 +74,7 @@ pub enum Statement<'a> {
     Basic(BasicStatement<'a>),
     /// if ({condition}) jump {target};
     Jump {
-        condition: JumpCondition<'a>,
+        condition: Box<Expression<'a>>,
         target: usize,
     },
     /// {0}
@@ -84,15 +84,15 @@ pub enum Statement<'a> {
 #[derive(Debug)]
 pub struct Switch<'a> {
     pub key: Box<Expression<'a>>,
-    pub successors: Vec<(i32, usize)>,
+    pub arms: Vec<(i32, usize)>,
     pub default: usize,
 }
 
 impl Display for Switch<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "switch ({}) ", self.key)?;
-        for (value, successor) in &self.successors {
-            write!(f, "{value} => jump {successor}; ")?;
+        for (value, target) in &self.arms {
+            write!(f, "{value} => jump {target}; ")?;
         }
         write!(f, "default => jump {};", self.default)
     }
@@ -118,24 +118,6 @@ impl Display for ExceptionHandler<'_> {
             self.target,
         )
     }
-}
-
-#[derive(Debug, Display)]
-pub enum JumpCondition<'a> {
-    /// true
-    Always,
-    /// ({0}) == ({1})
-    Eq(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) != ({1})
-    Ne(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) >= ({1})
-    Ge(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) > ({1})
-    Gt(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) <= ({1})
-    Le(Box<Expression<'a>>, Box<Expression<'a>>),
-    /// ({0}) < ({1})
-    Lt(Box<Expression<'a>>, Box<Expression<'a>>),
 }
 
 pub fn convert_code_to_stackless<'a>(
@@ -267,13 +249,9 @@ pub fn convert_code_to_stackless<'a>(
         match stmt {
             Statement::Basic(_) => {}
             Statement::Jump { target, .. } => *target = insn_to_statement_index[*target],
-            Statement::Switch(Switch {
-                successors,
-                default,
-                ..
-            }) => {
-                for (_, successor) in successors {
-                    *successor = insn_to_statement_index[*successor];
+            Statement::Switch(Switch { arms, default, .. }) => {
+                for (_, target) in arms {
+                    *target = insn_to_statement_index[*target];
                 }
                 *default = insn_to_statement_index[*default];
             }
