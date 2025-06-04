@@ -10,8 +10,9 @@ use noak::{
     reader::{
         attributes::{ArrayType, RawInstruction},
         cpool::{
-            self, ConstantPool, Dynamic, Index, InterfaceMethodRef, Item, MethodHandle, MethodRef,
+            self,
             value::{FieldRef, NameAndType},
+            ConstantPool, Dynamic, Index, InterfaceMethodRef, Item, MethodHandle, MethodRef,
         },
     },
 };
@@ -468,8 +469,8 @@ pub fn convert_instruction_to_unstructured_ast<'a>(
         IAdd => stmts.push(stack.arith_binop(BinOp::Add, PrimitiveType::Int)?),
         ISub => stmts.push(stack.arith_binop(BinOp::Sub, PrimitiveType::Int)?),
         IMul => stmts.push(stack.arith_binop(BinOp::Mul, PrimitiveType::Int)?),
-        IDiv => stmts.push(stack.arith_binop(BinOp::Div { is_fp: true }, PrimitiveType::Int)?),
-        IRem => stmts.push(stack.arith_binop(BinOp::Rem { is_fp: true }, PrimitiveType::Int)?),
+        IDiv => stmts.push(stack.arith_binop(BinOp::Div { is_fp: false }, PrimitiveType::Int)?),
+        IRem => stmts.push(stack.arith_binop(BinOp::Rem { is_fp: false }, PrimitiveType::Int)?),
         LAdd => stmts.push(stack.arith_binop(BinOp::Add, PrimitiveType::Long)?),
         LSub => stmts.push(stack.arith_binop(BinOp::Sub, PrimitiveType::Long)?),
         LMul => stmts.push(stack.arith_binop(BinOp::Mul, PrimitiveType::Long)?),
