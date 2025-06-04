@@ -416,48 +416,57 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> CodeInfo {
     code_info
 }
 
-fn retain_with_is_last<T>(vec: &mut Vec<T>, mut f: impl FnMut(bool, &mut T) -> bool) {
-    let mut elements_left = vec.len();
-    vec.retain_mut(|value| {
-        elements_left -= 1;
-        f(elements_left == 0, value)
-    });
+fn iterate_with_is_last<T>(vec: Vec<T>) -> impl Iterator<Item = (bool, T)> {
+    let len = vec.len();
+    vec.into_iter()
+        .enumerate()
+        .map(move |(i, element)| (i == len - 1, element))
 }
 
-fn remove_redundant_breaks(
-    stmt: &mut Statement<'_>,
+// Also removes redundant breaks and unused blocks
+fn remove_breaks_and_blocks<'a>(
+    mut stmt: Statement<'a>,
     fallthrough_breaks_from: Option<usize>,
-) -> bool {
-    match stmt {
-        Statement::Basic(_) | Statement::Continue { .. } => true,
-        Statement::Block { id, children } => {
-            retain_with_is_last(children, |is_last, child| {
-                remove_redundant_breaks(
-                    child,
-                    is_last.then_some(fallthrough_breaks_from.unwrap_or(*id)),
-                )
-            });
-            true
+    out: &mut Vec<Statement<'a>>,
+) -> BlockUses {
+    let uses = match stmt {
+        Statement::Basic(_) => BlockUses::new(),
+
+        Statement::Block {
+            id,
+            ref mut children,
+        } => {
+            let mut uses =
+                remove_breaks_and_blocks_in_list(children, fallthrough_breaks_from.or(Some(id)));
+            if uses.take(id) == (0, 0) {
+                out.extend(core::mem::take(children));
+                return uses;
+            }
+            uses
         }
+
         Statement::If {
-            then_children,
-            else_children,
+            ref mut then_children,
+            ref mut else_children,
             ..
         } => {
-            for children in [then_children, else_children] {
-                retain_with_is_last(children, |is_last, child| {
-                    remove_redundant_breaks(child, fallthrough_breaks_from.filter(|_| is_last))
-                });
-            }
-            true
+            let mut uses = remove_breaks_and_blocks_in_list(then_children, fallthrough_breaks_from);
+            uses.merge(remove_breaks_and_blocks_in_list(
+                else_children,
+                fallthrough_breaks_from,
+            ));
+            uses
         }
-        Statement::Switch { id, arms, .. } => {
+
+        Statement::Switch {
+            id, ref mut arms, ..
+        } => {
             // Immediately remove arms equivalent to `break`, i.e. those starting with `break` or
             // empty ones eventually followed by `break`. These are usually just implicit
             // `default: break;` arms. Curiously, such arms don't have to be consecutive even though
             // they jump to the same statement, as these jumps may have been inlined from different
             // regions.
-            let effective_block_id = fallthrough_breaks_from.unwrap_or(*id);
+            let effective_block_id = fallthrough_breaks_from.unwrap_or(id);
 
             let mut filtered_arms: Vec<(Option<i32>, Vec<Statement<'_>>)> = Vec::new();
             for arm in core::mem::take(arms) {
@@ -473,30 +482,63 @@ fn remove_redundant_breaks(
             while filtered_arms.pop_if(|arm| arm.1.is_empty()).is_some() {}
             *arms = filtered_arms;
 
-            retain_with_is_last(arms, |is_last_arm, (_, children)| {
-                retain_with_is_last(children, |is_last_child, child| {
-                    remove_redundant_breaks(
-                        child,
-                        (is_last_arm && is_last_child).then_some(effective_block_id),
-                    )
-                });
-                true
-            });
+            let mut uses = BlockUses::new();
+            let n_arms = arms.len();
+            for (i, (_, children)) in arms.iter_mut().enumerate() {
+                let is_last_arm = i == n_arms - 1;
+                uses.merge(remove_breaks_and_blocks_in_list(
+                    children,
+                    is_last_arm.then_some(effective_block_id),
+                ));
+            }
 
-            true
+            uses.take(id); // not necessary, but helps clean up the data flow a bit
+
+            uses
         }
-        Statement::Break { block_id } => fallthrough_breaks_from != Some(*block_id),
-    }
+
+        Statement::Continue { block_id } => BlockUses::from_continue(block_id),
+
+        Statement::Break { block_id } => {
+            if fallthrough_breaks_from == Some(block_id) {
+                return BlockUses::new();
+            }
+            BlockUses::from_break(block_id)
+        }
+    };
+
+    out.push(stmt);
+    uses
 }
 
-pub fn rewrite_control_flow(stmts: &mut [Statement<'_>]) {
-    for stmt in stmts {
-        rewrite_conditionals_in_stmt(stmt);
-        assert!(remove_redundant_breaks(stmt, None), "top-level break");
+fn remove_breaks_and_blocks_in_list(
+    stmts: &mut Vec<Statement<'_>>,
+    fallthrough_breaks_from: Option<usize>,
+) -> BlockUses {
+    let mut uses = BlockUses::new();
+    let mut new_stmts = Vec::new();
+    for (is_last, stmt) in iterate_with_is_last(core::mem::take(stmts)) {
+        uses.merge(remove_breaks_and_blocks(
+            stmt,
+            if is_last {
+                fallthrough_breaks_from
+            } else {
+                None
+            },
+            &mut new_stmts,
+        ));
     }
+    *stmts = new_stmts;
+    uses
+}
+
+pub fn rewrite_control_flow(stmts: &mut Vec<Statement<'_>>) {
+    for stmt in &mut *stmts {
+        rewrite_conditionals_in_stmt(stmt);
+    }
+    remove_breaks_and_blocks_in_list(stmts, None);
 
     // TODO:
-    // Remove unreferenced blocks. All blocks left are necessary and need to be transformed to loops
-    // -- that can cover `do`..`while` and leave everything else as plain `while (true)`. No plain
-    // blocks should be left after that.
+    // All blocks left need to be transformed to loops -- that can cover `do`..`while` and leave
+    // everything else as plain `while (true)`. No plain blocks should be left after that.
 }
