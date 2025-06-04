@@ -12,21 +12,22 @@ pub enum Statement<'a> {
         id: usize,
         children: Vec<Statement<'a>>,
     },
-    // DoWhile {
-    //     id: usize,
-    //     condition: Box<Expression<'a>>,
-    //     // This could be simulated by swapping `then_children` and `else_children`, but that
-    //     // reorders statements and thus complicates AST optimization. It could also be implemented
-    //     // by updating `condition`, but we occasionally need to invert conditions several times, and
-    //     // just flicking a bool is simpler.
-    //     condition_inverted: bool,
-    //     children: Vec<Statement<'a>>,
-    // },
-    // While {
-    //     condition: Box<Expression<'a>>,
-    //     condition_inverted: bool,
-    //     children: Vec<Statement<'a>>,
-    // },
+    DoWhile {
+        id: usize,
+        condition: Box<Expression<'a>>,
+        // This could be simulated by swapping `then_children` and `else_children`, but that
+        // reorders statements and thus complicates AST optimization. It could also be implemented
+        // by updating `condition`, but we occasionally need to invert conditions several times, and
+        // just flicking a bool is simpler.
+        condition_inverted: bool,
+        children: Vec<Statement<'a>>,
+    },
+    While {
+        id: usize,
+        condition: Box<Expression<'a>>,
+        condition_inverted: bool,
+        children: Vec<Statement<'a>>,
+    },
     If {
         condition: Box<Expression<'a>>,
         condition_inverted: bool,
@@ -64,6 +65,7 @@ impl Display for Statement<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Basic(basic) => write!(f, "{basic}"),
+
             Self::Block { id, children } => {
                 write!(f, "block #{id} {{\n")?;
                 for child in children {
@@ -71,24 +73,45 @@ impl Display for Statement<'_> {
                 }
                 write!(f, "}} block #{id};")
             }
-            // Self::DoWhile {
-            //     id,
-            //     condition,
-            //     condition_inverted,
-            //     children,
-            // } => {
-            //     write!(f, "do #{id} {{\n")?;
-            //     for child in children {
-            //         write!(f, "{child}\n")?;
-            //     }
-            //     write!(f, "}} while (")?;
-            //     if *condition_inverted {
-            //         write!(f, "!({condition})")?;
-            //     } else {
-            //         write!(f, "{condition}")?;
-            //     }
-            //     write!(f, ") #{id};")
-            // }
+
+            Self::DoWhile {
+                id,
+                condition,
+                condition_inverted,
+                children,
+            } => {
+                write!(f, "do #{id} {{\n")?;
+                for child in children {
+                    write!(f, "{child}\n")?;
+                }
+                write!(f, "}} while (")?;
+                if *condition_inverted {
+                    write!(f, "!({condition})")?;
+                } else {
+                    write!(f, "{condition}")?;
+                }
+                write!(f, ") #{id};")
+            }
+
+            Self::While {
+                id,
+                condition,
+                condition_inverted,
+                children,
+            } => {
+                write!(f, "while #{id} (")?;
+                if *condition_inverted {
+                    write!(f, "!({condition})")?;
+                } else {
+                    write!(f, "{condition}")?;
+                }
+                write!(f, ") {{\n")?;
+                for child in children {
+                    write!(f, "{child}\n")?;
+                }
+                write!(f, "}} while #{id};")
+            }
+
             Self::If {
                 condition,
                 condition_inverted,
@@ -105,29 +128,15 @@ impl Display for Statement<'_> {
                 for child in then_children {
                     write!(f, "{child}\n")?;
                 }
-                write!(f, "}} else {{\n")?;
-                for child in else_children {
-                    write!(f, "{child}\n")?;
+                if !else_children.is_empty() {
+                    write!(f, "}} else {{\n")?;
+                    for child in else_children {
+                        write!(f, "{child}\n")?;
+                    }
                 }
                 write!(f, "}}")
             }
-            // Self::While {
-            //     condition,
-            //     condition_inverted,
-            //     children,
-            // } => {
-            //     write!(f, "while (")?;
-            //     if *condition_inverted {
-            //         write!(f, "!({condition})")?;
-            //     } else {
-            //         write!(f, "{condition}")?;
-            //     }
-            //     write!(f, ") {{\n")?;
-            //     for child in children {
-            //         write!(f, "{child}\n")?;
-            //     }
-            //     write!(f, "}}")
-            // }
+
             Self::Switch { id, key, arms } => {
                 write!(f, "switch #{id} ({key}) {{\n")?;
                 for (value, children) in arms {
@@ -141,7 +150,9 @@ impl Display for Statement<'_> {
                 }
                 write!(f, "}} switch #{id};")
             }
+
             Self::Continue { block_id } => write!(f, "continue #{block_id};"),
+
             Self::Break { block_id } => write!(f, "break #{block_id};"),
             // Self::Try { children, catches } => {
             //     write!(f, "try {{\n")?;

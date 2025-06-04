@@ -1,4 +1,4 @@
-use crate::ast::BasicStatement;
+use crate::ast::{BasicStatement, Expression};
 use crate::cfg::Statement;
 use std::collections::HashMap;
 
@@ -44,28 +44,20 @@ impl BlockUses {
     }
 }
 
-pub struct CodeInfo {
+pub struct ConditionalInfo {
     // This doesn't cover bound blocks, i.e. blocks within the range.
-    uses_by_block_id: BlockUses,
+    uses: BlockUses,
     is_divergent: bool,
     is_if_with_divergent_then: bool,
     first_unhandled_switch_arm_index: usize,
     n_breaks_from_switch: usize,
 }
 
-fn rewrite_conditionals_in_stmt(stmt: &mut Statement<'_>) -> CodeInfo {
+fn rewrite_conditionals_in_stmt(stmt: &mut Statement<'_>) -> ConditionalInfo {
     match stmt {
-        Statement::Basic(stmt) => CodeInfo {
-            uses_by_block_id: BlockUses::new(),
-            is_divergent: match stmt {
-                BasicStatement::Assign { .. }
-                | BasicStatement::Calculate(_)
-                | BasicStatement::MonitorEnter { .. }
-                | BasicStatement::MonitorExit { .. } => false,
-                BasicStatement::Return { .. }
-                | BasicStatement::ReturnVoid
-                | BasicStatement::Throw { .. } => true,
-            },
+        Statement::Basic(stmt) => ConditionalInfo {
+            uses: BlockUses::new(),
+            is_divergent: stmt.is_divergent(),
             is_if_with_divergent_then: false,
             first_unhandled_switch_arm_index: 0,
             n_breaks_from_switch: 0,
@@ -73,12 +65,18 @@ fn rewrite_conditionals_in_stmt(stmt: &mut Statement<'_>) -> CodeInfo {
 
         Statement::Block { .. } => rewrite_conditionals_in_block(stmt),
 
+        Statement::DoWhile { .. } => {
+            panic!("do..while shouldn't have appeared in the AST at this pass");
+        }
+
+        Statement::While { .. } => panic!("while shouldn't have appeared in the AST at this pass"),
+
         Statement::If {
             then_children,
             else_children,
             ..
         } => {
-            let mut uses_by_block_id = BlockUses::new();
+            let mut uses = BlockUses::new();
             let mut last_then_stmt_is_divergent = false;
             let mut last_else_stmt_is_divergent = false;
             for (is_then, child) in core::iter::repeat(true)
@@ -86,15 +84,15 @@ fn rewrite_conditionals_in_stmt(stmt: &mut Statement<'_>) -> CodeInfo {
                 .chain(core::iter::repeat(false).zip(else_children))
             {
                 let child_info = rewrite_conditionals_in_stmt(child);
-                uses_by_block_id.merge(child_info.uses_by_block_id);
+                uses.merge(child_info.uses);
                 if is_then {
                     last_then_stmt_is_divergent = child_info.is_divergent;
                 } else {
                     last_else_stmt_is_divergent = child_info.is_divergent;
                 }
             }
-            CodeInfo {
-                uses_by_block_id,
+            ConditionalInfo {
+                uses,
                 is_divergent: last_then_stmt_is_divergent && last_else_stmt_is_divergent,
                 is_if_with_divergent_then: last_then_stmt_is_divergent,
                 first_unhandled_switch_arm_index: 0,
@@ -103,19 +101,19 @@ fn rewrite_conditionals_in_stmt(stmt: &mut Statement<'_>) -> CodeInfo {
         }
 
         Statement::Switch { id, arms, .. } => {
-            let mut uses_by_block_id = BlockUses::new();
+            let mut uses = BlockUses::new();
             let mut last_stmt_is_divergent = false;
             for (_, children) in arms {
                 for child in children {
                     let child_info = rewrite_conditionals_in_stmt(child);
-                    uses_by_block_id.merge(child_info.uses_by_block_id);
+                    uses.merge(child_info.uses);
                     last_stmt_is_divergent = child_info.is_divergent;
                 }
             }
-            let n_breaks = uses_by_block_id.take(*id).1;
+            let n_breaks = uses.take(*id).1;
             let is_divergent = n_breaks == 0 && last_stmt_is_divergent;
-            CodeInfo {
-                uses_by_block_id,
+            ConditionalInfo {
+                uses,
                 is_divergent,
                 is_if_with_divergent_then: false,
                 first_unhandled_switch_arm_index: 0,
@@ -123,16 +121,16 @@ fn rewrite_conditionals_in_stmt(stmt: &mut Statement<'_>) -> CodeInfo {
             }
         }
 
-        Statement::Continue { block_id } => CodeInfo {
-            uses_by_block_id: BlockUses::from_continue(*block_id),
+        Statement::Continue { block_id } => ConditionalInfo {
+            uses: BlockUses::from_continue(*block_id),
             is_divergent: true,
             is_if_with_divergent_then: false,
             first_unhandled_switch_arm_index: 0,
             n_breaks_from_switch: 0,
         },
 
-        Statement::Break { block_id } => CodeInfo {
-            uses_by_block_id: BlockUses::from_break(*block_id),
+        Statement::Break { block_id } => ConditionalInfo {
+            uses: BlockUses::from_break(*block_id),
             is_divergent: true,
             is_if_with_divergent_then: false,
             first_unhandled_switch_arm_index: 0,
@@ -141,7 +139,7 @@ fn rewrite_conditionals_in_stmt(stmt: &mut Statement<'_>) -> CodeInfo {
     }
 }
 
-fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> CodeInfo {
+fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> ConditionalInfo {
     let Statement::Block {
         id: block_id,
         ref mut children,
@@ -150,14 +148,14 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> CodeInfo {
         unreachable!()
     };
 
-    let mut uses_by_block_id = BlockUses::new();
+    let mut uses = BlockUses::new();
     let mut first_switch_first_unhandled_switch_arm_index = 0;
     let mut first_switch_n_breaks_from_switch = 0;
     let mut last_stmt_is_divergent = false;
     let mut optimizable_ifs = Vec::new();
     for (i, child) in children.iter_mut().enumerate() {
         let child_info = rewrite_conditionals_in_stmt(child);
-        uses_by_block_id.merge(child_info.uses_by_block_id);
+        uses.merge(child_info.uses);
         if i == 0 {
             first_switch_first_unhandled_switch_arm_index =
                 child_info.first_unhandled_switch_arm_index;
@@ -172,10 +170,10 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> CodeInfo {
         }
     }
 
-    let (n_continues, n_breaks) = uses_by_block_id.take(block_id);
+    let (n_continues, n_breaks) = uses.take(block_id);
 
-    let mut code_info = CodeInfo {
-        uses_by_block_id,
+    let mut info = ConditionalInfo {
+        uses,
         is_divergent: last_stmt_is_divergent && n_breaks == 0,
         is_if_with_divergent_then: false,
         first_unhandled_switch_arm_index: 0,
@@ -224,7 +222,6 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> CodeInfo {
     // If `optimizable_ifs` is non-empty, it provably includes 0 if the code is generated by cfg.
     if n_continues == 0 && optimizable_ifs.get(0) == Some(&0) {
         let mut first_if_is_trivial = false;
-        let mut n_trivial_ifs = 0;
 
         for i in optimizable_ifs.into_iter().rev() {
             let rest: Vec<Statement<'_>> = children.drain(i + 1..).collect();
@@ -245,7 +242,6 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> CodeInfo {
             );
             first_if_is_trivial = is_trivial;
             if is_trivial {
-                n_trivial_ifs += 1;
                 *condition_inverted = !*condition_inverted;
                 *then_children = rest;
             } else {
@@ -272,12 +268,12 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> CodeInfo {
                 }],
                 else_children: Vec::new(),
             };
-            assert!(n_breaks >= n_trivial_ifs, "too few breaks");
-            code_info.is_if_with_divergent_then =
-                last_stmt_is_divergent && n_breaks == n_trivial_ifs;
+            // `then` doesn't diverge if someone uses inside the `then` block still effectively uses
+            // `break #n`.
+            info.is_if_with_divergent_then = last_stmt_is_divergent && n_breaks == 1;
         }
 
-        return code_info;
+        return info;
     }
 
     // Current goal: merge arms into `switch`.
@@ -365,55 +361,12 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> CodeInfo {
                 arms,
             };
 
-            code_info.first_unhandled_switch_arm_index = right;
-            code_info.n_breaks_from_switch = n_breaks;
+            info.first_unhandled_switch_arm_index = right;
+            info.n_breaks_from_switch = n_breaks;
         }
     }
 
-    /*
-    // Build `do..while`:
-    //     block #n {
-    //         body;
-    //         if (cond) {
-    //         } else {
-    //             continue #n;
-    //         }
-    //     }
-    // ->
-    //     do #n {
-    //         body;
-    //     } while (!cond); #n
-    // as long as there's no `continue #n;` within `body`. `break #n;` is fine.
-    if let Statement::Block { id, children } = stmt
-        && let Some(Statement::If {
-            then_children,
-            else_children,
-            ..
-        }) = children.last()
-        && then_children.is_empty()
-        && let [Statement::Continue { block_id }] = **else_children
-        && block_id == *id
-        && block_uses.count_continue(*id) == 1
-    {
-        let Statement::If {
-            condition,
-            condition_inverted,
-            ..
-        } = children.pop().unwrap()
-        else {
-            unreachable!()
-        };
-        block_uses.remove_continue(block_id);
-        *stmt = Statement::DoWhile {
-            id: *id,
-            children: core::mem::take(children),
-            condition,
-            condition_inverted: !condition_inverted,
-        };
-    }
-    */
-
-    code_info
+    info
 }
 
 fn iterate_with_is_last<T>(vec: Vec<T>) -> impl Iterator<Item = (bool, T)> {
@@ -423,39 +376,101 @@ fn iterate_with_is_last<T>(vec: Vec<T>) -> impl Iterator<Item = (bool, T)> {
         .map(move |(i, element)| (i == len - 1, element))
 }
 
-// Also removes redundant breaks and unused blocks
-fn remove_breaks_and_blocks<'a>(
+struct LoopInfo {
+    // This doesn't cover bound blocks, i.e. blocks within the range.
+    uses: BlockUses,
+    is_divergent: bool,
+}
+
+// Also removes redundant breaks and unused blocks. We can't remove redundant continues yet because
+// continues can only be redundant in loops, not blocks, and at the point when we recurse into
+// `block { .. }`, we don't yet know if we're going to lower it as `while { .. }` or
+// `while { .. break; }`, so we have no idea whether `..` *will* fall through to break or continue.
+fn make_loops<'a>(
     mut stmt: Statement<'a>,
     fallthrough_breaks_from: Option<usize>,
     out: &mut Vec<Statement<'a>>,
-) -> BlockUses {
-    let uses = match stmt {
-        Statement::Basic(_) => BlockUses::new(),
+) -> LoopInfo {
+    let info = match stmt {
+        Statement::Basic(ref stmt) => LoopInfo {
+            uses: BlockUses::new(),
+            is_divergent: stmt.is_divergent(),
+        },
 
         Statement::Block {
             id,
             ref mut children,
         } => {
-            let mut uses =
-                remove_breaks_and_blocks_in_list(children, fallthrough_breaks_from.or(Some(id)));
-            if uses.take(id) == (0, 0) {
-                out.extend(core::mem::take(children));
-                return uses;
+            let mut info = make_loops_in_list(children, fallthrough_breaks_from.or(Some(id)));
+            let mut children = core::mem::take(children);
+
+            let (n_continues, n_breaks) = info.uses.take(id);
+
+            if n_continues == 0 && n_breaks == 0 {
+                out.extend(children);
+                return info;
             }
-            uses
+
+            if let Some(Statement::If {
+                then_children,
+                else_children,
+                ..
+            }) = children.last()
+                && let [Statement::Continue {
+                    block_id: continue_block_id,
+                }] = **then_children
+                && continue_block_id == id
+                && else_children.is_empty()
+                && n_continues == 1
+            {
+                let Some(Statement::If {
+                    condition,
+                    condition_inverted,
+                    ..
+                }) = children.pop()
+                else {
+                    unreachable!()
+                };
+                stmt = Statement::DoWhile {
+                    id,
+                    condition,
+                    condition_inverted,
+                    children,
+                };
+            } else {
+                if !info.is_divergent {
+                    children.push(Statement::Break { block_id: id });
+                }
+                stmt = Statement::While {
+                    id,
+                    condition: Box::new(Expression::ConstInt(1)),
+                    condition_inverted: false,
+                    children,
+                };
+            }
+
+            info
         }
+
+        Statement::DoWhile { .. } => {
+            panic!("do..while shouldn't have appeared in the AST at this pass");
+        }
+
+        Statement::While { .. } => panic!("while shouldn't have appeared in the AST at this pass"),
 
         Statement::If {
             ref mut then_children,
             ref mut else_children,
             ..
         } => {
-            let mut uses = remove_breaks_and_blocks_in_list(then_children, fallthrough_breaks_from);
-            uses.merge(remove_breaks_and_blocks_in_list(
-                else_children,
-                fallthrough_breaks_from,
-            ));
-            uses
+            let then_info = make_loops_in_list(then_children, fallthrough_breaks_from);
+            let else_info = make_loops_in_list(else_children, fallthrough_breaks_from);
+            let mut uses = then_info.uses;
+            uses.merge(else_info.uses);
+            LoopInfo {
+                uses,
+                is_divergent: then_info.is_divergent && else_info.is_divergent,
+            }
         }
 
         Statement::Switch {
@@ -484,41 +499,63 @@ fn remove_breaks_and_blocks<'a>(
 
             let mut uses = BlockUses::new();
             let n_arms = arms.len();
-            for (i, (_, children)) in arms.iter_mut().enumerate() {
+            let mut last_arm_is_divergent = false;
+            let mut has_default_arm = false;
+            for (i, (key, children)) in arms.iter_mut().enumerate() {
                 let is_last_arm = i == n_arms - 1;
-                uses.merge(remove_breaks_and_blocks_in_list(
-                    children,
-                    is_last_arm.then_some(effective_block_id),
-                ));
+                // All remaining arms, except the last one, cannot fallthrough to `break`, as we've
+                // just removed everything equivalent to `break`.
+                let arm_info =
+                    make_loops_in_list(children, is_last_arm.then_some(effective_block_id));
+                uses.merge(arm_info.uses);
+                last_arm_is_divergent = arm_info.is_divergent;
+                if key.is_none() {
+                    has_default_arm = true;
+                }
             }
 
-            uses.take(id); // not necessary, but helps clean up the data flow a bit
+            let (n_continues, n_breaks) = uses.take(id);
+            assert_eq!(n_continues, 0, "continue to switch");
 
-            uses
+            LoopInfo {
+                uses,
+                is_divergent: last_arm_is_divergent && n_breaks == 0 && has_default_arm,
+            }
         }
 
-        Statement::Continue { block_id } => BlockUses::from_continue(block_id),
+        Statement::Continue { block_id } => LoopInfo {
+            uses: BlockUses::from_continue(block_id),
+            is_divergent: true,
+        },
 
         Statement::Break { block_id } => {
             if fallthrough_breaks_from == Some(block_id) {
-                return BlockUses::new();
+                return LoopInfo {
+                    uses: BlockUses::new(),
+                    is_divergent: false,
+                };
             }
-            BlockUses::from_break(block_id)
+            LoopInfo {
+                uses: BlockUses::from_break(block_id),
+                is_divergent: true,
+            }
         }
     };
 
     out.push(stmt);
-    uses
+    info
 }
 
-fn remove_breaks_and_blocks_in_list(
+fn make_loops_in_list(
     stmts: &mut Vec<Statement<'_>>,
     fallthrough_breaks_from: Option<usize>,
-) -> BlockUses {
+) -> LoopInfo {
     let mut uses = BlockUses::new();
+    let mut last_stmt_is_divergent = false;
+
     let mut new_stmts = Vec::new();
     for (is_last, stmt) in iterate_with_is_last(core::mem::take(stmts)) {
-        uses.merge(remove_breaks_and_blocks(
+        let stmt_info = make_loops(
             stmt,
             if is_last {
                 fallthrough_breaks_from
@@ -526,19 +563,149 @@ fn remove_breaks_and_blocks_in_list(
                 None
             },
             &mut new_stmts,
-        ));
+        );
+        uses.merge(stmt_info.uses);
+        last_stmt_is_divergent = stmt_info.is_divergent;
+    }
+
+    *stmts = new_stmts;
+
+    LoopInfo {
+        uses,
+        is_divergent: last_stmt_is_divergent,
+    }
+}
+
+fn with_entry(
+    map: &mut HashMap<usize, usize>,
+    key: Option<usize>,
+    value: usize,
+    cb: impl FnOnce(&mut HashMap<usize, usize>),
+) {
+    // We could have a single match over `key`, but then `cb` would be called twice, either
+    // inhibiting inlining or blowing up code size; I'd rather not do that.
+    let old_value = if let Some(key) = key {
+        map.insert(key, value)
+    } else {
+        None
+    };
+    cb(map);
+    if let Some(key) = key {
+        if let Some(old_value) = old_value {
+            map.insert(key, old_value);
+        } else {
+            map.remove(&key);
+        }
+    }
+}
+
+// `continue`s can be no-ops and need to be removed, or they can `continue` from outer loops, where
+// `break` from an inner loop would be equivalent. There's no need to redirect `break`s because they
+// can never be equivalent post block-to-loop conversion.
+fn simplify_continues(
+    stmt: &mut Statement<'_>,
+    fallthrough_continues_in: Option<usize>,
+    // Mutable for optimization, but the logical value needs to be retained across the call (unless
+    // the function panics)
+    continue_to_break: &mut HashMap<usize, usize>,
+) -> bool {
+    match stmt {
+        Statement::Basic(_) | Statement::Break { .. } => {}
+
+        Statement::Block { .. } => panic!("block shouldn't have appeared in the AST at this pass"),
+
+        Statement::DoWhile { id, children, .. } | Statement::While { id, children, .. } => {
+            with_entry(
+                continue_to_break,
+                fallthrough_continues_in,
+                *id,
+                |continue_to_break| {
+                    simplify_continues_in_list(children, Some(*id), continue_to_break);
+                },
+            );
+        }
+
+        Statement::If {
+            then_children,
+            else_children,
+            ..
+        } => {
+            simplify_continues_in_list(then_children, fallthrough_continues_in, continue_to_break);
+            simplify_continues_in_list(else_children, fallthrough_continues_in, continue_to_break);
+        }
+
+        Statement::Switch { id, arms, .. } => {
+            let n_arms = arms.len();
+            for (i, (_, children)) in arms.iter_mut().enumerate() {
+                with_entry(
+                    continue_to_break,
+                    fallthrough_continues_in,
+                    *id,
+                    |continue_to_break| {
+                        simplify_continues_in_list(
+                            children,
+                            if i == n_arms - 1 {
+                                fallthrough_continues_in
+                            } else {
+                                None
+                            },
+                            continue_to_break,
+                        );
+                    },
+                );
+            }
+        }
+
+        Statement::Continue { block_id } => {
+            if fallthrough_continues_in == Some(*block_id) {
+                return false;
+            }
+            if let Some(block_id) = continue_to_break.get(block_id) {
+                *stmt = Statement::Break {
+                    block_id: *block_id,
+                };
+            }
+        }
+    }
+
+    true
+}
+
+fn simplify_continues_in_list(
+    stmts: &mut Vec<Statement<'_>>,
+    fallthrough_continues_in: Option<usize>,
+    continue_to_break: &mut HashMap<usize, usize>,
+) {
+    let mut new_stmts = Vec::new();
+    for i in 0..stmts.len() {
+        let mut stmt =
+            core::mem::replace(&mut stmts[i], Statement::Basic(BasicStatement::ReturnVoid));
+        let should_retain = simplify_continues(
+            &mut stmt,
+            if i == stmts.len() - 1 {
+                fallthrough_continues_in
+            } else if let Statement::Continue { block_id } = stmts[i + 1] {
+                // We only match a simple continue rather than blocks eventually containing continue
+                // because there aren't any blocks anymore.
+                Some(block_id)
+            } else {
+                None
+            },
+            continue_to_break,
+        );
+        if should_retain {
+            new_stmts.push(stmt);
+        }
     }
     *stmts = new_stmts;
-    uses
 }
 
 pub fn rewrite_control_flow(stmts: &mut Vec<Statement<'_>>) {
     for stmt in &mut *stmts {
         rewrite_conditionals_in_stmt(stmt);
     }
-    remove_breaks_and_blocks_in_list(stmts, None);
+    make_loops_in_list(stmts, None);
+    simplify_continues_in_list(stmts, None, &mut HashMap::new());
 
-    // TODO:
-    // All blocks left need to be transformed to loops -- that can cover `do`..`while` and leave
-    // everything else as plain `while (true)`. No plain blocks should be left after that.
+    // TODO: inline synthetic blocks from `do`..`while` used to simulate `continue`
 }

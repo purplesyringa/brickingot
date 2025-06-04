@@ -1,7 +1,7 @@
 use core::fmt::{self, Display};
 use displaydoc::Display;
-use noak::MStr;
 use noak::reader::cpool::value::{Dynamic, MethodHandle};
+use noak::MStr;
 
 #[derive(Debug, Display)]
 pub enum BasicStatement<'a> {
@@ -22,6 +22,18 @@ pub enum BasicStatement<'a> {
     MonitorEnter { object: Box<Expression<'a>> },
     /// unlock {object};
     MonitorExit { object: Box<Expression<'a>> },
+}
+
+impl BasicStatement<'_> {
+    pub fn is_divergent(&self) -> bool {
+        match self {
+            Self::Assign { .. }
+            | Self::Calculate(_)
+            | Self::MonitorEnter { .. }
+            | Self::MonitorExit { .. } => false,
+            Self::Return { .. } | Self::ReturnVoid | Self::Throw { .. } => true,
+        }
+    }
 }
 
 #[derive(Debug, Display)]
