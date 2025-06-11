@@ -2,35 +2,32 @@ use noak::{
     descriptor::{BaseType, MethodDescriptor, TypeDescriptor},
     error::DecodeError,
     reader::{
-        attributes::RawInstruction,
-        cpool::{ConstantPool, InterfaceMethodRef, Item, MethodRef},
+        attributes::RawInstruction::{self, *},
+        cpool::{value::NameAndType, ConstantPool, InterfaceMethodRef, Item, MethodRef},
     },
 };
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum InstructionPreParseError {
+pub enum InsnStackEffectError {
     #[error("Failed to parse class file: {0}")]
     Noak(#[from] DecodeError),
 
     #[error("The legacy JSR instruction is unsupported")]
     JsrUnsupported,
 
-    #[error("Out-of-bounds jump")]
-    CodeOffsetOutOfBounds,
-
     #[error(
-        "Expected a MethodRef or an InterfaceMethodRef, found a different type in a constant pool"
+        "Expected a MethodRef or an InterfaceMethodRef, found a different type in constant pool"
     )]
     NotAMethodRef,
 }
 
-pub fn get_instruction_stack_adjustment(
+pub fn get_insn_stack_effect(
     pool: &ConstantPool<'_>,
     insn: &RawInstruction<'_>,
-) -> Result<isize, InstructionPreParseError> {
-    use RawInstruction::*;
-
+) -> Result<isize, InsnStackEffectError> {
+    // This could be resolve via a table in most cases. LLVM compiles this as a jump table instead,
+    // which is not ideal, but fine. No need to optimize this, at least for now.
     Ok(match insn {
         // Array loads/stores
         AALoad | BALoad | CALoad | FALoad | IALoad | SALoad => -1,
@@ -174,7 +171,7 @@ pub fn get_instruction_stack_adjustment(
             let name_and_type = match pool.get(*index)? {
                 Item::MethodRef(MethodRef { name_and_type, .. }) => name_and_type,
                 Item::InterfaceMethodRef(InterfaceMethodRef { name_and_type, .. }) => name_and_type,
-                _ => return Err(InstructionPreParseError::NotAMethodRef),
+                _ => return Err(InsnStackEffectError::NotAMethodRef),
             };
             get_method_stack_effect(&pool.retrieve(*name_and_type)?)? - 1
         }
@@ -182,7 +179,7 @@ pub fn get_instruction_stack_adjustment(
             let name_and_type = match pool.get(*index)? {
                 Item::MethodRef(MethodRef { name_and_type, .. }) => name_and_type,
                 Item::InterfaceMethodRef(InterfaceMethodRef { name_and_type, .. }) => name_and_type,
-                _ => return Err(InstructionPreParseError::NotAMethodRef),
+                _ => return Err(InsnStackEffectError::NotAMethodRef),
             };
             get_method_stack_effect(&pool.retrieve(*name_and_type)?)?
         }
@@ -192,28 +189,28 @@ pub fn get_instruction_stack_adjustment(
 
         // Field operations
         GetField { index } => {
-            if is_double_width(&pool.retrieve(*index)?.name_and_type) {
+            if is_name_and_type_double_width(&pool.retrieve(*index)?.name_and_type) {
                 1
             } else {
                 0
             }
         }
         GetStatic { index } => {
-            if is_double_width(&pool.retrieve(*index)?.name_and_type) {
+            if is_name_and_type_double_width(&pool.retrieve(*index)?.name_and_type) {
                 2
             } else {
                 1
             }
         }
         PutField { index } => {
-            if is_double_width(&pool.retrieve(*index)?.name_and_type) {
+            if is_name_and_type_double_width(&pool.retrieve(*index)?.name_and_type) {
                 -3
             } else {
                 -2
             }
         }
         PutStatic { index } => {
-            if is_double_width(&pool.retrieve(*index)?.name_and_type) {
+            if is_name_and_type_double_width(&pool.retrieve(*index)?.name_and_type) {
                 -2
             } else {
                 -1
@@ -226,7 +223,7 @@ pub fn get_instruction_stack_adjustment(
         IInc { .. } | IIncW { .. } => 0,
         InstanceOf { .. } => 0,
         JSr { .. } | JSrW { .. } | Ret { .. } | RetW { .. } => {
-            return Err(InstructionPreParseError::JsrUnsupported);
+            return Err(InsnStackEffectError::JsrUnsupported);
         }
         MonitorEnter | MonitorExit => -1,
         New { .. } => 1,
@@ -235,62 +232,11 @@ pub fn get_instruction_stack_adjustment(
     })
 }
 
-pub fn get_instruction_successors(
-    address: u32,
-    next_address: u32,
-    insn: &RawInstruction<'_>,
-) -> Result<Vec<u32>, InstructionPreParseError> {
-    use RawInstruction::*;
-
-    let offset_to_address = |offset: i32| -> Result<u32, InstructionPreParseError> {
-        (address as i32 + offset)
-            .try_into()
-            .map_err(|_| InstructionPreParseError::CodeOffsetOutOfBounds)
-    };
-
-    Ok(match insn {
-        // Exits
-        AThrow | AReturn | DReturn | FReturn | IReturn | LReturn | Return => Vec::new(),
-
-        // Jumps
-        Goto { offset } => vec![offset_to_address(*offset as i32)?],
-        GotoW { offset } => vec![offset_to_address(*offset)?],
-        IfACmpEq { offset }
-        | IfACmpNe { offset }
-        | IfICmpEq { offset }
-        | IfICmpNe { offset }
-        | IfICmpLt { offset }
-        | IfICmpGe { offset }
-        | IfICmpGt { offset }
-        | IfICmpLe { offset } => vec![next_address, offset_to_address(*offset as i32)?],
-        IfEq { offset }
-        | IfNe { offset }
-        | IfLt { offset }
-        | IfGe { offset }
-        | IfGt { offset }
-        | IfLe { offset }
-        | IfNonNull { offset }
-        | IfNull { offset } => vec![next_address, offset_to_address(*offset as i32)?],
-        LookupSwitch(switch) => core::iter::once(switch.default_offset())
-            .chain(switch.pairs().map(|pair| pair.offset()))
-            .map(offset_to_address)
-            .collect::<Result<Vec<_>, InstructionPreParseError>>()?,
-        TableSwitch(switch) => core::iter::once(switch.default_offset())
-            .chain(switch.pairs().map(|pair| pair.offset()))
-            .map(offset_to_address)
-            .collect::<Result<Vec<_>, InstructionPreParseError>>()?,
-
-        // Normal operations
-        _ => vec![next_address],
-    })
-}
-
-fn get_method_stack_effect(
-    name_and_type: &noak::reader::cpool::value::NameAndType<'_>,
-) -> Result<isize, InstructionPreParseError> {
+fn get_method_stack_effect(name_and_type: &NameAndType<'_>) -> Result<isize, InsnStackEffectError> {
     // For the return type in particular, we could check whether the method descriptor ends
     // with `)V`, `)D`, `)J`, or anything else. But we also have to check argument
-    // categories, which cannot be computed that easily without parsing, so bite the bullet.
+    // categories, which cannot be computed that easily without parsing, so let's bite the bullet.
+    // XXX: This is quite slow. Can we improve performance here?
     let method_descriptor = MethodDescriptor::parse(name_and_type.descriptor)?;
 
     let arguments_size: isize = method_descriptor
@@ -318,7 +264,7 @@ fn get_method_stack_effect(
 }
 
 // Checks if a field descriptor is of type `double` or `long`.
-pub fn is_double_width(name_and_type: &noak::reader::cpool::value::NameAndType<'_>) -> bool {
+pub fn is_name_and_type_double_width(name_and_type: &NameAndType<'_>) -> bool {
     // D is double, J is long
     name_and_type.descriptor == "D" || name_and_type.descriptor == "J"
 }

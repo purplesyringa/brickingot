@@ -1,21 +1,30 @@
 #![cfg_attr(false, no_std)]
 
+mod arena;
 mod arrows;
 mod ast;
-mod cfg;
-mod insn2stmt;
-mod instructions;
-mod matcher;
-mod unstructured;
+mod stackless;
+// mod cfg;
+mod insn_control_flow;
+mod insn_ir_import;
+mod insn_stack_effect;
+mod stack_machine;
+// mod matcher;
+// mod unstructured;
+mod preparse;
 
-use crate::cfg::structurize_cfg;
-use crate::matcher::rewrite_control_flow;
-use crate::unstructured::{StatementGenerationError, convert_code_to_stackless};
+use crate::ast::ArenaRef;
+use crate::preparse::{extract_basic_blocks, BytecodePreparsingError};
+use crate::stackless::{build_stackless_ir, StacklessIrError};
+// use crate::cfg::structurize_cfg;
+// use crate::matcher::rewrite_control_flow;
+// use crate::unstructured::{convert_code_to_stackless, StatementGenerationError};
 use noak::{
-    MStr,
     error::DecodeError,
-    reader::{Class, Method, attributes::Code, cpool::ConstantPool},
+    reader::{attributes::Code, cpool::ConstantPool, Class, Method},
+    MStr,
 };
+use std::time::Instant;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -35,11 +44,13 @@ pub enum MethodDecompileError {
     #[error("Failed to parse class file: {0}")]
     Noak(#[from] DecodeError),
 
-    #[error("While generating initial statements: {0}")]
-    StatementGeneration(#[from] StatementGenerationError),
+    #[error("While pre-parsing bytecode: {0}")]
+    BytecodePreparsing(#[from] BytecodePreparsingError),
 
-    #[error("`Code` attribute missing")]
-    NoCodeAttribute,
+    #[error("While building stackless IR: {0}")]
+    StacklessIr(#[from] StacklessIrError),
+    // #[error("While generating initial statements: {0}")]
+    // StatementGeneration(#[from] StatementGenerationError),
 }
 
 fn decompile_class_file(raw_bytes: &[u8]) -> Result<(), ClassDecompileError> {
@@ -71,23 +82,56 @@ fn decompile_class_file(raw_bytes: &[u8]) -> Result<(), ClassDecompileError> {
     Ok(())
 }
 
-fn decompile_method(
-    pool: &ConstantPool<'_>,
-    method: &Method<'_>,
+fn decompile_method<'code>(
+    pool: &ConstantPool<'code>,
+    method: &Method<'code>,
 ) -> Result<(), MethodDecompileError> {
-    let code: Code = method
-        .attributes()
-        .find_attribute(pool)?
-        .ok_or_else(|| MethodDecompileError::NoCodeAttribute)?;
+    let Some(code): Option<Code> = method.attributes().find_attribute(pool)? else {
+        // No Code attribute, valid e.g. for abstract methods
+        return Ok(());
+    };
 
-    println!("entered {}", pool.retrieve(method.name())?.display());
-    let unstructured_program = convert_code_to_stackless(pool, &code)?;
-    let mut stmts = structurize_cfg(unstructured_program);
-    rewrite_control_flow(&mut stmts);
-    for stmt in stmts {
-        println!("{stmt}");
-    }
-    println!();
+    // println!("method {}", pool.retrieve(method.name())?.display());
+
+    // During the course of decompilation, the program is translated between different IR forms.
+    // They are all similar to each other and use the same underlying data structures to represent
+    // basic statements (i.e. those without control flow) and expression in the form of an AST.
+    // However, each IR adds a twist, like adding goto's, blocks, or allowing arbitrarily nested
+    // expressions.
+    //
+    // This makes translation between IRs free of boilerplate, but we have to pay for allocation to
+    // support expression nesting on each stage, even for IRs that use fixed-format expressions.
+    // This is why we use typed arenas.
+    let arena: ArenaRef<'_, 'code> = ArenaRef {
+        typed_arena: &typed_arena::Arena::new(),
+    };
+
+    // We delay IR construction for a bit to reduce the number of (usually slow) recursive rewrites.
+    // Everything that can be quickly computed from the bytecode should be done beforehand. This
+    // mostly covers control flow analysis and computing stack sizes at each instruction, both of
+    // which significantly affect the IR. We also obtain the CFG as a byproduct, which will become
+    // useful when we get to the SSA-related stuff.
+    let basic_blocks = extract_basic_blocks(pool, &code)?;
+
+    // We could topsort the basic blocks to hopefully deobfuscate control flow, but that has
+    // a chance to worsen the decompilation output on non-obfuscated code. Any attempts to reorder
+    // javac output would produce code further from the source, so we don't do that. If or when
+    // control flow obfuscation becomes a problem, we can consider changing this.
+
+    // The first IR we build is imperative and uses variables instead of stack. Stack accesses are
+    // resolved via variables `stackN`, where `N` is the current stack size. The control flow is
+    // unstructured. The number of distinct statement types is greatly reduced because most
+    // instructions are translated as `var := expr`. Information about basic blocks is available,
+    // but is not an intrinsic part of the IR.
+    let stackless_ir = build_stackless_ir(arena, pool, &code, basic_blocks)?;
+
+    // let unstructured_program = convert_code_to_stackless(arena, pool, &code)?;
+    // let mut stmts = structurize_cfg(unstructured_program);
+    // rewrite_control_flow(&mut stmts);
+    // for stmt in stmts {
+    //     println!("{stmt}");
+    // }
+    // println!();
 
     // method attributes: +Code, Exceptions (§4.7.5), Synthetic (§4.7.8), Signature (§4.7.9), Deprecated (§4.7.15), RuntimeVisibleAnnotations (§4.7.16), RuntimeInvisibleAnnotations (§4.7.17), RuntimeVisibleParameterAnnotations (§4.7.18), RuntimeInvisibleParameterAnnotations (§4.7.19), and AnnotationDefault
     // code attributes: LocalVariableTable (§4.7.13), LocalVariableTypeTable (§4.7.14), and +StackMapTable
@@ -101,10 +145,27 @@ fn main() {
     // let raw_bytes = std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/dao.class")
     //     .expect("failed to read class file");
     // let raw_bytes = std::fs::read("/home/purplesyringa/mc/public/vineflower-1.11.1-slim/org/jetbrains/java/decompiler/modules/decompiler/exps/InvocationExprent.class").expect("failed to read class file");
+    // if let Err(e) = decompile_class_file(&raw_bytes) {
+    //     panic!("class decompilation failed: {e}");
+    // }
 
-    let raw_bytes = std::fs::read("Test.class").expect("failed to read class file");
-
-    if let Err(e) = decompile_class_file(&raw_bytes) {
-        panic!("class decompilation failed: {e}");
+    let start = Instant::now();
+    for entry in std::fs::read_dir("/home/purplesyringa/mc/public/server-1.21.5").expect("files") {
+        let entry = entry.expect("files");
+        if !entry.path().extension().is_some_and(|ext| ext == "class") {
+            continue;
+        }
+        // println!("file {:?}", entry.path());
+        let raw_bytes = std::fs::read(entry.path()).expect("files");
+        if let Err(e) = decompile_class_file(&raw_bytes) {
+            panic!("class decompilation failed: {e}");
+        }
     }
+    println!("elapsed {:?}", start.elapsed());
+
+    // let raw_bytes = std::fs::read("Test.class").expect("failed to read class file");
+
+    // if let Err(e) = decompile_class_file(&raw_bytes) {
+    //     panic!("class decompilation failed: {e}");
+    // }
 }

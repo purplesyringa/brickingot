@@ -1,18 +1,18 @@
-use crate::ast::{BasicStatement, Expression, Str};
-use crate::insn2stmt::{InstructionParseError, convert_instruction_to_unstructured_ast};
+use crate::ast::{ArenaRef, BasicStatement, BoxedExpr, Str};
+use crate::insn2stmt::{convert_instruction_to_unstructured_ast, InstructionParseError};
 use crate::instructions::{
-    InstructionPreParseError, get_instruction_stack_adjustment, get_instruction_successors,
+    get_instruction_stack_adjustment, get_instruction_successors, InstructionPreParseError,
 };
 
 use core::fmt::{self, Display};
 use displaydoc::Display;
 use noak::{
-    MStr,
     error::DecodeError,
     reader::{
         attributes::{Code, RawInstruction},
         cpool::ConstantPool,
     },
+    MStr,
 };
 use thiserror::Error;
 
@@ -51,12 +51,12 @@ pub enum StatementGenerationError {
 }
 
 #[derive(Debug, Display)]
-pub struct Program<'a> {
-    pub statements: Vec<Statement<'a>>,
-    pub exception_handlers: Vec<ExceptionHandler<'a>>,
+pub struct Program<'arena, 'code> {
+    pub statements: Vec<Statement<'arena, 'code>>,
+    pub exception_handlers: Vec<ExceptionHandler<'code>>,
 }
 
-impl Display for Program<'_> {
+impl Display for Program<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, stmt) in self.statements.iter().enumerate() {
             write!(f, "{i}: {stmt}\n")?;
@@ -69,26 +69,26 @@ impl Display for Program<'_> {
 }
 
 #[derive(Debug, Display)]
-pub enum Statement<'a> {
+pub enum Statement<'arena, 'code> {
     /// {0}
-    Basic(BasicStatement<'a>),
+    Basic(BasicStatement<'arena, 'code>),
     /// if ({condition}) jump {target};
     Jump {
-        condition: Box<Expression<'a>>,
+        condition: BoxedExpr<'arena, 'code>,
         target: usize,
     },
     /// {0}
-    Switch(Switch<'a>),
+    Switch(Switch<'arena, 'code>),
 }
 
 #[derive(Debug)]
-pub struct Switch<'a> {
-    pub key: Box<Expression<'a>>,
+pub struct Switch<'arena, 'code> {
+    pub key: BoxedExpr<'arena, 'code>,
     pub arms: Vec<(i32, usize)>,
     pub default: usize,
 }
 
-impl Display for Switch<'_> {
+impl Display for Switch<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "switch ({}) ", self.key)?;
         for (value, target) in &self.arms {
@@ -99,11 +99,11 @@ impl Display for Switch<'_> {
 }
 
 #[derive(Debug)]
-pub struct ExceptionHandler<'a> {
+pub struct ExceptionHandler<'code> {
     pub start: usize,
     pub end: usize,
     pub target: usize,
-    pub class: Option<Str<'a>>,
+    pub class: Option<Str<'code>>,
 }
 
 impl Display for ExceptionHandler<'_> {
@@ -120,10 +120,11 @@ impl Display for ExceptionHandler<'_> {
     }
 }
 
-pub fn convert_code_to_stackless<'a>(
-    pool: &ConstantPool<'a>,
-    code: &Code<'a>,
-) -> Result<Program<'a>, StatementGenerationError> {
+pub fn convert_code_to_stackless<'arena, 'code>(
+    arena: ArenaRef<'arena, 'code>,
+    pool: &ConstantPool<'code>,
+    code: &Code<'code>,
+) -> Result<Program<'arena, 'code>, StatementGenerationError> {
     // The result of this pass is a series of "high-level" instructions with unstructured control
     // flow, represented in an AST of a similar kind to the one we emit. Such an AST does not
     // introduce basic blocks, so we don't try to do this here either to just throw it away
@@ -229,6 +230,7 @@ pub fn convert_code_to_stackless<'a>(
 
         (|| {
             convert_instruction_to_unstructured_ast(
+                arena,
                 pool,
                 address as u32,
                 stack_size

@@ -4,27 +4,27 @@ use noak::reader::cpool::value::{Dynamic, MethodHandle};
 use noak::MStr;
 
 #[derive(Debug, Display)]
-pub enum BasicStatement<'a> {
+pub enum BasicStatement<'arena, 'code> {
     /// {target} = {value};
     Assign {
-        target: Box<Expression<'a>>,
-        value: Box<Expression<'a>>,
+        target: BoxedExpr<'arena, 'code>,
+        value: BoxedExpr<'arena, 'code>,
     },
     /// return {value};
-    Return { value: Box<Expression<'a>> },
+    Return { value: BoxedExpr<'arena, 'code> },
     /// return;
     ReturnVoid,
     /// throw {exception};
-    Throw { exception: Box<Expression<'a>> },
+    Throw { exception: BoxedExpr<'arena, 'code> },
     /// {0};
-    Calculate(Box<Expression<'a>>),
+    Calculate(BoxedExpr<'arena, 'code>),
     /// lock {object};
-    MonitorEnter { object: Box<Expression<'a>> },
+    MonitorEnter { object: BoxedExpr<'arena, 'code> },
     /// unlock {object};
-    MonitorExit { object: Box<Expression<'a>> },
+    MonitorExit { object: BoxedExpr<'arena, 'code> },
 }
 
-impl BasicStatement<'_> {
+impl BasicStatement<'_, '_> {
     pub fn is_divergent(&self) -> bool {
         match self {
             Self::Assign { .. }
@@ -36,22 +36,64 @@ impl BasicStatement<'_> {
     }
 }
 
+pub type BoxedExpr<'arena, 'code> = &'arena mut Expression<'arena, 'code>;
+
+#[derive(Clone, Copy)]
+pub struct ArenaRef<'arena, 'code> {
+    pub typed_arena: &'arena typed_arena::Arena<Expression<'arena, 'code>>,
+}
+
+impl<'arena, 'code> ArenaRef<'arena, 'code> {
+    pub fn alloc(self, expr: Expression<'arena, 'code>) -> BoxedExpr<'arena, 'code> {
+        self.typed_arena.alloc(expr)
+    }
+
+    pub fn stack(self, id: usize) -> BoxedExpr<'arena, 'code> {
+        self.alloc(Expression::Variable {
+            id,
+            namespace: VariableNamespace::Stack,
+        })
+    }
+
+    pub fn slot(self, id: usize) -> BoxedExpr<'arena, 'code> {
+        self.alloc(Expression::Variable {
+            id,
+            namespace: VariableNamespace::Slot,
+        })
+    }
+
+    pub fn tmp(self, id: usize) -> BoxedExpr<'arena, 'code> {
+        self.alloc(Expression::Variable {
+            id,
+            namespace: VariableNamespace::Temporary,
+        })
+    }
+
+    pub fn int(self, value: i32) -> BoxedExpr<'arena, 'code> {
+        self.alloc(Expression::ConstInt(value))
+    }
+
+    pub fn null(self) -> BoxedExpr<'arena, 'code> {
+        self.alloc(Expression::Null)
+    }
+}
+
 #[derive(Debug, Display)]
-pub enum Expression<'a> {
+pub enum Expression<'arena, 'code> {
     /// ({array})[{index}]
     ArrayElement {
-        array: Box<Expression<'a>>,
-        index: Box<Expression<'a>>,
+        array: BoxedExpr<'arena, 'code>,
+        index: BoxedExpr<'arena, 'code>,
     },
     /// ({array}).length
-    ArrayLength { array: Box<Expression<'a>> },
+    ArrayLength { array: BoxedExpr<'arena, 'code> },
     /// new {element_type}{lengths:?}
     NewArray {
-        element_type: Type<'a>,
-        lengths: Vec<Box<Expression<'a>>>,
+        element_type: Type<'code>,
+        lengths: Vec<BoxedExpr<'arena, 'code>>,
     },
     /// new uninitialized {class}
-    NewUninitialized { class: Str<'a> },
+    NewUninitialized { class: Str<'code> },
     /// null
     Null,
     /// {namespace}{id}
@@ -60,15 +102,15 @@ pub enum Expression<'a> {
         namespace: VariableNamespace,
     },
     /// {0}
-    Field(Field<'a>),
+    Field(Field<'arena, 'code>),
     /// {0}.class
-    Class(Str<'a>),
+    Class(Str<'code>),
     /// {0:?}
-    DynamicConst(Dynamic<'a>),
+    DynamicConst(Dynamic<'code>),
     /// {0:?}
-    ConstMethodHandle(MethodHandle<'a>),
+    ConstMethodHandle(MethodHandle<'code>),
     /// MethodType({descriptor:?})
-    ConstMethodType { descriptor: &'a MStr },
+    ConstMethodType { descriptor: &'code MStr },
     /// {0}b
     ConstByte(i8),
     /// {0}s
@@ -82,50 +124,50 @@ pub enum Expression<'a> {
     /// {0}d
     ConstDouble(f64),
     /// {0:?}
-    ConstString(&'a MStr),
+    ConstString(&'code MStr),
     /// ({object}) instanceof {class}
     InstanceOf {
-        object: Box<Expression<'a>>,
-        class: Str<'a>,
+        object: BoxedExpr<'arena, 'code>,
+        class: Str<'code>,
     },
     /// ({class})({value})
     CastReference {
-        value: Box<Expression<'a>>,
-        class: Str<'a>,
+        value: BoxedExpr<'arena, 'code>,
+        class: Str<'code>,
     },
     /// ({from} -> {to})({value})
     CastPrimitive {
-        value: Box<Expression<'a>>,
+        value: BoxedExpr<'arena, 'code>,
         from: PrimitiveType,
         to: PrimitiveType,
     },
     /// ({lhs}) {op} ({rhs})
     BinOp {
         op: BinOp,
-        lhs: Box<Expression<'a>>,
-        rhs: Box<Expression<'a>>,
+        lhs: BoxedExpr<'arena, 'code>,
+        rhs: BoxedExpr<'arena, 'code>,
     },
     /// {op}({argument})
     UnaryOp {
         op: UnaryOp,
-        argument: Box<Expression<'a>>,
+        argument: BoxedExpr<'arena, 'code>,
     },
     /// {0}
-    Call(Call<'a>),
+    Call(Call<'arena, 'code>),
 }
 
 #[derive(Debug)]
-pub struct Field<'a> {
+pub struct Field<'arena, 'code> {
     // `None` for static fields
-    pub object: Option<Box<Expression<'a>>>,
-    pub class: Str<'a>,
-    pub name: Str<'a>,
+    pub object: Option<BoxedExpr<'arena, 'code>>,
+    pub class: Str<'code>,
+    pub name: Str<'code>,
     // JVM bytecode allows fields with equal names but different types to co-exist, Java
     // doesn't. Decompiling such code correctly requires us to track types.
-    pub descriptor: Str<'a>,
+    pub descriptor: Str<'code>,
 }
 
-impl Display for Field<'_> {
+impl Display for Field<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(object) = &self.object {
             write!(f, "({object}).")?;
@@ -135,29 +177,29 @@ impl Display for Field<'_> {
 }
 
 #[derive(Debug)]
-pub struct Call<'a> {
-    pub method_name: Str<'a>,
-    pub kind: CallKind<'a>,
-    pub arguments: Arguments<'a>,
+pub struct Call<'arena, 'code> {
+    pub method_name: Str<'code>,
+    pub kind: CallKind<'arena, 'code>,
+    pub arguments: Arguments<'arena, 'code>,
     // We retain method descriptors until codegen because we may need to insert casts to invoke the
-    // correct overloads, and we can't perform data flow analysis until SSA is available. For
-    // example, consider the snippet
+    // correct overloads, and we can't perform data flow analysis until SSA-like independent
+    // variables have been established. For example, consider the snippet
     //     static void f(Object o) {}
     //     static void f(String s) {}
     //     static void g(String s) { f((Object)o); }
     // ...where the explicit cast to `Object` does not emit `checkcast` becuase it's an upcast, and
     // the only piece of information that specifies the correct overload is the method signature.
-    pub descriptor: Str<'a>,
+    pub descriptor: Str<'code>,
 }
 
 #[derive(Debug)]
-pub enum CallKind<'a> {
+pub enum CallKind<'arena, 'code> {
     Static {
-        class_or_interface: Str<'a>,
+        class_or_interface: Str<'code>,
     },
     Method {
-        class_or_interface: Str<'a>,
-        object: Box<Expression<'a>>,
+        class_or_interface: Str<'code>,
+        object: BoxedExpr<'arena, 'code>,
         is_special: bool,
     },
     Dynamic {
@@ -165,7 +207,7 @@ pub enum CallKind<'a> {
     },
 }
 
-impl Display for Call<'_> {
+impl Display for Call<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
             CallKind::Static { class_or_interface } => write!(f, "{class_or_interface}::")?,
@@ -193,9 +235,9 @@ impl Display for Call<'_> {
 }
 
 #[derive(Debug)]
-pub struct Arguments<'a>(pub Vec<Box<Expression<'a>>>);
+pub struct Arguments<'arena, 'code>(pub Vec<BoxedExpr<'arena, 'code>>);
 
-impl Display for Arguments<'_> {
+impl Display for Arguments<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(arg) = self.0.get(0) {
             write!(f, "{arg}")?;
@@ -208,9 +250,9 @@ impl Display for Arguments<'_> {
 }
 
 #[derive(Debug, Display)]
-pub enum Type<'a> {
+pub enum Type<'code> {
     /// {0}
-    Reference(Str<'a>),
+    Reference(Str<'code>),
     /// {0}
     Primitive(PrimitiveType),
 }
@@ -303,7 +345,7 @@ pub enum UnaryOp {
     Neg,
 }
 
-#[derive(Debug, Display)]
+#[derive(Clone, Copy, Debug, Display, Hash, PartialEq, Eq)]
 pub enum VariableNamespace {
     /// slot
     Slot,
@@ -316,7 +358,7 @@ pub enum VariableNamespace {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Str<'a>(pub &'a MStr);
+pub struct Str<'code>(pub &'code MStr);
 
 impl Display for Str<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
