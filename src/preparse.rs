@@ -45,7 +45,7 @@ pub struct BasicBlock {
     pub stack_size_at_start: usize,
     /// The IDs of BBs the last instruction in this BB can jump to. This includes fallthrough, but
     /// excludes jumps to exception handlers.
-    successors: Vec<usize>,
+    pub successors: Vec<usize>,
     /// The ranges of instructions that can jump to the start of this BB on exception.
     eh_entry_for_ranges: Vec<Range<u32>>,
 }
@@ -122,6 +122,11 @@ pub fn extract_basic_blocks(
                 .expect("jump not to BB start");
             basic_blocks[bb_id].successors.push(target_bb_id);
         }
+    }
+
+    for bb in &mut basic_blocks {
+        bb.successors.sort();
+        bb.successors.dedup();
     }
 
     // *Typically*, the last BB cannot fallthrough, i.e. jump to the non-existent BB after it. We

@@ -45,6 +45,10 @@ impl BasicStatement {
 
 #[derive(Debug)]
 pub enum Expression<'code> {
+    This,
+    Argument {
+        index: usize,
+    },
     ArrayElement {
         array: ExprId,
         index: ExprId,
@@ -61,8 +65,8 @@ pub enum Expression<'code> {
     },
     Null,
     Variable {
-        id: usize,
-        namespace: VariableNamespace,
+        name: VariableName,
+        version: ExprId,
     },
     Field {
         // `None` for static fields
@@ -128,6 +132,8 @@ pub enum Expression<'code> {
 impl<'code> DebugIr<'code> for Expression<'code> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         match self {
+            Self::This => write!(f, "this"),
+            Self::Argument { index } => write!(f, "arg{index}"),
             Self::ArrayElement { array, index } => {
                 write!(f, "({})[{}]", arena.debug(array), arena.debug(index))
             }
@@ -138,7 +144,7 @@ impl<'code> DebugIr<'code> for Expression<'code> {
             } => write!(f, "new {element_type}{lengths:?}"),
             Self::NewUninitialized { class } => write!(f, "new uninitialized {class}"),
             Self::Null => write!(f, "null"),
-            Self::Variable { id, namespace } => write!(f, "{namespace}{id}"),
+            Self::Variable { name, version } => write!(f, "{name}v{}", version.0),
             Self::Field {
                 object,
                 class,
@@ -319,6 +325,13 @@ impl Display for BinOp {
 pub enum UnaryOp {
     /// -
     Neg,
+}
+
+/// {namespace}{id}
+#[derive(Clone, Copy, Debug, Display, Hash, PartialEq, Eq)]
+pub struct VariableName {
+    pub id: usize,
+    pub namespace: VariableNamespace,
 }
 
 #[derive(Clone, Copy, Debug, Display, Hash, PartialEq, Eq)]

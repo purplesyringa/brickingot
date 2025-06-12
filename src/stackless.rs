@@ -1,16 +1,12 @@
+use crate::abstract_eval::Machine;
 use crate::arena::{Arena, DebugIr, ExprId};
-use crate::ast::{BasicStatement, Expression, Str, VariableNamespace};
+use crate::ast::{BasicStatement, Expression, Str, VariableName};
 use crate::insn_ir_import::{import_insn_to_ir, InsnIrImportError};
+use crate::insn_stack_effect::is_type_descriptor_double_width;
 use crate::preparse;
-use crate::stack_machine::StackMachine;
-use std::collections::HashMap;
-// use crate::insn2stmt::{convert_instruction_to_unstructured_ast, InstructionParseError};
-// use crate::instructions::{
-//     get_instruction_stack_adjustment, get_instruction_successors, InstructionPreParseError,
-// };
-
 use core::fmt::{self, Display};
 use noak::{
+    descriptor::MethodDescriptor,
     error::DecodeError,
     reader::{
         attributes::{Code, Index},
@@ -18,6 +14,7 @@ use noak::{
     },
     MStr,
 };
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -106,22 +103,64 @@ impl Display for ExceptionHandler<'_> {
     }
 }
 
+#[derive(Clone)]
+struct BasicBlock {
+    active_defs_at_end: FxHashMap<VariableName, ExprId>,
+    predecessors: Vec<usize>,
+}
+
+impl BasicBlock {
+    fn new() -> Self {
+        Self {
+            active_defs_at_end: FxHashMap::default(),
+            predecessors: Vec::new(),
+        }
+    }
+}
+
 pub fn build_stackless_ir<'code>(
     arena: &Arena<'code>,
     pool: &ConstantPool<'code>,
     code: &Code<'code>,
-    basic_blocks: Vec<preparse::BasicBlock>,
+    method_descriptor: &MethodDescriptor<'code>,
+    is_static: bool,
+    preparse_basic_blocks: Vec<preparse::BasicBlock>,
 ) -> Result<Program<'code>, StacklessIrError> {
-    let mut statements = Vec::new();
+    let mut machine = Machine {
+        arena,
+        stack_size: 0,
+        active_defs: FxHashMap::default(),
+        unresolved_uses: FxHashMap::default(),
+        bb_id: usize::MAX,
+        statements: Vec::new(),
+    };
+
+    let mut next_slot_id = 0;
+    if !is_static {
+        machine.set_slot(next_slot_id, arena.alloc(Expression::This));
+        next_slot_id += 1;
+    }
+    for (index, ty) in method_descriptor.parameters().enumerate() {
+        let value = arena.alloc(Expression::Argument { index });
+        machine.set_slot(next_slot_id, value);
+        next_slot_id += if is_type_descriptor_double_width(&ty) {
+            2
+        } else {
+            1
+        };
+    }
+
+    let mut ir_basic_blocks = vec![BasicBlock::new(); preparse_basic_blocks.len()];
 
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
     // bytecode and we'd rather not worry about that.
-    for bb in &basic_blocks {
-        let mut stack = StackMachine {
-            arena,
-            stack_size: bb.stack_size_at_start,
-        };
-        let stmt_range_start = statements.len();
+    for (bb_id, bb) in preparse_basic_blocks.iter().enumerate() {
+        machine.stack_size = bb.stack_size_at_start;
+        machine.bb_id = bb_id;
+
+        for succ_bb_id in &bb.successors {
+            ir_basic_blocks[*succ_bb_id].predecessors.push(bb_id);
+        }
 
         for row in code.raw_instructions_from(Index::new(bb.instruction_range.start))? {
             let (address, insn) = row?;
@@ -131,41 +170,66 @@ pub fn build_stackless_ir<'code>(
                 break;
             }
 
-            let stack_size_before_insn = stack.stack_size;
+            let stack_size_before_insn = machine.stack_size;
             // Jump targets are initialized to instruction addresses. We'll remap them to statement
             // indices after all instructions have been converted.
-            import_insn_to_ir(&mut stack, pool, address, &insn, &mut statements).map_err(
-                |error| StacklessIrError::InsnIrImport {
+            import_insn_to_ir(&mut machine, pool, address, &insn).map_err(|error| {
+                StacklessIrError::InsnIrImport {
                     address,
                     insn: format!("{insn:?}"),
                     stack_size_before_insn,
                     error,
-                },
-            )?;
+                }
+            })?;
         }
 
-        // Certain variables we create can correspond to multiple source-level variables. This
-        // includes both stack variables, which can correspond to several independent expressions,
-        // and slots, which can correspond to variables local to distinct non-nested blocks. We want
-        // to split such variables into many.
-        //
-        // This is kind of similar to SSA: we could convert the IR to SSA and then merge all related
-        // variables, i.e. those mentioned by live phi functions, together. That's not the best way,
-        // because computing SSA fast requires complicated algorithms, and we don't really need SSA
-        // in any intermediate IR -- all we want is to be able to inline single definitions into
-        // single uses, and we don't need SSA for that.
-        //
-        // For each variable use, we want to determine which definitions the variable value could
-        // come from. We'll get to handling cross-BB references in a moment, but for now, let's
-        // handle individual BBs.
-        let mut active_defs: HashMap<(usize, VariableNamespace), usize> = HashMap::new();
-        for (stmt_id, stmt) in statements.iter().enumerate().skip(stmt_range_start) {
-            if let Statement::Basic(BasicStatement::Assign { target, .. }) = stmt
-                && let Expression::Variable { id, namespace } = arena[*target]
-            {
-                active_defs.insert((id, namespace), stmt_id);
-            }
+        ir_basic_blocks[bb_id].active_defs_at_end = machine
+            .active_defs
+            .drain()
+            .filter(|(_, def)| !def.is_fake)
+            .map(|(var, def)| (var, def.version))
+            .collect();
+    }
+
+    // Certain variables we create can correspond to multiple source-level variables. This includes
+    // both stack variables, which can correspond to several independent expressions, and slots,
+    // which can correspond to variables local to distinct non-nested blocks. We want to split such
+    // variables into many independent ones.
+    //
+    // This is kind of similar to SSA: we could, for example, convert the IR to SSA and then merge
+    // all related variables, i.e. those mentioned by live phi functions, together. That's not the
+    // best way, because computing SSA fast requires complicated algorithms, and we don't really
+    // need SSA in any intermediate IR -- all we want is to be able to inline single definitions
+    // into single uses, and we don't need SSA for that.
+    //
+    // The main thing we lose from avoiding SSA is the ability to merge `x` and `y` into one
+    // variable upon encountering `x = y`. There's two problems with this:
+    //
+    // - Even if `x` is single-def, replacing `x` with `y` at each use could cause the wrong version
+    //   of `y` to be accessed if `y` is reassigned between `x = y` and use of `x`. This can be
+    //   avoided by refusing to merge variables in this case, but...
+    // - If, after the assignment `slotN = stackM`, `stackM` is accessed again, e.g. as in
+    //   `f(a = x)`, `stackM` would be saved into a separate variable. This can be fixed by changing
+    //   the definition of `stackM` to the return value of the assignment operator. However, if
+    //   `stackM` is itself defined by `stackM = stackK`, we'd also need to reassign `stackK`, and
+    //   this could span across BBs and quickly becomes messy.
+    //
+    // I'm not sure what to do about this...
+    //
+    // In a nutshell, for each variable use, we want to determine which definitions its value could
+    // come from, and request that those definition share a variable. The components of such
+    // a DSU-like structure then correspond to individual variables.
+    //
+    // We've already linked uses to definitions within basic blocks. We now need to link unresolved
+    // uses to non-fake active definitions in predecessors. There's a relatively simple way to
+    // achieve this per-variable with DFS. The total time complexity becomes
+    // O(n_variables * n_basic_blocks), which sucks, because most other algorithms we use are
+    // quasi-linear, but SSA-adjacent stuff can't really be any faster.
+    for (name, uses) in machine.unresolved_uses {
+        if ir_basic_blocks.len() == 1 {
+            println!("woah {name}");
         }
+        //     for (bb_id, use_expr_id) in uses {}
     }
 
     // // Fixup jump destinations
@@ -207,7 +271,7 @@ pub fn build_stackless_ir<'code>(
     // }
 
     Ok(Program {
-        statements,
+        statements: machine.statements,
         exception_handlers,
     })
 }

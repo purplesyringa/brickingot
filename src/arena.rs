@@ -1,11 +1,11 @@
-use crate::ast::{Expression, VariableNamespace};
+use crate::ast::Expression;
 use alloc::alloc;
 use core::cell::Cell;
 use core::fmt::{self, Display};
 use core::ops::{Index, IndexMut};
 
 #[derive(Clone, Copy, Debug)]
-pub struct ExprId(u32);
+pub struct ExprId(pub u32);
 
 pub struct Arena<'code> {
     chunks: [Cell<*mut Expression<'code>>; 27],
@@ -22,26 +22,21 @@ impl<'code> Arena<'code> {
 
     #[inline]
     pub fn alloc(&self, expr: Expression<'code>) -> ExprId {
-        match self.try_alloc(expr) {
-            Ok(id) => id,
-            Err(expr) => {
-                drop(expr); // don't hold expression across panic, see comment in allocate_new_chunk
-                panic!("failed to allocate expression");
-            }
-        }
+        self.alloc_with(|_| expr)
     }
 
     #[inline]
-    fn try_alloc(&self, expr: Expression<'code>) -> Result<ExprId, Expression<'code>> {
+    pub fn alloc_with(&self, cb: impl FnOnce(ExprId) -> Expression<'code>) -> ExprId {
         let id = self.next_id.get();
         if id & (id - 1) == 0 && !unsafe { self.allocate_new_chunk() } {
-            return Err(expr);
+            drop(cb);
+            panic!("failed to allocate expression");
         }
         unsafe {
-            self.get_raw_unchecked(ExprId(id)).write(expr);
+            self.get_raw_unchecked(ExprId(id)).write(cb(ExprId(id)));
         }
         self.next_id.set(id.wrapping_add(1));
-        Ok(ExprId(id))
+        ExprId(id)
     }
 
     #[cold]
@@ -92,27 +87,6 @@ impl<'code> Arena<'code> {
         self.chunks[chunk_id as usize - 5]
             .get()
             .wrapping_add(id.0 as usize)
-    }
-
-    pub fn stack(&self, id: usize) -> ExprId {
-        self.alloc(Expression::Variable {
-            id,
-            namespace: VariableNamespace::Stack,
-        })
-    }
-
-    pub fn slot(&self, id: usize) -> ExprId {
-        self.alloc(Expression::Variable {
-            id,
-            namespace: VariableNamespace::Slot,
-        })
-    }
-
-    pub fn tmp(&self, id: usize) -> ExprId {
-        self.alloc(Expression::Variable {
-            id,
-            namespace: VariableNamespace::Temporary,
-        })
     }
 
     pub fn int(&self, value: i32) -> ExprId {

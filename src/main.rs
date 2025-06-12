@@ -7,10 +7,10 @@ mod arrows;
 mod ast;
 mod stackless;
 // mod cfg;
+mod abstract_eval;
 mod insn_control_flow;
 mod insn_ir_import;
 mod insn_stack_effect;
-mod stack_machine;
 // mod matcher;
 // mod unstructured;
 mod preparse;
@@ -22,9 +22,10 @@ use crate::stackless::{build_stackless_ir, StacklessIrError};
 // use crate::matcher::rewrite_control_flow;
 // use crate::unstructured::{convert_code_to_stackless, StatementGenerationError};
 use noak::{
+    descriptor::MethodDescriptor,
     error::DecodeError,
     reader::{attributes::Code, cpool::ConstantPool, Class, Method},
-    MStr,
+    AccessFlags, MStr,
 };
 use std::time::Instant;
 use thiserror::Error;
@@ -93,7 +94,7 @@ fn decompile_method<'code>(
         return Ok(());
     };
 
-    // println!("method {}", pool.retrieve(method.name())?.display());
+    println!("method {}", pool.retrieve(method.name())?.display());
 
     // During the course of decompilation, the program is translated between different IR forms.
     // They are all similar to each other and use the same underlying data structures to represent
@@ -118,12 +119,16 @@ fn decompile_method<'code>(
     // javac output would produce code further from the source, so we don't do that. If or when
     // control flow obfuscation becomes a problem, we can consider changing this.
 
+    let descriptor = MethodDescriptor::parse(pool.retrieve(method.descriptor())?)?;
+    let is_static = method.access_flags().contains(AccessFlags::STATIC);
+
     // The first IR we build is imperative and uses variables instead of stack. Stack accesses are
     // resolved via variables `stackN`, where `N` is the current stack size. The control flow is
     // unstructured. The number of distinct statement types is greatly reduced because most
     // instructions are translated as `var := expr`. Information about basic blocks is available,
     // but is not an intrinsic part of the IR.
-    let stackless_ir = build_stackless_ir(&arena, pool, &code, basic_blocks)?;
+    let stackless_ir =
+        build_stackless_ir(&arena, pool, &code, &descriptor, is_static, basic_blocks)?;
 
     // let unstructured_program = convert_code_to_stackless(arena, pool, &code)?;
     // let mut stmts = structurize_cfg(unstructured_program);
@@ -154,7 +159,7 @@ fn main() {
         if !entry.path().extension().is_some_and(|ext| ext == "class") {
             continue;
         }
-        // println!("file {:?}", entry.path());
+        println!("file {:?}", entry.path());
         let raw_bytes = std::fs::read(entry.path()).expect("files");
         if let Err(e) = decompile_class_file(&raw_bytes) {
             panic!("class decompilation failed: {e}");
