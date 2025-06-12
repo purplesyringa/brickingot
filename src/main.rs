@@ -1,5 +1,7 @@
 #![cfg_attr(false, no_std)]
 
+extern crate alloc;
+
 mod arena;
 mod arrows;
 mod ast;
@@ -138,12 +140,11 @@ fn decompile_method<'code>(
 }
 
 fn main() {
-    // let raw_bytes = std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/avx.class")
-    //     .expect("failed to read class file");
+    // let raw_bytes = include_bytes!("/home/purplesyringa/mc/public/server-1.21.5/avx.class");
     // let raw_bytes = std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/dao.class")
     //     .expect("failed to read class file");
-    // let raw_bytes = std::fs::read("/home/purplesyringa/mc/public/vineflower-1.11.1-slim/org/jetbrains/java/decompiler/modules/decompiler/exps/InvocationExprent.class").expect("failed to read class file");
-    // if let Err(e) = decompile_class_file(&raw_bytes) {
+    // let raw_bytes = include_bytes!("/home/purplesyringa/mc/public/vineflower-1.11.1-slim/org/jetbrains/java/decompiler/modules/decompiler/exps/InvocationExprent.class");
+    // if let Err(e) = decompile_class_file(raw_bytes) {
     //     panic!("class decompilation failed: {e}");
     // }
 
