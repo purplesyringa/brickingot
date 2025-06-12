@@ -1,30 +1,37 @@
+use crate::arena::{Arena, DebugIr, ExprId};
 use core::fmt::{self, Display};
 use displaydoc::Display;
 use noak::reader::cpool::value::{Dynamic, MethodHandle};
 use noak::MStr;
 
-#[derive(Debug, Display)]
-pub enum BasicStatement<'arena, 'code> {
-    /// {target} = {value};
-    Assign {
-        target: BoxedExpr<'arena, 'code>,
-        value: BoxedExpr<'arena, 'code>,
-    },
-    /// return {value};
-    Return { value: BoxedExpr<'arena, 'code> },
-    /// return;
+#[derive(Debug)]
+pub enum BasicStatement {
+    Assign { target: ExprId, value: ExprId },
+    Return { value: ExprId },
     ReturnVoid,
-    /// throw {exception};
-    Throw { exception: BoxedExpr<'arena, 'code> },
-    /// {0};
-    Calculate(BoxedExpr<'arena, 'code>),
-    /// lock {object};
-    MonitorEnter { object: BoxedExpr<'arena, 'code> },
-    /// unlock {object};
-    MonitorExit { object: BoxedExpr<'arena, 'code> },
+    Throw { exception: ExprId },
+    Calculate(ExprId),
+    MonitorEnter { object: ExprId },
+    MonitorExit { object: ExprId },
 }
 
-impl BasicStatement<'_, '_> {
+impl<'code> DebugIr<'code> for BasicStatement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+        match self {
+            Self::Assign { target, value } => {
+                write!(f, "{} = {};", arena.debug(target), arena.debug(value))
+            }
+            Self::Return { value } => write!(f, "return {};", arena.debug(value)),
+            Self::ReturnVoid => write!(f, "return;"),
+            Self::Throw { exception } => write!(f, "throw {};", arena.debug(exception)),
+            Self::Calculate(value) => write!(f, "{};", arena.debug(value)),
+            Self::MonitorEnter { object } => write!(f, "lock {};", arena.debug(object)),
+            Self::MonitorExit { object } => write!(f, "unlock {};", arena.debug(object)),
+        }
+    }
+}
+
+impl BasicStatement {
     pub fn is_divergent(&self) -> bool {
         match self {
             Self::Assign { .. }
@@ -36,217 +43,186 @@ impl BasicStatement<'_, '_> {
     }
 }
 
-pub type BoxedExpr<'arena, 'code> = &'arena mut Expression<'arena, 'code>;
-
-#[derive(Clone, Copy)]
-pub struct ArenaRef<'arena, 'code> {
-    pub typed_arena: &'arena typed_arena::Arena<Expression<'arena, 'code>>,
-}
-
-impl<'arena, 'code> ArenaRef<'arena, 'code> {
-    pub fn alloc(self, expr: Expression<'arena, 'code>) -> BoxedExpr<'arena, 'code> {
-        self.typed_arena.alloc(expr)
-    }
-
-    pub fn stack(self, id: usize) -> BoxedExpr<'arena, 'code> {
-        self.alloc(Expression::Variable {
-            id,
-            namespace: VariableNamespace::Stack,
-        })
-    }
-
-    pub fn slot(self, id: usize) -> BoxedExpr<'arena, 'code> {
-        self.alloc(Expression::Variable {
-            id,
-            namespace: VariableNamespace::Slot,
-        })
-    }
-
-    pub fn tmp(self, id: usize) -> BoxedExpr<'arena, 'code> {
-        self.alloc(Expression::Variable {
-            id,
-            namespace: VariableNamespace::Temporary,
-        })
-    }
-
-    pub fn int(self, value: i32) -> BoxedExpr<'arena, 'code> {
-        self.alloc(Expression::ConstInt(value))
-    }
-
-    pub fn null(self) -> BoxedExpr<'arena, 'code> {
-        self.alloc(Expression::Null)
-    }
-}
-
-#[derive(Debug, Display)]
-pub enum Expression<'arena, 'code> {
-    /// ({array})[{index}]
+#[derive(Debug)]
+pub enum Expression<'code> {
     ArrayElement {
-        array: BoxedExpr<'arena, 'code>,
-        index: BoxedExpr<'arena, 'code>,
+        array: ExprId,
+        index: ExprId,
     },
-    /// ({array}).length
-    ArrayLength { array: BoxedExpr<'arena, 'code> },
-    /// new {element_type}{lengths:?}
+    ArrayLength {
+        array: ExprId,
+    },
     NewArray {
         element_type: Type<'code>,
-        lengths: Vec<BoxedExpr<'arena, 'code>>,
+        lengths: Vec<ExprId>,
     },
-    /// new uninitialized {class}
-    NewUninitialized { class: Str<'code> },
-    /// null
+    NewUninitialized {
+        class: Str<'code>,
+    },
     Null,
-    /// {namespace}{id}
     Variable {
         id: usize,
         namespace: VariableNamespace,
     },
-    /// {0}
-    Field(Field<'arena, 'code>),
-    /// {0}.class
+    Field {
+        // `None` for static fields
+        object: Option<ExprId>,
+        class: Str<'code>,
+        name: Str<'code>,
+        // JVM bytecode allows fields with equal names but different types to co-exist, Java
+        // doesn't. Decompiling such code correctly requires us to track types.
+        descriptor: Str<'code>,
+    },
     Class(Str<'code>),
-    /// {0:?}
     DynamicConst(Dynamic<'code>),
-    /// {0:?}
     ConstMethodHandle(MethodHandle<'code>),
-    /// MethodType({descriptor:?})
-    ConstMethodType { descriptor: &'code MStr },
-    /// {0}b
+    ConstMethodType {
+        descriptor: &'code MStr,
+    },
     ConstByte(i8),
-    /// {0}s
     ConstShort(i16),
-    /// {0}i
     ConstInt(i32),
-    /// {0}l
     ConstLong(i64),
-    /// {0}f
     ConstFloat(f32),
-    /// {0}d
     ConstDouble(f64),
-    /// {0:?}
     ConstString(&'code MStr),
-    /// ({object}) instanceof {class}
     InstanceOf {
-        object: BoxedExpr<'arena, 'code>,
+        object: ExprId,
         class: Str<'code>,
     },
-    /// ({class})({value})
     CastReference {
-        value: BoxedExpr<'arena, 'code>,
+        object: ExprId,
         class: Str<'code>,
     },
-    /// ({from} -> {to})({value})
     CastPrimitive {
-        value: BoxedExpr<'arena, 'code>,
+        value: ExprId,
         from: PrimitiveType,
         to: PrimitiveType,
     },
-    /// ({lhs}) {op} ({rhs})
     BinOp {
         op: BinOp,
-        lhs: BoxedExpr<'arena, 'code>,
-        rhs: BoxedExpr<'arena, 'code>,
+        lhs: ExprId,
+        rhs: ExprId,
     },
-    /// {op}({argument})
     UnaryOp {
         op: UnaryOp,
-        argument: BoxedExpr<'arena, 'code>,
+        argument: ExprId,
     },
-    /// {0}
-    Call(Call<'arena, 'code>),
+    Call {
+        method_name: Str<'code>,
+        kind: CallKind<'code>,
+        arguments: Vec<ExprId>,
+        // We retain method descriptors until codegen because we may need to insert casts to invoke
+        // the correct overloads, and we can't perform data flow analysis until SSA-like independent
+        // variables have been established. For example, consider the snippet
+        //     static void f(Object o) {}
+        //     static void f(String s) {}
+        //     static void g(String s) { f((Object)o); }
+        // ...where the explicit cast to `Object` does not emit `checkcast` becuase it's an upcast,
+        // and the only piece of information that specifies the correct overload is the method
+        // signature.
+        descriptor: Str<'code>,
+    },
 }
 
-#[derive(Debug)]
-pub struct Field<'arena, 'code> {
-    // `None` for static fields
-    pub object: Option<BoxedExpr<'arena, 'code>>,
-    pub class: Str<'code>,
-    pub name: Str<'code>,
-    // JVM bytecode allows fields with equal names but different types to co-exist, Java
-    // doesn't. Decompiling such code correctly requires us to track types.
-    pub descriptor: Str<'code>,
-}
-
-impl Display for Field<'_, '_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(object) = &self.object {
-            write!(f, "({object}).")?;
+impl<'code> DebugIr<'code> for Expression<'code> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+        match self {
+            Self::ArrayElement { array, index } => {
+                write!(f, "({})[{}]", arena.debug(array), arena.debug(index))
+            }
+            Self::ArrayLength { array } => write!(f, "({}).length", arena.debug(array)),
+            Self::NewArray {
+                element_type,
+                lengths,
+            } => write!(f, "new {element_type}{lengths:?}"),
+            Self::NewUninitialized { class } => write!(f, "new uninitialized {class}"),
+            Self::Null => write!(f, "null"),
+            Self::Variable { id, namespace } => write!(f, "{namespace}{id}"),
+            Self::Field {
+                object,
+                class,
+                name,
+                descriptor,
+            } => {
+                if let Some(object) = object {
+                    write!(f, "({}).", arena.debug(object))?;
+                }
+                write!(f, "{}::{}[{}]", class, name, descriptor)
+            }
+            Self::Class(name) => write!(f, "{name}.class"),
+            Self::DynamicConst(dynamic) => write!(f, "{dynamic:?}"),
+            Self::ConstMethodHandle(handle) => write!(f, "{handle:?}"),
+            Self::ConstMethodType { descriptor } => write!(f, "MethodType({descriptor:?})"),
+            Self::ConstByte(n) => write!(f, "{n}b"),
+            Self::ConstShort(n) => write!(f, "{n}s"),
+            Self::ConstInt(n) => write!(f, "{n}i"),
+            Self::ConstLong(n) => write!(f, "{n}l"),
+            Self::ConstFloat(n) => write!(f, "{n}f"),
+            Self::ConstDouble(n) => write!(f, "{n}d"),
+            Self::ConstString(value) => write!(f, "{value:?}"),
+            Self::InstanceOf { object, class } => {
+                write!(f, "({}) instanceof {class}", arena.debug(object))
+            }
+            Self::CastReference { object, class } => {
+                write!(f, "({class})({})", arena.debug(object))
+            }
+            Self::CastPrimitive { value, from, to } => {
+                write!(f, "({from} -> {to})({})", arena.debug(value))
+            }
+            Self::BinOp { op, lhs, rhs } => {
+                write!(f, "({}) {op} ({})", arena.debug(lhs), arena.debug(rhs))
+            }
+            Self::UnaryOp { op, argument } => write!(f, "({op})({})", arena.debug(argument)),
+            Self::Call {
+                method_name,
+                kind,
+                arguments,
+                descriptor,
+            } => {
+                match kind {
+                    CallKind::Static { class_or_interface } => write!(f, "{class_or_interface}::")?,
+                    CallKind::Method {
+                        class_or_interface,
+                        object,
+                        is_special,
+                    } => {
+                        write!(f, "({}).", arena.debug(object))?;
+                        if *is_special {
+                            write!(f, "special ")?;
+                        }
+                        write!(f, "{class_or_interface}::")?;
+                    }
+                    CallKind::Dynamic {
+                        bootstrap_method_attr,
+                    } => write!(f, "indy #{bootstrap_method_attr} ")?,
+                }
+                write!(f, "{}[{}](", method_name, descriptor)?;
+                if let Some(first_arg) = arguments.get(0) {
+                    write!(f, "{}", arena.debug(first_arg))?;
+                    for arg in &arguments[1..] {
+                        write!(f, ", {}", arena.debug(arg))?;
+                    }
+                }
+                write!(f, ")")
+            }
         }
-        write!(f, "{}::{}[{}]", self.class, self.name, self.descriptor)
     }
 }
 
 #[derive(Debug)]
-pub struct Call<'arena, 'code> {
-    pub method_name: Str<'code>,
-    pub kind: CallKind<'arena, 'code>,
-    pub arguments: Arguments<'arena, 'code>,
-    // We retain method descriptors until codegen because we may need to insert casts to invoke the
-    // correct overloads, and we can't perform data flow analysis until SSA-like independent
-    // variables have been established. For example, consider the snippet
-    //     static void f(Object o) {}
-    //     static void f(String s) {}
-    //     static void g(String s) { f((Object)o); }
-    // ...where the explicit cast to `Object` does not emit `checkcast` becuase it's an upcast, and
-    // the only piece of information that specifies the correct overload is the method signature.
-    pub descriptor: Str<'code>,
-}
-
-#[derive(Debug)]
-pub enum CallKind<'arena, 'code> {
+pub enum CallKind<'code> {
     Static {
         class_or_interface: Str<'code>,
     },
     Method {
         class_or_interface: Str<'code>,
-        object: BoxedExpr<'arena, 'code>,
+        object: ExprId,
         is_special: bool,
     },
     Dynamic {
         bootstrap_method_attr: u16,
     },
-}
-
-impl Display for Call<'_, '_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.kind {
-            CallKind::Static { class_or_interface } => write!(f, "{class_or_interface}::")?,
-            CallKind::Method {
-                class_or_interface,
-                object,
-                is_special,
-            } => {
-                write!(f, "({object}).")?;
-                if *is_special {
-                    write!(f, "special ")?;
-                }
-                write!(f, "{class_or_interface}::")?;
-            }
-            CallKind::Dynamic {
-                bootstrap_method_attr,
-            } => write!(f, "indy #{bootstrap_method_attr} ")?,
-        }
-        write!(
-            f,
-            "{}[{}]({})",
-            self.method_name, self.descriptor, self.arguments
-        )
-    }
-}
-
-#[derive(Debug)]
-pub struct Arguments<'arena, 'code>(pub Vec<BoxedExpr<'arena, 'code>>);
-
-impl Display for Arguments<'_, '_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(arg) = self.0.get(0) {
-            write!(f, "{arg}")?;
-            for arg in &self.0[1..] {
-                write!(f, ", {arg}")?;
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Display)]

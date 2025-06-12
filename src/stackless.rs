@@ -1,4 +1,5 @@
-use crate::ast::{ArenaRef, BasicStatement, BoxedExpr, Expression, Str, VariableNamespace};
+use crate::arena::{Arena, DebugIr, ExprId};
+use crate::ast::{BasicStatement, Expression, Str, VariableNamespace};
 use crate::insn_ir_import::{import_insn_to_ir, InsnIrImportError};
 use crate::preparse;
 use crate::stack_machine::StackMachine;
@@ -9,7 +10,6 @@ use std::collections::HashMap;
 // };
 
 use core::fmt::{self, Display};
-use displaydoc::Display;
 use noak::{
     error::DecodeError,
     reader::{
@@ -34,16 +34,16 @@ pub enum StacklessIrError {
     },
 }
 
-#[derive(Debug, Display)]
-pub struct Program<'arena, 'code> {
-    pub statements: Vec<Statement<'arena, 'code>>,
+#[derive(Debug)]
+pub struct Program<'code> {
+    pub statements: Vec<Statement>,
     pub exception_handlers: Vec<ExceptionHandler<'code>>,
 }
 
-impl Display for Program<'_, '_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<'code> DebugIr<'code> for Program<'code> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         for (i, stmt) in self.statements.iter().enumerate() {
-            write!(f, "{i}: {stmt}\n")?;
+            write!(f, "{i}: {}\n", arena.debug(stmt))?;
         }
         for handler in &self.exception_handlers {
             write!(f, "{handler}\n")?;
@@ -52,33 +52,35 @@ impl Display for Program<'_, '_> {
     }
 }
 
-#[derive(Debug, Display)]
-pub enum Statement<'arena, 'code> {
-    /// {0}
-    Basic(BasicStatement<'arena, 'code>),
-    /// if ({condition}) jump {target};
+#[derive(Debug)]
+pub enum Statement {
+    Basic(BasicStatement),
     Jump {
-        condition: BoxedExpr<'arena, 'code>,
+        condition: ExprId,
         target: usize,
     },
-    /// {0}
-    Switch(Switch<'arena, 'code>),
+    Switch {
+        key: ExprId,
+        arms: Vec<(i32, usize)>,
+        default: usize,
+    },
 }
 
-#[derive(Debug)]
-pub struct Switch<'arena, 'code> {
-    pub key: BoxedExpr<'arena, 'code>,
-    pub arms: Vec<(i32, usize)>,
-    pub default: usize,
-}
-
-impl Display for Switch<'_, '_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "switch ({}) ", self.key)?;
-        for (value, target) in &self.arms {
-            write!(f, "{value} => jump {target}; ")?;
+impl<'code> DebugIr<'code> for Statement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+        match self {
+            Self::Basic(stmt) => write!(f, "{}", arena.debug(stmt)),
+            Self::Jump { condition, target } => {
+                write!(f, "if ({}) jump {target};", arena.debug(condition))
+            }
+            Self::Switch { key, arms, default } => {
+                write!(f, "switch ({}) ", arena.debug(key))?;
+                for (value, target) in arms {
+                    write!(f, "{value} => jump {target}; ")?;
+                }
+                write!(f, "default => jump {default};")
+            }
         }
-        write!(f, "default => jump {};", self.default)
     }
 }
 
@@ -104,12 +106,12 @@ impl Display for ExceptionHandler<'_> {
     }
 }
 
-pub fn build_stackless_ir<'arena, 'code>(
-    arena: ArenaRef<'arena, 'code>,
+pub fn build_stackless_ir<'code>(
+    arena: &Arena<'code>,
     pool: &ConstantPool<'code>,
     code: &Code<'code>,
     basic_blocks: Vec<preparse::BasicBlock>,
-) -> Result<Program<'arena, 'code>, StacklessIrError> {
+) -> Result<Program<'code>, StacklessIrError> {
     let mut statements = Vec::new();
 
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
@@ -158,12 +160,10 @@ pub fn build_stackless_ir<'arena, 'code>(
         // handle individual BBs.
         let mut active_defs: HashMap<(usize, VariableNamespace), usize> = HashMap::new();
         for (stmt_id, stmt) in statements.iter().enumerate().skip(stmt_range_start) {
-            if let Statement::Basic(BasicStatement::Assign {
-                target: Expression::Variable { id, namespace },
-                ..
-            }) = stmt
+            if let Statement::Basic(BasicStatement::Assign { target, .. }) = stmt
+                && let Expression::Variable { id, namespace } = arena[*target]
             {
-                active_defs.insert((*id, *namespace), stmt_id);
+                active_defs.insert((id, namespace), stmt_id);
             }
         }
     }

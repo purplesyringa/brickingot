@@ -13,7 +13,7 @@ mod stack_machine;
 // mod unstructured;
 mod preparse;
 
-use crate::ast::ArenaRef;
+use crate::arena::Arena;
 use crate::preparse::{extract_basic_blocks, BytecodePreparsingError};
 use crate::stackless::{build_stackless_ir, StacklessIrError};
 // use crate::cfg::structurize_cfg;
@@ -101,10 +101,8 @@ fn decompile_method<'code>(
     //
     // This makes translation between IRs free of boilerplate, but we have to pay for allocation to
     // support expression nesting on each stage, even for IRs that use fixed-format expressions.
-    // This is why we use typed arenas.
-    let arena: ArenaRef<'_, 'code> = ArenaRef {
-        typed_arena: &typed_arena::Arena::new(),
-    };
+    // This is why we use arenas.
+    let arena: Arena<'code> = Arena::new();
 
     // We delay IR construction for a bit to reduce the number of (usually slow) recursive rewrites.
     // Everything that can be quickly computed from the bytecode should be done beforehand. This
@@ -123,7 +121,7 @@ fn decompile_method<'code>(
     // unstructured. The number of distinct statement types is greatly reduced because most
     // instructions are translated as `var := expr`. Information about basic blocks is available,
     // but is not an intrinsic part of the IR.
-    let stackless_ir = build_stackless_ir(arena, pool, &code, basic_blocks)?;
+    let stackless_ir = build_stackless_ir(&arena, pool, &code, basic_blocks)?;
 
     // let unstructured_program = convert_code_to_stackless(arena, pool, &code)?;
     // let mut stmts = structurize_cfg(unstructured_program);

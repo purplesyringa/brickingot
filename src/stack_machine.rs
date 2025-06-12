@@ -1,7 +1,5 @@
-use crate::ast::{
-    ArenaRef, Arguments, BasicStatement, BinOp, BoxedExpr, Expression, PrimitiveType,
-    VariableNamespace,
-};
+use crate::arena::{Arena, ExprId};
+use crate::ast::{BasicStatement, BinOp, Expression, PrimitiveType, VariableNamespace};
 use crate::insn_stack_effect::{is_name_and_type_double_width, is_type_descriptor_double_width};
 use crate::stackless::Statement;
 use noak::{
@@ -11,7 +9,7 @@ use noak::{
 use thiserror::Error;
 
 pub struct StackMachine<'arena, 'code> {
-    pub arena: ArenaRef<'arena, 'code>,
+    pub arena: &'arena Arena<'code>,
     pub stack_size: usize,
 }
 
@@ -20,7 +18,7 @@ pub struct StackMachine<'arena, 'code> {
 pub struct StackUnderflowError;
 
 impl<'arena, 'code> StackMachine<'arena, 'code> {
-    fn pop_sized(&mut self, size: usize) -> Result<BoxedExpr<'arena, 'code>, StackUnderflowError> {
+    fn pop_sized(&mut self, size: usize) -> Result<ExprId, StackUnderflowError> {
         if self.stack_size < size {
             return Err(StackUnderflowError);
         }
@@ -31,18 +29,18 @@ impl<'arena, 'code> StackMachine<'arena, 'code> {
         }))
     }
 
-    pub fn pop(&mut self) -> Result<BoxedExpr<'arena, 'code>, StackUnderflowError> {
+    pub fn pop(&mut self) -> Result<ExprId, StackUnderflowError> {
         self.pop_sized(1)
     }
 
-    pub fn pop2(&mut self) -> Result<BoxedExpr<'arena, 'code>, StackUnderflowError> {
+    pub fn pop2(&mut self) -> Result<ExprId, StackUnderflowError> {
         self.pop_sized(2)
     }
 
     pub fn pop_method_arguments(
         &mut self,
         method_descriptor: &MethodDescriptor<'code>,
-    ) -> Result<Arguments<'arena, 'code>, StackUnderflowError> {
+    ) -> Result<Vec<ExprId>, StackUnderflowError> {
         let parameter_sizes: Vec<usize> = method_descriptor
             .parameters()
             .map(|ty| {
@@ -53,19 +51,17 @@ impl<'arena, 'code> StackMachine<'arena, 'code> {
                 }
             })
             .collect();
-        Ok(Arguments(
-            parameter_sizes
-                .iter()
-                .rev()
-                .map(|size| self.pop_sized(*size))
-                .collect::<Result<_, _>>()?,
-        ))
+        Ok(parameter_sizes
+            .iter()
+            .rev()
+            .map(|size| self.pop_sized(*size))
+            .collect::<Result<_, _>>()?)
     }
 
     pub fn pop_nat(
         &mut self,
         name_and_type: &NameAndType<'code>,
-    ) -> Result<BoxedExpr<'arena, 'code>, StackUnderflowError> {
+    ) -> Result<ExprId, StackUnderflowError> {
         if is_name_and_type_double_width(name_and_type) {
             self.pop2()
         } else {
@@ -74,11 +70,7 @@ impl<'arena, 'code> StackMachine<'arena, 'code> {
     }
 
     #[must_use = "returns a statement that needs to be emitted manually"]
-    fn push_sized(
-        &mut self,
-        size: usize,
-        value: BoxedExpr<'arena, 'code>,
-    ) -> Statement<'arena, 'code> {
+    fn push_sized(&mut self, size: usize, value: ExprId) -> Statement {
         let id = self.stack_size;
         self.stack_size += size;
         Statement::Basic(BasicStatement::Assign {
@@ -91,12 +83,12 @@ impl<'arena, 'code> StackMachine<'arena, 'code> {
     }
 
     #[must_use = "returns a statement that needs to be emitted manually"]
-    pub fn push(&mut self, value: BoxedExpr<'arena, 'code>) -> Statement<'arena, 'code> {
+    pub fn push(&mut self, value: ExprId) -> Statement {
         self.push_sized(1, value)
     }
 
     #[must_use = "returns a statement that needs to be emitted manually"]
-    pub fn push2(&mut self, value: BoxedExpr<'arena, 'code>) -> Statement<'arena, 'code> {
+    pub fn push2(&mut self, value: ExprId) -> Statement {
         self.push_sized(2, value)
     }
 
@@ -104,8 +96,8 @@ impl<'arena, 'code> StackMachine<'arena, 'code> {
     pub fn push_return_type(
         &mut self,
         return_type: &Option<TypeDescriptor<'code>>,
-        value: BoxedExpr<'arena, 'code>,
-    ) -> Statement<'arena, 'code> {
+        value: ExprId,
+    ) -> Statement {
         if let Some(ret) = return_type {
             if is_type_descriptor_double_width(ret) {
                 self.push2(value)
@@ -118,11 +110,7 @@ impl<'arena, 'code> StackMachine<'arena, 'code> {
     }
 
     #[must_use = "returns a statement that needs to be emitted manually"]
-    pub fn push_nat(
-        &mut self,
-        name_and_type: &NameAndType<'code>,
-        value: BoxedExpr<'arena, 'code>,
-    ) -> Statement<'arena, 'code> {
+    pub fn push_nat(&mut self, name_and_type: &NameAndType<'code>, value: ExprId) -> Statement {
         if is_name_and_type_double_width(name_and_type) {
             self.push2(value)
         } else {
@@ -135,7 +123,7 @@ impl<'arena, 'code> StackMachine<'arena, 'code> {
         &mut self,
         from: PrimitiveType,
         to: PrimitiveType,
-    ) -> Result<Statement<'arena, 'code>, StackUnderflowError> {
+    ) -> Result<Statement, StackUnderflowError> {
         let value = self.pop_sized(from.size())?;
         Ok(self.push_sized(
             to.size(),
@@ -151,7 +139,7 @@ impl<'arena, 'code> StackMachine<'arena, 'code> {
         res_ty: PrimitiveType,
         lhs_ty: PrimitiveType,
         rhs_ty: PrimitiveType,
-    ) -> Result<Statement<'arena, 'code>, StackUnderflowError> {
+    ) -> Result<Statement, StackUnderflowError> {
         let rhs = self.pop_sized(rhs_ty.size())?;
         let lhs = self.pop_sized(lhs_ty.size())?;
         Ok(self.push_sized(
@@ -165,28 +153,24 @@ impl<'arena, 'code> StackMachine<'arena, 'code> {
         &mut self,
         op: BinOp,
         ty: PrimitiveType,
-    ) -> Result<Statement<'arena, 'code>, StackUnderflowError> {
+    ) -> Result<Statement, StackUnderflowError> {
         self.binop(op, ty, ty, ty)
     }
 
     #[must_use = "returns a statement that needs to be emitted manually"]
-    pub fn assign(
-        &mut self,
-        target: usize,
-        value: BoxedExpr<'arena, 'code>,
-    ) -> Statement<'arena, 'code> {
+    pub fn assign(&mut self, target: usize, value: ExprId) -> Statement {
         Statement::Basic(BasicStatement::Assign {
             target: self.at(target),
             value,
         })
     }
 
-    pub fn at(&mut self, position: usize) -> BoxedExpr<'arena, 'code> {
+    pub fn at(&mut self, position: usize) -> ExprId {
         self.arena.stack(position)
     }
 
     #[must_use = "returns a statement that needs to be emitted manually"]
-    pub fn copy(&mut self, target: usize, source: usize) -> Statement<'arena, 'code> {
+    pub fn copy(&mut self, target: usize, source: usize) -> Statement {
         let value = self.at(source);
         self.assign(target, value)
     }

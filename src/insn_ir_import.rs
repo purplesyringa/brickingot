@@ -1,9 +1,7 @@
-use crate::ast::{
-    ArenaRef, BasicStatement, BinOp, BoxedExpr, Call, CallKind, Expression, Field, PrimitiveType,
-    Str, Type, UnaryOp,
-};
+use crate::arena::{Arena, ExprId};
+use crate::ast::{BasicStatement, BinOp, CallKind, Expression, PrimitiveType, Str, Type, UnaryOp};
 use crate::stack_machine::{StackMachine, StackUnderflowError};
-use crate::stackless::{Statement, Switch};
+use crate::stackless::Statement;
 use noak::{
     descriptor::MethodDescriptor,
     error::DecodeError,
@@ -36,24 +34,17 @@ pub enum InsnIrImportError {
 }
 
 #[must_use = "returns a statement that needs to be emitted manually"]
-fn assign<'arena, 'code>(
-    target: BoxedExpr<'arena, 'code>,
-    value: BoxedExpr<'arena, 'code>,
-) -> Statement<'arena, 'code> {
+fn assign(target: ExprId, value: ExprId) -> Statement {
     Statement::Basic(BasicStatement::Assign { target, value })
 }
 
-fn field<'arena, 'code>(
-    arena: ArenaRef<'arena, 'code>,
-    object: Option<BoxedExpr<'arena, 'code>>,
-    field: &FieldRef<'code>,
-) -> BoxedExpr<'arena, 'code> {
-    arena.alloc(Expression::Field(Field {
+fn field<'code>(arena: &Arena<'code>, object: Option<ExprId>, field: &FieldRef<'code>) -> ExprId {
+    arena.alloc(Expression::Field {
         object,
         class: Str(field.class.name),
         name: Str(field.name_and_type.name),
         descriptor: Str(field.name_and_type.descriptor),
-    }))
+    })
 }
 
 fn invoke<'arena, 'code>(
@@ -62,7 +53,7 @@ fn invoke<'arena, 'code>(
     index: Index<Item<'code>>,
     has_receiver: bool,
     is_special: bool,
-) -> Result<Statement<'arena, 'code>, InsnIrImportError> {
+) -> Result<Statement, InsnIrImportError> {
     let (class, name_and_type) = match pool.get(index)? {
         Item::MethodRef(MethodRef {
             class,
@@ -92,12 +83,12 @@ fn invoke<'arena, 'code>(
 
     Ok(stack.push_return_type(
         &method_descriptor.return_type(),
-        stack.arena.alloc(Expression::Call(Call {
+        stack.arena.alloc(Expression::Call {
             method_name: Str(name_and_type.name),
             kind,
             arguments,
             descriptor: Str(name_and_type.descriptor),
-        })),
+        }),
     ))
 }
 
@@ -106,13 +97,13 @@ pub fn import_insn_to_ir<'arena, 'code>(
     pool: &ConstantPool<'code>,
     address: u32,
     insn: &RawInstruction<'code>,
-    stmts: &mut Vec<Statement<'arena, 'code>>,
+    stmts: &mut Vec<Statement>,
 ) -> Result<(), InsnIrImportError> {
     let arena = stack.arena;
 
     let offset_to_address = |offset: i32| -> u32 { (address as i32 + offset) as u32 };
 
-    let jump = |condition: BoxedExpr<'arena, 'code>, offset: i32| -> Statement<'arena, 'code> {
+    let jump = |condition: ExprId, offset: i32| -> Statement {
         Statement::Jump {
             condition,
             // The preparsing steps ensures all goto destinations are valid instruction addresses.
@@ -249,9 +240,9 @@ pub fn import_insn_to_ir<'arena, 'code>(
 
         // Conversions
         CheckCast { index } => {
-            let value = stack.pop()?;
+            let object = stack.pop()?;
             stmts.push(stack.push(arena.alloc(Expression::CastReference {
-                value,
+                object,
                 class: Str(pool.retrieve(*index)?.name),
             })));
         }
@@ -635,22 +626,22 @@ pub fn import_insn_to_ir<'arena, 'code>(
             }),
             *offset as i32,
         )),
-        LookupSwitch(switch) => stmts.push(Statement::Switch(Switch {
+        LookupSwitch(switch) => stmts.push(Statement::Switch {
             key: stack.pop()?,
             arms: switch
                 .pairs()
                 .map(|pair| (pair.key(), offset_to_address(pair.offset()) as usize))
                 .collect(),
             default: offset_to_address(switch.default_offset()) as usize,
-        })),
-        TableSwitch(switch) => stmts.push(Statement::Switch(Switch {
+        }),
+        TableSwitch(switch) => stmts.push(Statement::Switch {
             key: stack.pop()?,
             arms: switch
                 .pairs()
                 .map(|pair| (pair.key(), offset_to_address(pair.offset()) as usize))
                 .collect(),
             default: offset_to_address(switch.default_offset()) as usize,
-        })),
+        }),
 
         // Function calls
         InvokeDynamic { index } => {
@@ -659,14 +650,14 @@ pub fn import_insn_to_ir<'arena, 'code>(
             let arguments = stack.pop_method_arguments(&method_descriptor)?;
             stmts.push(stack.push_return_type(
                 &method_descriptor.return_type(),
-                arena.alloc(Expression::Call(Call {
+                arena.alloc(Expression::Call {
                     method_name: Str(indy.name_and_type.name),
                     kind: CallKind::Dynamic {
                         bootstrap_method_attr: indy.bootstrap_method_attr,
                     },
                     arguments,
                     descriptor: Str(indy.name_and_type.descriptor),
-                })),
+                }),
             ));
         }
         InvokeSpecial { index } => {
@@ -740,7 +731,7 @@ pub fn import_insn_to_ir<'arena, 'code>(
             stmts.push(stack.push(arena.alloc(Expression::ArrayLength { array })));
         }
         MultiANewArray { index, dimensions } => {
-            let mut lengths: Vec<BoxedExpr<'arena, 'code>> = (0..*dimensions)
+            let mut lengths: Vec<ExprId> = (0..*dimensions)
                 .map(|_| stack.pop())
                 .collect::<Result<_, _>>()?;
             lengths.reverse();
