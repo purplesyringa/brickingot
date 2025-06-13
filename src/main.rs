@@ -5,6 +5,7 @@ extern crate alloc;
 mod arena;
 mod arrows;
 mod ast;
+mod linking;
 mod stackless;
 // mod cfg;
 mod abstract_eval;
@@ -94,18 +95,23 @@ fn decompile_method<'code>(
         return Ok(());
     };
 
-    println!("method {}", pool.retrieve(method.name())?.display());
+    // println!("method {}", pool.retrieve(method.name())?.display());
 
     // During the course of decompilation, the program is translated between different IR forms.
     // They are all similar to each other and use the same underlying data structures to represent
-    // basic statements (i.e. those without control flow) and expression in the form of an AST.
+    // basic statements (i.e. those without control flow) and expressions in the form of an AST.
     // However, each IR adds a twist, like adding goto's, blocks, or allowing arbitrarily nested
     // expressions.
     //
     // This makes translation between IRs free of boilerplate, but we have to pay for allocation to
     // support expression nesting on each stage, even for IRs that use fixed-format expressions.
-    // This is why we use arenas.
-    let arena: Arena<'code> = Arena::new();
+    // This is why we use arenas: they speed up allocation and let us use IDs instead of owning
+    // pointers during intermediate stages.
+    //
+    // Note that it's still assumed that each expression is only referred to from one place --
+    // there's no CoW, and rewrites may arbitrarily modify expressions under the assumption that
+    // this won't affect other statements.
+    let mut arena: Arena<'code> = Arena::new();
 
     // We delay IR construction for a bit to reduce the number of (usually slow) recursive rewrites.
     // Everything that can be quickly computed from the bytecode should be done beforehand. This
@@ -122,19 +128,25 @@ fn decompile_method<'code>(
     let descriptor = MethodDescriptor::parse(pool.retrieve(method.descriptor())?)?;
     let is_static = method.access_flags().contains(AccessFlags::STATIC);
 
-    // The first IR we build is imperative and uses variables instead of stack. Stack accesses are
-    // resolved via variables `stackN`, where `N` is the current stack size. The control flow is
-    // unstructured. The number of distinct statement types is greatly reduced because most
-    // instructions are translated as `var := expr`. Information about basic blocks is available,
-    // but is not an intrinsic part of the IR.
-    let stackless_ir =
-        build_stackless_ir(&arena, pool, &code, &descriptor, is_static, basic_blocks)?;
+    // The first IR we build is imperative and uses variables instead of JVM's stack. The control
+    // flow is unstructured. The number of distinct statement types is greatly reduced because most
+    // instructions are translated as `var := expr`. Information about basic blocks is provided
+    // separately, but is not an intrinsic part of the IR.
+    let stackless_ir = build_stackless_ir(
+        &mut arena,
+        pool,
+        &code,
+        &descriptor,
+        is_static,
+        basic_blocks,
+    )?;
 
     // let unstructured_program = convert_code_to_stackless(arena, pool, &code)?;
     // let mut stmts = structurize_cfg(unstructured_program);
     // rewrite_control_flow(&mut stmts);
-    // for stmt in stmts {
-    //     println!("{stmt}");
+
+    // for stmt in &stackless_ir.statements {
+    //     println!("{}", arena.debug(stmt));
     // }
     // println!();
 
@@ -149,6 +161,10 @@ fn main() {
     // let raw_bytes = std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/dao.class")
     //     .expect("failed to read class file");
     // let raw_bytes = include_bytes!("/home/purplesyringa/mc/public/vineflower-1.11.1-slim/org/jetbrains/java/decompiler/modules/decompiler/exps/InvocationExprent.class");
+
+    // // let raw_bytes =
+    // //     &*std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/exv$a.class").unwrap();
+    // let raw_bytes = &*std::fs::read("Test.class").unwrap();
     // if let Err(e) = decompile_class_file(raw_bytes) {
     //     panic!("class decompilation failed: {e}");
     // }
@@ -159,7 +175,7 @@ fn main() {
         if !entry.path().extension().is_some_and(|ext| ext == "class") {
             continue;
         }
-        println!("file {:?}", entry.path());
+        // println!("file {:?}", entry.path());
         let raw_bytes = std::fs::read(entry.path()).expect("files");
         if let Err(e) = decompile_class_file(&raw_bytes) {
             panic!("class decompilation failed: {e}");

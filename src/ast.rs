@@ -49,6 +49,7 @@ pub enum Expression<'code> {
     Argument {
         index: usize,
     },
+    ActiveException,
     ArrayElement {
         array: ExprId,
         index: ExprId,
@@ -64,10 +65,7 @@ pub enum Expression<'code> {
         class: Str<'code>,
     },
     Null,
-    Variable {
-        name: VariableName,
-        version: ExprId,
-    },
+    Variable(Variable),
     Field {
         // `None` for static fields
         object: Option<ExprId>,
@@ -134,6 +132,7 @@ impl<'code> DebugIr<'code> for Expression<'code> {
         match self {
             Self::This => write!(f, "this"),
             Self::Argument { index } => write!(f, "arg{index}"),
+            Self::ActiveException => write!(f, "active_exception"),
             Self::ArrayElement { array, index } => {
                 write!(f, "({})[{}]", arena.debug(array), arena.debug(index))
             }
@@ -144,7 +143,7 @@ impl<'code> DebugIr<'code> for Expression<'code> {
             } => write!(f, "new {element_type}{lengths:?}"),
             Self::NewUninitialized { class } => write!(f, "new uninitialized {class}"),
             Self::Null => write!(f, "null"),
-            Self::Variable { name, version } => write!(f, "{name}v{}", version.0),
+            Self::Variable(var) => write!(f, "{var}"),
             Self::Field {
                 object,
                 class,
@@ -327,6 +326,18 @@ pub enum UnaryOp {
     Neg,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Variable {
+    pub name: VariableName,
+    pub version: ExprId,
+}
+
+impl Display for Variable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}v{}", self.name, self.version.0 - 32)
+    }
+}
+
 /// {namespace}{id}
 #[derive(Clone, Copy, Debug, Display, Hash, PartialEq, Eq)]
 pub struct VariableName {
@@ -340,8 +351,8 @@ pub enum VariableNamespace {
     Slot,
     /// stack
     Stack,
-    /// tmp
-    Temporary,
+    /// value
+    Value,
     /// selector
     Selector,
 }

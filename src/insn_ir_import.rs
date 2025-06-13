@@ -104,14 +104,15 @@ pub fn import_insn_to_ir<'arena, 'code>(
 
     let offset_to_address = |offset: i32| -> u32 { (address as i32 + offset) as u32 };
 
-    let jump = |condition: ExprId, offset: i32| -> Statement {
-        Statement::Jump {
+    let jump = |machine: &mut Machine<'arena, 'code>, condition: ExprId, offset: i32| {
+        machine.flush_stack_writes();
+        machine.add(Statement::Jump {
             condition,
             // The preparsing steps ensures all goto destinations are valid instruction addresses.
             // This will be replaced by the instruction index on a later pass, after all
             // instructions are emitted.
             target: offset_to_address(offset) as usize,
-        }
+        });
     };
 
     match insn {
@@ -459,6 +460,7 @@ pub fn import_insn_to_ir<'arena, 'code>(
                 return Err(InsnIrImportError::StackUnderflow(StackUnderflowError));
             }
             machine.copy(machine.stack_size, machine.stack_size - 2);
+            machine.copy(machine.stack_size + 1, machine.stack_size - 1);
             machine.stack_size += 2;
         }
         Dup2X1 => {
@@ -496,217 +498,239 @@ pub fn import_insn_to_ir<'arena, 'code>(
             if machine.stack_size < 2 {
                 return Err(InsnIrImportError::StackUnderflow(StackUnderflowError));
             }
-            let value = machine.get_stack(machine.stack_size - 1);
-            machine.set_tmp(0, value);
+            // Use `usize::MAX` as a temporary so that linking can see through this swap.
+            machine.copy(usize::MAX, machine.stack_size - 1);
             machine.copy(machine.stack_size - 1, machine.stack_size - 2);
-            let value = machine.get_tmp(0);
-            machine.set_stack(machine.stack_size - 2, value);
+            machine.copy(machine.stack_size - 2, usize::MAX);
         }
 
         // Exits
         AThrow => {
             let exception = machine.pop()?;
+            machine.drop_stack_writes();
             machine.add(Statement::Basic(BasicStatement::Throw { exception }));
         }
         AReturn | FReturn | IReturn => {
             let value = machine.pop()?;
+            machine.drop_stack_writes();
             machine.add(Statement::Basic(BasicStatement::Return { value }));
         }
         DReturn | LReturn => {
             let value = machine.pop2()?;
+            machine.drop_stack_writes();
             machine.add(Statement::Basic(BasicStatement::Return { value }));
         }
-        Return => machine.add(Statement::Basic(BasicStatement::ReturnVoid)),
+        Return => {
+            machine.drop_stack_writes();
+            machine.add(Statement::Basic(BasicStatement::ReturnVoid));
+        }
 
         // Jumps
-        Goto { offset } => machine.add(jump(arena.int(1), *offset as i32)),
-        GotoW { offset } => machine.add(jump(arena.int(1), *offset)),
+        Goto { offset } => jump(machine, arena.int(1), *offset as i32),
+        GotoW { offset } => jump(machine, arena.int(1), *offset),
         IfACmpEq { offset } => {
             let rhs = machine.pop()?;
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs,
                     op: BinOp::Eq,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfACmpNe { offset } => {
             let rhs = machine.pop()?;
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs,
                     op: BinOp::Ne,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfICmpEq { offset } => {
             let rhs = machine.pop()?;
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs,
                     op: BinOp::Eq,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfICmpNe { offset } => {
             let rhs = machine.pop()?;
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs,
                     op: BinOp::Ne,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfICmpLt { offset } => {
             let rhs = machine.pop()?;
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs,
                     op: BinOp::Lt,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfICmpGe { offset } => {
             let rhs = machine.pop()?;
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs,
                     op: BinOp::Ge,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfICmpGt { offset } => {
             let rhs = machine.pop()?;
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs,
                     op: BinOp::Gt,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfICmpLe { offset } => {
             let rhs = machine.pop()?;
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs,
                     op: BinOp::Le,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfEq { offset } => {
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs: arena.int(0),
                     op: BinOp::Eq,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfNe { offset } => {
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs: arena.int(0),
                     op: BinOp::Ne,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfLt { offset } => {
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs: arena.int(0),
                     op: BinOp::Lt,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfGe { offset } => {
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs: arena.int(0),
                     op: BinOp::Ge,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfGt { offset } => {
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs: arena.int(0),
                     op: BinOp::Gt,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfLe { offset } => {
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs: arena.int(0),
                     op: BinOp::Le,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfNonNull { offset } => {
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs: arena.null(),
                     op: BinOp::Ne,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         IfNull { offset } => {
             let lhs = machine.pop()?;
-            machine.add(jump(
+            jump(
+                machine,
                 arena.alloc(Expression::BinOp {
                     lhs,
                     rhs: arena.null(),
                     op: BinOp::Eq,
                 }),
                 *offset as i32,
-            ));
+            );
         }
         LookupSwitch(switch) => {
             let key = machine.pop()?;
+            machine.flush_stack_writes();
             machine.add(Statement::Switch {
                 key,
                 arms: switch
@@ -718,6 +742,7 @@ pub fn import_insn_to_ir<'arena, 'code>(
         }
         TableSwitch(switch) => {
             let key = machine.pop()?;
+            machine.flush_stack_writes();
             machine.add(Statement::Switch {
                 key,
                 arms: switch

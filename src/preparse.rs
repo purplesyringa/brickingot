@@ -47,7 +47,7 @@ pub struct BasicBlock {
     /// excludes jumps to exception handlers.
     pub successors: Vec<usize>,
     /// The ranges of instructions that can jump to the start of this BB on exception.
-    eh_entry_for_ranges: Vec<Range<u32>>,
+    pub eh_entry_for_ranges: Vec<Range<u32>>,
 }
 
 pub fn extract_basic_blocks(

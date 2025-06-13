@@ -1,8 +1,9 @@
-use crate::abstract_eval::Machine;
+use crate::abstract_eval::{ActiveDef, Machine};
 use crate::arena::{Arena, DebugIr, ExprId};
 use crate::ast::{BasicStatement, Expression, Str, VariableName};
 use crate::insn_ir_import::{import_insn_to_ir, InsnIrImportError};
 use crate::insn_stack_effect::is_type_descriptor_double_width;
+use crate::linking::link_stack_across_basic_blocks;
 use crate::preparse;
 use core::fmt::{self, Display};
 use noak::{
@@ -103,10 +104,10 @@ impl Display for ExceptionHandler<'_> {
     }
 }
 
-#[derive(Clone)]
-struct BasicBlock {
-    active_defs_at_end: FxHashMap<VariableName, ExprId>,
-    predecessors: Vec<usize>,
+pub struct BasicBlock {
+    pub active_defs_at_end: FxHashMap<VariableName, ActiveDef>,
+    pub predecessors: Vec<usize>,
+    pub is_exception_handler: bool,
 }
 
 impl BasicBlock {
@@ -114,27 +115,87 @@ impl BasicBlock {
         Self {
             active_defs_at_end: FxHashMap::default(),
             predecessors: Vec::new(),
+            is_exception_handler: false,
         }
     }
 }
 
 pub fn build_stackless_ir<'code>(
-    arena: &Arena<'code>,
+    arena: &mut Arena<'code>,
     pool: &ConstantPool<'code>,
     code: &Code<'code>,
     method_descriptor: &MethodDescriptor<'code>,
     is_static: bool,
     preparse_basic_blocks: Vec<preparse::BasicBlock>,
 ) -> Result<Program<'code>, StacklessIrError> {
-    let mut machine = Machine {
-        arena,
-        stack_size: 0,
-        active_defs: FxHashMap::default(),
-        unresolved_uses: FxHashMap::default(),
-        bb_id: usize::MAX,
-        statements: Vec::new(),
-    };
+    // This IR, and more specifically the nuances of optimizations we apply to it, is a bit weird.
+    //
+    // We obviously have variables for locals, named `slotN`. We also need to simulate stack and
+    // be able to deduce what value each stack element contains across BBs -- so we have variables
+    // named `stackN`, denoting the N-th element from the bottom of the stack (category two types
+    // are counted as two elements).
+    //
+    // We want to, in a certain sense, inline certain variable definitions, but not others.
+    // Specifically, assignments to and reads from locals can be interpreted as side effects, as
+    // javac normally only emits them on user request, and not optimizing them gets us closer to
+    // source. Operations on stack, however, should obviously be inlineable:
+    // `stack0 = <expr>; stack1 = stack0 + 1` should eventually be rewritten to
+    // `stack1 = <expr> + 1` if this particular assignment of `stack0` is not seen by any other use.
+    //
+    // This gets a bit trickier when you realize that we need to "see through" *moves* between
+    // stack elements, which commonly arise due to `dup` or `swap` variants, even as the origins of
+    // the values are overwritten. For example, in
+    //     stack0 = <expr>
+    //     stack1 = stack0
+    //     stack0 = null
+    // ...we want to understand that `stack1` now contains `<expr>`, even though neither
+    // `stack1 = stack0` nor `stack0 = <expr>` hold anymore. That requires giving expressions unique
+    // IDs, but retrofitting this onto an imperative IR gets ugly because there's now two different
+    // kinds of names: expression names and variable names, where variables are also split into two
+    // groups -- synthetics, like `stackN`, and locals, like `slotN`, only one of which is subject
+    // to inlining.
+    //
+    // We use a slightly different, unified approach. Each non-trivial expresison is assigned to
+    // a unique `valueN` variable, which is then copied into a stack variable:
+    //     value0 = <expr>
+    //     stack0 = value0
+    // We can then optimize all uses of `stack0` to `value0`, at least as long as `value0` is not
+    // reassigned between the definition of `stack0` and the use, and all visible definitions of
+    // `stack0` are equivalent to `stack0 = value0`. For lack of a better word, we call this process
+    // "linking". Linking can see through chains of moves and replaces most `stackN` uses with
+    // `valueM`.
+    //
+    // Note that linking is only superficially similar to inlining:
+    // - Inlining optimizes `x = <expr>; ... x` to `<expr>` when `...` has no side effects; linking
+    //   optimizes `x = <var>; ... x` to `<var>` regardless of side effects, because `<var>` is
+    //   guaranteed not to have side effects.
+    // - Inlining acts on structurized control flow and can handle ternaries and short-circuiting
+    //   logic operators; linking applies on the unstructured CFG level and can only link to
+    //   a single definition.
+    // They achieve different goals with different methods, and so are both necessary. Additionally,
+    // linking is more performance-critical, as the unoptimized IR has many synthetic
+    // `stackN = stackM` copies.
+    //
+    // The uses of `stackN` that linking cannot optimize out are precisely the places where SSA
+    // would place `phi` functions. Such variables are retained.
+    //
+    // It's worth noting that there's an exception to the rule that `stackN` is always either
+    // optimized to `valueM`, or is retained as-is. In exception handlers, `stackN` can also be
+    // optimized to `active_exception`. Note that such a replacement is optional, i.e. further
+    // passes cannot assume that exceptions aren't referred to directly via `stack0`.
+    //
+    // On a higher level, linking can be seen as merging certain variables together. However, it's
+    // also important to split identical variables apart when they have non-intersecting uses. This
+    // includes not just `stackN` variables, but also `slotN` variables, as locals in
+    // non-intersecting scopes can be allocated to the same slot. We call this process "splitting".
+    //
+    // Interestingly, both of these processes can be performed without SSA, using simpler algorithms
+    // with better performance. Both linking and splitting require tracking use-def chains, so we
+    // use the same data structures for both tasks.
 
+    let mut machine = Machine::new(arena);
+
+    // Initialize method arguments
     let mut next_slot_id = 0;
     if !is_static {
         machine.set_slot(next_slot_id, arena.alloc(Expression::This));
@@ -150,7 +211,8 @@ pub fn build_stackless_ir<'code>(
         };
     }
 
-    let mut ir_basic_blocks = vec![BasicBlock::new(); preparse_basic_blocks.len()];
+    let mut ir_basic_blocks = Vec::new();
+    ir_basic_blocks.resize_with(preparse_basic_blocks.len(), BasicBlock::new);
 
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
     // bytecode and we'd rather not worry about that.
@@ -158,6 +220,7 @@ pub fn build_stackless_ir<'code>(
         machine.stack_size = bb.stack_size_at_start;
         machine.bb_id = bb_id;
 
+        ir_basic_blocks[bb_id].is_exception_handler = !bb.eh_entry_for_ranges.is_empty();
         for succ_bb_id in &bb.successors {
             ir_basic_blocks[*succ_bb_id].predecessors.push(bb_id);
         }
@@ -172,7 +235,9 @@ pub fn build_stackless_ir<'code>(
 
             let stack_size_before_insn = machine.stack_size;
             // Jump targets are initialized to instruction addresses. We'll remap them to statement
-            // indices after all instructions have been converted.
+            // indices after all instructions have been converted. BB-local variable accesses are
+            // immediately linked and resolved for splitting, only cross-BB accesses will need to be
+            // handled explicitly.
             import_insn_to_ir(&mut machine, pool, address, &insn).map_err(|error| {
                 StacklessIrError::InsnIrImport {
                     address,
@@ -183,13 +248,17 @@ pub fn build_stackless_ir<'code>(
             })?;
         }
 
-        ir_basic_blocks[bb_id].active_defs_at_end = machine
-            .active_defs
-            .drain()
-            .filter(|(_, def)| !def.is_fake)
-            .map(|(var, def)| (var, def.version))
-            .collect();
+        ir_basic_blocks[bb_id].active_defs_at_end = machine.seal_basic_block();
     }
+
+    let statements = machine.statements;
+
+    link_stack_across_basic_blocks(arena, &ir_basic_blocks, &machine.unresolved_uses);
+
+    // However, linking can also cause a lot of `stackN` variables to lose *all* their uses, and
+    // assignments to such variables should be optimized out entirely. This is tricky because some
+    // def-uses are recursive, e.g. `stack1 = stack2; stack2 = stack1;` in a loop, so it's not like
+    // there's *no* uses at all.
 
     // Certain variables we create can correspond to multiple source-level variables. This includes
     // both stack variables, which can correspond to several independent expressions, and slots,
@@ -202,20 +271,6 @@ pub fn build_stackless_ir<'code>(
     // need SSA in any intermediate IR -- all we want is to be able to inline single definitions
     // into single uses, and we don't need SSA for that.
     //
-    // The main thing we lose from avoiding SSA is the ability to merge `x` and `y` into one
-    // variable upon encountering `x = y`. There's two problems with this:
-    //
-    // - Even if `x` is single-def, replacing `x` with `y` at each use could cause the wrong version
-    //   of `y` to be accessed if `y` is reassigned between `x = y` and use of `x`. This can be
-    //   avoided by refusing to merge variables in this case, but...
-    // - If, after the assignment `slotN = stackM`, `stackM` is accessed again, e.g. as in
-    //   `f(a = x)`, `stackM` would be saved into a separate variable. This can be fixed by changing
-    //   the definition of `stackM` to the return value of the assignment operator. However, if
-    //   `stackM` is itself defined by `stackM = stackK`, we'd also need to reassign `stackK`, and
-    //   this could span across BBs and quickly becomes messy.
-    //
-    // I'm not sure what to do about this...
-    //
     // In a nutshell, for each variable use, we want to determine which definitions its value could
     // come from, and request that those definition share a variable. The components of such
     // a DSU-like structure then correspond to individual variables.
@@ -225,12 +280,12 @@ pub fn build_stackless_ir<'code>(
     // achieve this per-variable with DFS. The total time complexity becomes
     // O(n_variables * n_basic_blocks), which sucks, because most other algorithms we use are
     // quasi-linear, but SSA-adjacent stuff can't really be any faster.
-    for (name, uses) in machine.unresolved_uses {
-        if ir_basic_blocks.len() == 1 {
-            println!("woah {name}");
-        }
-        //     for (bb_id, use_expr_id) in uses {}
-    }
+    // for (name, uses) in machine.unresolved_uses {
+    //     if ir_basic_blocks.len() == 1 {
+    //         println!("woah {name}");
+    //     }
+    //     //     for (bb_id, use_expr_id) in uses {}
+    // }
 
     // // Fixup jump destinations
     // for stmt in &mut statements {
@@ -271,7 +326,7 @@ pub fn build_stackless_ir<'code>(
     // }
 
     Ok(Program {
-        statements: machine.statements,
+        statements,
         exception_handlers,
     })
 }
