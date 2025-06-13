@@ -2,21 +2,27 @@ use crate::ast::Expression;
 use alloc::alloc;
 use core::cell::Cell;
 use core::fmt::{self, Display};
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::{Index, IndexMut};
 
 #[derive(Clone, Copy, Debug)]
 pub struct ExprId(pub u32);
 
+// We want `last_id` at the start for performance and code size. Padding so that the start of the
+// virtual non-biased chunk array is right at the beginning of the arena to avoid 3-operand lea.
+#[repr(C)]
 pub struct Arena<'code> {
+    last_id: Cell<u32>,
+    _padding: MaybeUninit<[u8; 5 * size_of::<usize>() - 4]>,
     chunks: [Cell<*mut Expression<'code>>; 27],
-    next_id: Cell<u32>,
 }
 
 impl<'code> Arena<'code> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            chunks: [const { Cell::new(core::ptr::null_mut()) }; 27],
-            next_id: Cell::new(32),
+            chunks: [const { Cell::new(core::ptr::without_provenance_mut(usize::MAX)) }; 27],
+            _padding: MaybeUninit::uninit(),
+            last_id: Cell::new(31),
         }
     }
 
@@ -26,42 +32,55 @@ impl<'code> Arena<'code> {
     }
 
     #[inline]
-    pub fn alloc_with(&self, cb: impl FnOnce(ExprId) -> Expression<'code>) -> ExprId {
-        let id = self.next_id.get();
-        if id & (id - 1) == 0 && !unsafe { self.allocate_new_chunk() } {
-            drop(cb);
-            panic!("failed to allocate expression");
+    pub fn alloc_with<Cb: FnOnce(ExprId) -> Expression<'code>>(&self, cb: Cb) -> ExprId {
+        let last_id = self.last_id.get();
+        let id = last_id.wrapping_add(1);
+        let mut cb = ManuallyDrop::new(cb);
+        if last_id & id == 0 {
+            let drop_cb = unsafe {
+                core::mem::transmute::<unsafe fn(*mut Cb), unsafe fn(*mut ())>(
+                    core::ptr::drop_in_place::<Cb>,
+                )
+            };
+            unsafe {
+                self.allocate_new_chunk(drop_cb, (&raw mut cb).cast());
+            }
         }
+        let cb = ManuallyDrop::into_inner(cb);
         unsafe {
             self.get_raw_unchecked(ExprId(id)).write(cb(ExprId(id)));
         }
-        self.next_id.set(id.wrapping_add(1));
+        self.last_id.set(id);
         ExprId(id)
     }
 
     #[cold]
-    unsafe fn allocate_new_chunk(&self) -> bool {
-        let id = self.next_id.get();
+    unsafe fn allocate_new_chunk(&self, drop_cb: unsafe fn(*mut ()), drop_arg: *mut ()) {
+        let id = self.last_id.get().wrapping_add(1);
         if id == 0 {
-            return false;
+            unsafe {
+                drop_cb(drop_arg);
+            }
+            panic!("failed to allocate expression");
         }
         unsafe {
             core::hint::assert_unchecked(id >= 32);
         }
         let chunk_id = id.ilog2();
         let layout = Self::get_chunk_layout(chunk_id);
+        if self.chunks[chunk_id as usize - 5].get().addr() != usize::MAX {
+            // Chunk already allocated, this can happen if `cb` panics on the first element of
+            // a chunk.
+            return;
+        }
         let ptr: *mut Expression<'code> = unsafe { alloc::alloc(layout) }.cast();
         if ptr.is_null() {
-            // We can't call `alloc::handle_alloc_error(layout);` here because it may unwind, and
-            // unwinding from `try_alloc` causes a cleanup pad for `expr` to be generated, and then
-            // LLVM loses 20 IQ points and inserts a call to drop glue even if the active `expr`
-            // variant is statically known not to require drop glue, and hence the `expr` variable
-            // is allocated on the stack and then copied into heap instead of being directly
-            // constructed on the heap. Sigh.
-            return false;
+            unsafe {
+                drop_cb(drop_arg);
+            }
+            alloc::handle_alloc_error(layout);
         }
         self.chunks[chunk_id as usize - 5].set(ptr.wrapping_byte_sub(layout.size()));
-        true
     }
 
     fn get_chunk_layout(chunk_id: u32) -> alloc::Layout {
@@ -69,11 +88,13 @@ impl<'code> Arena<'code> {
         assert!(size != 0);
         alloc::Layout::array::<Expression<'code>>(size)
             .expect("cannot allocate this many expressions")
+            .align_to(2)
+            .expect("cannot allocate this many expressions")
     }
 
     fn get_raw(&self, id: ExprId) -> *mut Expression<'code> {
         assert!(
-            id.0 >= 32 && id.0 < self.next_id.get(),
+            id.0 >= 32 && id.0 <= self.last_id.get(),
             "out of bounds access",
         );
         unsafe { self.get_raw_unchecked(id) }
@@ -93,6 +114,7 @@ impl<'code> Arena<'code> {
         self.alloc(Expression::ConstInt(value))
     }
 
+    #[unsafe(no_mangle)]
     pub fn null(&self) -> ExprId {
         self.alloc(Expression::Null)
     }
@@ -116,18 +138,16 @@ impl<'code> Arena<'code> {
 impl<'code> Drop for Arena<'code> {
     fn drop(&mut self) {
         for chunk_id in 5..32 {
-            if self.next_id.get() <= 1 << chunk_id {
+            let mut ptr = self.chunks[chunk_id as usize - 5].get();
+            if ptr.addr() == usize::MAX {
                 break;
             }
-
-            let ptr = self.chunks[chunk_id as usize - 5]
-                .get()
-                .wrapping_add(1 << chunk_id);
+            ptr = ptr.wrapping_add(1 << chunk_id);
 
             unsafe {
                 core::ptr::drop_in_place(core::ptr::slice_from_raw_parts_mut(
                     ptr,
-                    (1 << chunk_id).min(self.next_id.get() - (1 << chunk_id)) as usize,
+                    (1 << chunk_id).min(self.last_id.get() + 1 - (1 << chunk_id)) as usize,
                 ));
             }
 
