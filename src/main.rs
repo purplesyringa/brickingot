@@ -162,9 +162,9 @@ fn main() {
     //     .expect("failed to read class file");
     // let raw_bytes = include_bytes!("/home/purplesyringa/mc/public/vineflower-1.11.1-slim/org/jetbrains/java/decompiler/modules/decompiler/exps/InvocationExprent.class");
 
-    // // let raw_bytes =
-    // //     &*std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/exv$a.class").unwrap();
-    // let raw_bytes = &*std::fs::read("Test.class").unwrap();
+    // let raw_bytes =
+    //     &*std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/exv$a.class").unwrap();
+    // // let raw_bytes = &*std::fs::read("Test.class").unwrap();
     // if let Err(e) = decompile_class_file(raw_bytes) {
     //     panic!("class decompilation failed: {e}");
     // }
