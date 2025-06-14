@@ -29,6 +29,8 @@ pub fn link_stack_across_basic_blocks(
     // number of stack elements are held over a significant amount of basic blocks, which basically
     // only happens when a ton of ternaries are stuck together. This is so rare that this pass is,
     // in practice, instantaneous.
+    //
+    // XXX: this is actually cubic...
 
     let mut dfs_stack = Vec::new();
     let mut in_stack = FxHashSet::default();
