@@ -20,10 +20,9 @@
 // an issue because we run DFS multiple times, one per unresolved use. This is fixed by locating
 // SCCs with Tarjan's algorithm and propagating the up-to-date information.
 
-use crate::abstract_eval::UnresolvedUse;
+use super::{abstract_eval::UnresolvedUse, BasicBlock};
 use crate::arena::Arena;
 use crate::ast::{Expression, Variable, VariableName, VariableNamespace};
-use crate::stackless::BasicBlock;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 

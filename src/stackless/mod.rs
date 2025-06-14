@@ -1,11 +1,16 @@
-use crate::abstract_eval::{ActiveDef, Machine};
+mod abstract_eval;
+mod insn_ir_import;
+mod linking;
+mod splitting;
+
+use self::abstract_eval::{ActiveDef, Machine};
+use self::insn_ir_import::{import_insn_to_ir, InsnIrImportError};
+use self::linking::link_stack_across_basic_blocks;
+use self::splitting::merge_versions_across_basic_blocks;
 use crate::arena::{Arena, DebugIr, ExprId};
 use crate::ast::{BasicStatement, Expression, Str, VariableName};
-use crate::insn_ir_import::{import_insn_to_ir, InsnIrImportError};
-use crate::insn_stack_effect::is_type_descriptor_double_width;
-use crate::linking::link_stack_across_basic_blocks;
 use crate::preparse;
-use crate::splitting::merge_versions_across_basic_blocks;
+use crate::preparse::insn_stack_effect::is_type_descriptor_double_width;
 use core::fmt::{self, Display};
 use noak::{
     descriptor::MethodDescriptor,

@@ -1,9 +1,11 @@
+use super::Statement;
 use crate::arena::{Arena, ExprId};
 use crate::ast::{
     BasicStatement, BinOp, Expression, PrimitiveType, Variable, VariableName, VariableNamespace,
 };
-use crate::insn_stack_effect::{is_name_and_type_double_width, is_type_descriptor_double_width};
-use crate::stackless::Statement;
+use crate::preparse::insn_stack_effect::{
+    is_name_and_type_double_width, is_type_descriptor_double_width,
+};
 use noak::{
     descriptor::{MethodDescriptor, TypeDescriptor},
     reader::cpool::value::NameAndType,

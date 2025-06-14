@@ -1,7 +1,9 @@
-use crate::abstract_eval::{Machine, StackUnderflowError};
+use super::{
+    abstract_eval::{Machine, StackUnderflowError},
+    Statement,
+};
 use crate::arena::{Arena, ExprId};
 use crate::ast::{BasicStatement, BinOp, CallKind, Expression, PrimitiveType, Str, Type, UnaryOp};
-use crate::stackless::Statement;
 use noak::{
     descriptor::MethodDescriptor,
     error::DecodeError,

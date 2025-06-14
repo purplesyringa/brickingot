@@ -1,8 +1,7 @@
-use crate::abstract_eval::UnresolvedUse;
+use super::{abstract_eval::UnresolvedUse, BasicBlock, Statement};
 use crate::arena::{Arena, ExprId};
 use crate::ast::{BasicStatement, Expression, Variable, VariableName, VariableNamespace};
 use crate::dsu::DisjointSetUnion;
-use crate::stackless::{BasicBlock, Statement};
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 

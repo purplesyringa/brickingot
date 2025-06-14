@@ -1,3 +1,8 @@
+pub mod insn_control_flow;
+pub mod insn_stack_effect;
+
+use self::insn_control_flow::{get_insn_control_flow, InsnControlFlow};
+use self::insn_stack_effect::{get_insn_stack_effect, InsnStackEffectError};
 use core::ops::Range;
 use noak::{
     error::DecodeError,
@@ -7,9 +12,6 @@ use noak::{
     },
 };
 use thiserror::Error;
-
-use crate::insn_control_flow::{get_insn_control_flow, InsnControlFlow};
-use crate::insn_stack_effect::{get_insn_stack_effect, InsnStackEffectError};
 
 #[derive(Debug, Error)]
 pub enum BytecodePreparsingError {
