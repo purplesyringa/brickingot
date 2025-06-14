@@ -41,6 +41,17 @@ impl<'a> Merger<'a> {
                 }
             }
 
+            if name.namespace == VariableNamespace::Stack
+                && name.id == 0
+                && let Some(exception_expr_id) = self.basic_blocks[bb_id].unique_exception_expr_id
+            {
+                // This one's a bit weird -- we're merging ExprId's associated with different
+                // variable names. The point here is to merge all uses of a single exception0
+                // together. We couldn't care less about the version of exception0 itself: they may
+                // eventually even alias between basic blocks.
+                self.dsu.merge(use_expr_id.0, exception_expr_id.0);
+            }
+
             for pred_bb_id in &self.basic_blocks[bb_id].predecessors {
                 if let Some(def) = self.basic_blocks[*pred_bb_id].active_defs_at_end.get(&name) {
                     let def_expr_id = def.def_expr_id.expect("def_expr_id not set for variable");

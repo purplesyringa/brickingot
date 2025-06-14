@@ -49,7 +49,6 @@ pub enum Expression<'code> {
     Argument {
         index: usize,
     },
-    ActiveException,
     ArrayElement {
         array: ExprId,
         index: ExprId,
@@ -132,7 +131,6 @@ impl<'code> DebugIr<'code> for Expression<'code> {
         match self {
             Self::This => write!(f, "this"),
             Self::Argument { index } => write!(f, "arg{index}"),
-            Self::ActiveException => write!(f, "active_exception"),
             Self::ArrayElement { array, index } => {
                 write!(f, "({})[{}]", arena.debug(array), arena.debug(index))
             }
@@ -353,6 +351,8 @@ pub enum VariableNamespace {
     Stack,
     /// value
     Value,
+    /// exception
+    Exception,
     /// selector
     Selector,
 }

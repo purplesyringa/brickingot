@@ -150,6 +150,9 @@ fn decompile_method<'code>(
     // for stmt in &stackless_ir.statements {
     //     println!("{}", arena.debug(stmt));
     // }
+    // for handler in stackless_ir.exception_handlers {
+    //     println!("{handler:?}");
+    // }
     // println!();
 
     // method attributes: +Code, Exceptions (§4.7.5), Synthetic (§4.7.8), Signature (§4.7.9), Deprecated (§4.7.15), RuntimeVisibleAnnotations (§4.7.16), RuntimeInvisibleAnnotations (§4.7.17), RuntimeVisibleParameterAnnotations (§4.7.18), RuntimeInvisibleParameterAnnotations (§4.7.19), and AnnotationDefault

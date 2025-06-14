@@ -54,8 +54,8 @@ impl<'code> DebugIr<'code> for Program<'code> {
 #[derive(Debug)]
 pub enum Statement {
     Basic(BasicStatement),
-    BasicBlockEntry {
-        bb_id: usize,
+    Label {
+        address: u32,
     },
     Jump {
         condition: ExprId,
@@ -72,7 +72,7 @@ impl<'code> DebugIr<'code> for Statement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         match self {
             Self::Basic(stmt) => write!(f, "{}", arena.debug(stmt)),
-            Self::BasicBlockEntry { bb_id } => write!(f, "bb #{bb_id};"),
+            Self::Label { address } => write!(f, "I{address}:"),
             Self::Jump { condition, target } => {
                 write!(f, "if ({}) jump {target};", arena.debug(condition))
             }
@@ -112,7 +112,7 @@ impl Display for ExceptionHandler<'_> {
 pub struct BasicBlock {
     pub active_defs_at_end: FxHashMap<VariableName, ActiveDef>,
     pub predecessors: Vec<usize>,
-    pub is_exception_handler: bool,
+    pub unique_exception_expr_id: Option<ExprId>,
 }
 
 impl BasicBlock {
@@ -120,7 +120,7 @@ impl BasicBlock {
         Self {
             active_defs_at_end: FxHashMap::default(),
             predecessors: Vec::new(),
-            is_exception_handler: false,
+            unique_exception_expr_id: None,
         }
     }
 }
@@ -186,7 +186,7 @@ pub fn build_stackless_ir<'code>(
     //
     // It's worth noting that there's an exception to the rule that `stackN` is always either
     // optimized to `valueM`, or is retained as-is. In exception handlers, `stackN` can also be
-    // optimized to `active_exception`. Note that such a replacement is not guaranteed, i.e. further
+    // optimized to `exception0`. Note that such a replacement is not guaranteed, i.e. further
     // passes cannot assume that exceptions aren't referred to directly via `stack0`.
     //
     // On a higher level, linking can be seen as merging certain variables together. However, it's
@@ -239,9 +239,12 @@ pub fn build_stackless_ir<'code>(
     for (bb_id, bb) in preparse_basic_blocks.iter().enumerate() {
         machine.stack_size = bb.stack_size_at_start;
         machine.bb_id = bb_id;
-        machine.add(Statement::BasicBlockEntry { bb_id });
 
-        ir_basic_blocks[bb_id].is_exception_handler = !bb.eh_entry_for_ranges.is_empty();
+        ir_basic_blocks[bb_id].unique_exception_expr_id = if bb.eh_entry_for_ranges.is_empty() {
+            None
+        } else {
+            Some(arena.alloc(Expression::Null))
+        };
         for succ_bb_id in &bb.successors {
             ir_basic_blocks[*succ_bb_id].predecessors.push(bb_id);
         }
@@ -253,6 +256,10 @@ pub fn build_stackless_ir<'code>(
                 assert_eq!(address, bb.instruction_range.end);
                 break;
             }
+
+            // XXX: We could only add labels at the exact places we need to resolve, but this
+            // doesn't seem to reduce performance too much.
+            machine.add(Statement::Label { address });
 
             let stack_size_before_insn = machine.stack_size;
             // Jump targets are initialized to instruction addresses. We'll remap them to statement
@@ -279,7 +286,7 @@ pub fn build_stackless_ir<'code>(
     merge_versions_across_basic_blocks(arena, &ir_basic_blocks, &unresolved_uses, &mut statements);
 
     // Fixup jump destinations
-    let mut address_to_stmt_index = FxHashMap::default();
+    let mut addresses_and_statements = Vec::new();
     let mut transitions = Vec::new();
     let mut stmt_index = 0;
     statements.retain(|stmt| match stmt {
@@ -287,11 +294,8 @@ pub fn build_stackless_ir<'code>(
             stmt_index += 1;
             true
         }
-        Statement::BasicBlockEntry { bb_id } => {
-            address_to_stmt_index.insert(
-                preparse_basic_blocks[*bb_id].instruction_range.start as usize,
-                stmt_index,
-            );
+        Statement::Label { address } => {
+            addresses_and_statements.push((*address, stmt_index));
             false
         }
         Statement::Jump { .. } | Statement::Switch { .. } => {
@@ -300,14 +304,20 @@ pub fn build_stackless_ir<'code>(
             true
         }
     });
+    let address_to_stmt_index = |address: usize| {
+        let index = addresses_and_statements
+            .binary_search_by_key(&address, |(other_address, _)| *other_address as usize)
+            .expect("invalid jump destination");
+        addresses_and_statements[index].1
+    };
     for stmt_index in transitions {
         match &mut statements[stmt_index] {
-            Statement::Jump { target, .. } => *target = address_to_stmt_index[target],
+            Statement::Jump { target, .. } => *target = address_to_stmt_index(*target),
             Statement::Switch { arms, default, .. } => {
                 for (_, target) in arms {
-                    *target = address_to_stmt_index[target];
+                    *target = address_to_stmt_index(*target);
                 }
-                *default = address_to_stmt_index[default];
+                *default = address_to_stmt_index(*default);
             }
             _ => unreachable!(),
         }
@@ -315,27 +325,37 @@ pub fn build_stackless_ir<'code>(
 
     // // Compute new exception handlers
     let mut exception_handlers = Vec::new();
-    // for handler in code.exception_handlers() {
-    //     let start = insn_to_statement_index
-    //         .get(handler.start().as_u32() as usize)
-    //         .copied()
-    //         .unwrap_or(statements.len());
-    //     let end = insn_to_statement_index
-    //         .get(handler.end().as_u32() as usize)
-    //         .copied()
-    //         .unwrap_or(statements.len());
-    //     let target = insn_to_statement_index[handler.handler().as_u32() as usize];
-    //     let class = match handler.catch_type() {
-    //         Some(catch_type) => Some(Str(pool.retrieve(catch_type)?.name)),
-    //         None => None,
-    //     };
-    //     exception_handlers.push(ExceptionHandler {
-    //         start,
-    //         end,
-    //         target,
-    //         class,
-    //     });
-    // }
+    for handler in code.exception_handlers() {
+        // Look for the region of statements that fit within the range, as some instructions could
+        // have been optimized out as unreachable.
+        let start_index = addresses_and_statements
+            .partition_point(|(address, _)| *address < handler.start().as_u32());
+        if start_index == addresses_and_statements.len() {
+            continue;
+        }
+        let start = addresses_and_statements[start_index].1;
+
+        let end_index = addresses_and_statements
+            .partition_point(|(address, _)| *address <= handler.end().as_u32())
+            - 1;
+        let end = addresses_and_statements[end_index].1;
+        if end <= start {
+            continue;
+        }
+
+        let target = address_to_stmt_index(handler.handler().as_u32() as usize);
+
+        let class = match handler.catch_type() {
+            Some(catch_type) => Some(Str(pool.retrieve(catch_type)?.name)),
+            None => None,
+        };
+        exception_handlers.push(ExceptionHandler {
+            start,
+            end,
+            target,
+            class,
+        });
+    }
 
     Ok(Program {
         statements,

@@ -27,10 +27,9 @@ use crate::stackless::BasicBlock;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Source {
-    Value { var: Variable, def_bb_id: usize },
-    ActiveException,
+    Value(Variable),
     Missing,
     Indeterminate,
 }
@@ -92,8 +91,16 @@ impl<'a> Linker<'a> {
         };
 
         // Find all assignments to `stackN` reachable from the beginning of `bb_id`.
-        if position == 0 && self.basic_blocks[bb_id].is_exception_handler {
-            state.source.merge(Source::ActiveException);
+        if position == 0
+            && let Some(version) = self.basic_blocks[bb_id].unique_exception_expr_id
+        {
+            state.source.merge(Source::Value(Variable {
+                name: VariableName {
+                    namespace: VariableNamespace::Exception,
+                    id: 0,
+                },
+                version,
+            }));
         }
 
         for pred_bb_id in &self.basic_blocks[bb_id].predecessors {
@@ -108,10 +115,7 @@ impl<'a> Linker<'a> {
                             name,
                             def.var,
                         );
-                        state.source.merge(Source::Value {
-                            var: def.var,
-                            def_bb_id: *pred_bb_id,
-                        });
+                        state.source.merge(Source::Value(def.var));
                         continue;
                     }
                 } else {
@@ -163,12 +167,6 @@ pub fn link_stack_across_basic_blocks(
         let DfsNodeState { source, .. } = linker.visit((bb_id, var.name.id));
         assert!(linker.tarjan_stack.is_empty());
 
-        match source {
-            Source::Value { .. } | Source::ActiveException => {}
-            Source::Missing => unreachable!(),
-            Source::Indeterminate => continue,
-        }
-
         // Suppose that `stack1` could only be populated from a single `value0`. That doesn't,
         // however, clearly imply that `stack1` equals the contents of `value0` *at time of use*.
         // Specifically, the concern is that a program execution with the following subsequence
@@ -189,10 +187,10 @@ pub fn link_stack_across_basic_blocks(
         // been produced by something other than `value0`. Therefore, `value0` cannot be the only
         // source of `stack1`, and so the concern is irrelevant.
 
-        arena[var.version] = match source {
-            Source::Value { var, .. } => Expression::Variable(var),
-            Source::ActiveException => Expression::ActiveException,
-            _ => unreachable!(),
-        };
+        match source {
+            Source::Value(value_var) => arena[var.version] = Expression::Variable(value_var),
+            Source::Missing => unreachable!(),
+            Source::Indeterminate => {}
+        }
     }
 }
