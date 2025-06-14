@@ -326,7 +326,7 @@ pub enum UnaryOp {
     Neg,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Variable {
     pub name: VariableName,
     pub version: ExprId,

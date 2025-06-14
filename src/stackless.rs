@@ -5,6 +5,7 @@ use crate::insn_ir_import::{import_insn_to_ir, InsnIrImportError};
 use crate::insn_stack_effect::is_type_descriptor_double_width;
 use crate::linking::link_stack_across_basic_blocks;
 use crate::preparse;
+use crate::splitting::merge_versions_across_basic_blocks;
 use core::fmt::{self, Display};
 use noak::{
     descriptor::MethodDescriptor,
@@ -53,6 +54,9 @@ impl<'code> DebugIr<'code> for Program<'code> {
 #[derive(Debug)]
 pub enum Statement {
     Basic(BasicStatement),
+    BasicBlockEntry {
+        bb_id: usize,
+    },
     Jump {
         condition: ExprId,
         target: usize,
@@ -68,6 +72,7 @@ impl<'code> DebugIr<'code> for Statement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         match self {
             Self::Basic(stmt) => write!(f, "{}", arena.debug(stmt)),
+            Self::BasicBlockEntry { bb_id } => write!(f, "bb #{bb_id};"),
             Self::Jump { condition, target } => {
                 write!(f, "if ({}) jump {target};", arena.debug(condition))
             }
@@ -181,7 +186,7 @@ pub fn build_stackless_ir<'code>(
     //
     // It's worth noting that there's an exception to the rule that `stackN` is always either
     // optimized to `valueM`, or is retained as-is. In exception handlers, `stackN` can also be
-    // optimized to `active_exception`. Note that such a replacement is optional, i.e. further
+    // optimized to `active_exception`. Note that such a replacement is not guaranteed, i.e. further
     // passes cannot assume that exceptions aren't referred to directly via `stack0`.
     //
     // On a higher level, linking can be seen as merging certain variables together. However, it's
@@ -189,13 +194,29 @@ pub fn build_stackless_ir<'code>(
     // includes not just `stackN` variables, but also `slotN` variables, as locals in
     // non-intersecting scopes can be allocated to the same slot. We call this process "splitting".
     //
-    // Interestingly, both of these processes can be performed without SSA, using simpler algorithms
-    // with better performance. Both linking and splitting require tracking use-def chains, so we
-    // use the same data structures for both tasks.
+    // Splitting is implemented by adding "versions" to each `slotN`/`stackN` variable mention and
+    // merging together versions in use-def chains. This ensures that all definitions that a given
+    // use sees, as well as the use itself, access the same variable. Uses from dead stack stores
+    // are ignored: `stack0 = value0` do not count as a use of `value0` unless `stack0` is
+    // transitively used by something other than a dead stack store.
+    //
+    // Splitting is performed after linking for two reasons: a) linking has enough to worry about
+    // without versions, b) linking turns many stack stores dead, enabling better and faster
+    // splitting.
+    //
+    // Both of these processes can be performed without SSA, using simpler algorithms with better
+    // performance. Both linking and splitting require tracking use-def chains, so we use the same
+    // data structures for both tasks.
 
     let mut machine = Machine::new(arena);
 
-    // Initialize method arguments
+    let mut ir_basic_blocks = Vec::new();
+    ir_basic_blocks.resize_with(preparse_basic_blocks.len() + 1, BasicBlock::new);
+
+    // Initialize method arguments. This needs to be done in a separate basic block and not as part
+    // of the first BB, as the first BB may have predecessors.
+    let entry_bb_id = preparse_basic_blocks.len();
+    machine.bb_id = entry_bb_id;
     let mut next_slot_id = 0;
     if !is_static {
         machine.set_slot(next_slot_id, arena.alloc(Expression::This));
@@ -210,15 +231,15 @@ pub fn build_stackless_ir<'code>(
             1
         };
     }
-
-    let mut ir_basic_blocks = Vec::new();
-    ir_basic_blocks.resize_with(preparse_basic_blocks.len(), BasicBlock::new);
+    ir_basic_blocks[entry_bb_id].active_defs_at_end = machine.seal_basic_block();
+    ir_basic_blocks[0].predecessors.push(entry_bb_id);
 
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
     // bytecode and we'd rather not worry about that.
     for (bb_id, bb) in preparse_basic_blocks.iter().enumerate() {
         machine.stack_size = bb.stack_size_at_start;
         machine.bb_id = bb_id;
+        machine.add(Statement::BasicBlockEntry { bb_id });
 
         ir_basic_blocks[bb_id].is_exception_handler = !bb.eh_entry_for_ranges.is_empty();
         for succ_bb_id in &bb.successors {
@@ -251,55 +272,46 @@ pub fn build_stackless_ir<'code>(
         ir_basic_blocks[bb_id].active_defs_at_end = machine.seal_basic_block();
     }
 
-    let statements = machine.statements;
+    let unresolved_uses = machine.unresolved_uses;
+    let mut statements = machine.statements;
 
-    link_stack_across_basic_blocks(arena, &ir_basic_blocks, &machine.unresolved_uses);
+    link_stack_across_basic_blocks(arena, &ir_basic_blocks, &unresolved_uses);
+    merge_versions_across_basic_blocks(arena, &ir_basic_blocks, &unresolved_uses, &mut statements);
 
-    // However, linking can also cause a lot of `stackN` variables to lose *all* their uses, and
-    // assignments to such variables should be optimized out entirely. This is tricky because some
-    // def-uses are recursive, e.g. `stack1 = stack2; stack2 = stack1;` in a loop, so it's not like
-    // there's *no* uses at all.
-
-    // Certain variables we create can correspond to multiple source-level variables. This includes
-    // both stack variables, which can correspond to several independent expressions, and slots,
-    // which can correspond to variables local to distinct non-nested blocks. We want to split such
-    // variables into many independent ones.
-    //
-    // This is kind of similar to SSA: we could, for example, convert the IR to SSA and then merge
-    // all related variables, i.e. those mentioned by live phi functions, together. That's not the
-    // best way, because computing SSA fast requires complicated algorithms, and we don't really
-    // need SSA in any intermediate IR -- all we want is to be able to inline single definitions
-    // into single uses, and we don't need SSA for that.
-    //
-    // In a nutshell, for each variable use, we want to determine which definitions its value could
-    // come from, and request that those definition share a variable. The components of such
-    // a DSU-like structure then correspond to individual variables.
-    //
-    // We've already linked uses to definitions within basic blocks. We now need to link unresolved
-    // uses to non-fake active definitions in predecessors. There's a relatively simple way to
-    // achieve this per-variable with DFS. The total time complexity becomes
-    // O(n_variables * n_basic_blocks), which sucks, because most other algorithms we use are
-    // quasi-linear, but SSA-adjacent stuff can't really be any faster.
-    // for (name, uses) in machine.unresolved_uses {
-    //     if ir_basic_blocks.len() == 1 {
-    //         println!("woah {name}");
-    //     }
-    //     //     for (bb_id, use_expr_id) in uses {}
-    // }
-
-    // // Fixup jump destinations
-    // for stmt in &mut statements {
-    //     match stmt {
-    //         Statement::Basic(_) => {}
-    //         Statement::Jump { target, .. } => *target = insn_to_statement_index[*target],
-    //         Statement::Switch(Switch { arms, default, .. }) => {
-    //             for (_, target) in arms {
-    //                 *target = insn_to_statement_index[*target];
-    //             }
-    //             *default = insn_to_statement_index[*default];
-    //         }
-    //     }
-    // }
+    // Fixup jump destinations
+    let mut address_to_stmt_index = FxHashMap::default();
+    let mut transitions = Vec::new();
+    let mut stmt_index = 0;
+    statements.retain(|stmt| match stmt {
+        Statement::Basic(_) => {
+            stmt_index += 1;
+            true
+        }
+        Statement::BasicBlockEntry { bb_id } => {
+            address_to_stmt_index.insert(
+                preparse_basic_blocks[*bb_id].instruction_range.start as usize,
+                stmt_index,
+            );
+            false
+        }
+        Statement::Jump { .. } | Statement::Switch { .. } => {
+            transitions.push(stmt_index);
+            stmt_index += 1;
+            true
+        }
+    });
+    for stmt_index in transitions {
+        match &mut statements[stmt_index] {
+            Statement::Jump { target, .. } => *target = address_to_stmt_index[target],
+            Statement::Switch { arms, default, .. } => {
+                for (_, target) in arms {
+                    *target = address_to_stmt_index[target];
+                }
+                *default = address_to_stmt_index[default];
+            }
+            _ => unreachable!(),
+        }
+    }
 
     // // Compute new exception handlers
     let mut exception_handlers = Vec::new();

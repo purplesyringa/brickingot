@@ -426,7 +426,9 @@ pub fn import_insn_to_ir<'arena, 'code>(
             }));
         }
 
-        // Stack manipulation
+        // Stack manipulation. All of these need to use `copy` instead of `pop`/`push` even if
+        // applicable so that merging understands these operations can't have side effects and can
+        // be optimized out.
         Dup => {
             if machine.stack_size < 1 {
                 return Err(InsnIrImportError::StackUnderflow(StackUnderflowError));
@@ -487,14 +489,18 @@ pub fn import_insn_to_ir<'arena, 'code>(
             machine.stack_size += 2;
         }
         Pop => {
-            machine.pop()?;
+            if machine.stack_size < 1 {
+                return Err(InsnIrImportError::StackUnderflow(StackUnderflowError));
+            }
+            machine.stack_size -= 1;
         }
         Pop2 => {
-            machine.pop2()?;
+            if machine.stack_size < 2 {
+                return Err(InsnIrImportError::StackUnderflow(StackUnderflowError));
+            }
+            machine.stack_size -= 2;
         }
         Swap => {
-            // Can't just pop and push twice because variables will get reassigned and we don't have
-            // SSA yet, need to introduce a temporary variable.
             if machine.stack_size < 2 {
                 return Err(InsnIrImportError::StackUnderflow(StackUnderflowError));
             }

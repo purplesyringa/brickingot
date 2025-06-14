@@ -2,8 +2,9 @@
 // Otherwise, keep the variable as-is.
 //
 // This can lead to suboptimal codegen in cases where the value is produced by a ternary operator
-// and then explicitly moved around the stack before being consumed, but javac never emits such
-// bytecode. This can theoretically be fixed at some performance cost, but is probably unnecessary.
+// and then explicitly moved around the stack across multiple basic blocks before being consumed,
+// but javac never emits such bytecode. This can theoretically be fixed at some performance cost,
+// but is probably unnecessary.
 //
 // The core of the algorithm is DFS over nodes `(bb_id, N)`, which denotes that we're interested in
 // what value `stackN` might be equal to at the entry to `bb_id`. Edges represent that information
@@ -19,7 +20,8 @@
 // an issue because we run DFS multiple times, one per unresolved use. This is fixed by locating
 // SCCs with Tarjan's algorithm and propagating the up-to-date information.
 
-use crate::arena::{Arena, ExprId};
+use crate::abstract_eval::UnresolvedUse;
+use crate::arena::Arena;
 use crate::ast::{Expression, Variable, VariableName, VariableNamespace};
 use crate::stackless::BasicBlock;
 use rustc_hash::FxHashMap;
@@ -27,10 +29,7 @@ use std::collections::hash_map::Entry;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Source {
-    Value {
-        name: VariableName,
-        def_bb_id: usize,
-    },
+    Value { var: Variable, def_bb_id: usize },
     ActiveException,
     Missing,
     Indeterminate,
@@ -100,8 +99,8 @@ impl<'a> Linker<'a> {
         for pred_bb_id in &self.basic_blocks[bb_id].predecessors {
             let next_node =
                 if let Some(def) = self.basic_blocks[*pred_bb_id].active_defs_at_end.get(&name) {
-                    if let Some(position) = def.copy_stack_from_predecessor {
-                        (*pred_bb_id, position)
+                    if let Some(var) = def.copy_stack_from_predecessor {
+                        (*pred_bb_id, var.name.id)
                     } else {
                         assert!(
                             def.var.name.namespace == VariableNamespace::Value,
@@ -110,7 +109,7 @@ impl<'a> Linker<'a> {
                             def.var,
                         );
                         state.source.merge(Source::Value {
-                            name: def.var.name,
+                            var: def.var,
                             def_bb_id: *pred_bb_id,
                         });
                         continue;
@@ -152,16 +151,16 @@ impl<'a> Linker<'a> {
 pub fn link_stack_across_basic_blocks(
     arena: &mut Arena<'_>,
     basic_blocks: &[BasicBlock],
-    unresolved_uses: &FxHashMap<(usize, VariableName), Vec<ExprId>>,
+    unresolved_uses: &FxHashMap<(usize, Variable), UnresolvedUse>,
 ) {
     let mut linker = Linker::new(basic_blocks);
 
-    for (&(bb_id, name), uses) in unresolved_uses {
-        if name.namespace != VariableNamespace::Stack {
+    for &(bb_id, var) in unresolved_uses.keys() {
+        if var.name.namespace != VariableNamespace::Stack {
             continue;
         }
 
-        let DfsNodeState { source, .. } = linker.visit((bb_id, name.id));
+        let DfsNodeState { source, .. } = linker.visit((bb_id, var.name.id));
         assert!(linker.tarjan_stack.is_empty());
 
         match source {
@@ -190,15 +189,10 @@ pub fn link_stack_across_basic_blocks(
         // been produced by something other than `value0`. Therefore, `value0` cannot be the only
         // source of `stack1`, and so the concern is irrelevant.
 
-        for use_expr_id in uses {
-            arena[*use_expr_id] = match source {
-                Source::Value { name, .. } => Expression::Variable(Variable {
-                    name,
-                    version: *use_expr_id,
-                }),
-                Source::ActiveException => Expression::ActiveException,
-                _ => unreachable!(),
-            };
-        }
+        arena[var.version] = match source {
+            Source::Value { var, .. } => Expression::Variable(var),
+            Source::ActiveException => Expression::ActiveException,
+            _ => unreachable!(),
+        };
     }
 }

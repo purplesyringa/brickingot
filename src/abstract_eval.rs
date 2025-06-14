@@ -12,13 +12,19 @@ use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 pub struct ActiveDef {
+    // Can be `None` for stack variables until the BB is sealed.
+    pub def_expr_id: Option<ExprId>,
     // The variable the definition sets. `var.name` can mismatch the name of the defined variable if
     // it's a `stackN = valueM` situation: `var.name` will be set to `valueM` to link preemptively.
     pub var: Variable,
-    // `Some(M)` indicates that the value is equal to `stackM` at the end of the predecessor, and
-    // that `value_var` is a value populated from `stackM`. Only meaningful for `stackN`
-    // definitions.
-    pub copy_stack_from_predecessor: Option<usize>,
+    // `Some(stack_var)` indicates that the value is equal to `stack_var` at the end of the
+    // predecessor, and that `var` is a value populated from `stack_var`. Only meaningful for
+    // `stackN` definitions.
+    pub copy_stack_from_predecessor: Option<Variable>,
+}
+
+pub struct UnresolvedUse {
+    pub is_stack_manipulation: bool,
 }
 
 struct StackWrite {
@@ -31,7 +37,7 @@ pub struct Machine<'arena, 'code> {
     pub stack_size: usize,
     active_defs: FxHashMap<VariableName, ActiveDef>,
     stack_state: FxHashMap<usize, StackWrite>,
-    pub unresolved_uses: FxHashMap<(usize, VariableName), Vec<ExprId>>,
+    pub unresolved_uses: FxHashMap<(usize, Variable), UnresolvedUse>,
     pub bb_id: usize,
     pub statements: Vec<Statement>,
     next_value_id: usize,
@@ -62,7 +68,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
             return Err(StackUnderflowError);
         }
         self.stack_size -= size;
-        Ok(self.get_stack(self.stack_size))
+        Ok(self.get_stack(self.stack_size, false))
     }
 
     pub fn pop(&mut self) -> Result<ExprId, StackUnderflowError> {
@@ -179,8 +185,14 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         self.binop(op, ty, ty, ty)
     }
 
-    fn get_var(&mut self, name: VariableName) -> ExprId {
+    fn get_var(&mut self, name: VariableName, is_stack_manipulation: bool) -> ExprId {
         if let Some(def) = self.active_defs.get(&name) {
+            if !is_stack_manipulation && let Some(var) = def.copy_stack_from_predecessor {
+                self.unresolved_uses
+                    .get_mut(&(self.bb_id, var))
+                    .unwrap()
+                    .is_stack_manipulation = false;
+            }
             self.arena.alloc(Expression::Variable(def.var))
         } else {
             let use_expr_id = self.arena.alloc_with(|use_expr_id| {
@@ -189,10 +201,18 @@ impl<'arena, 'code> Machine<'arena, 'code> {
                     version: use_expr_id,
                 })
             });
-            self.unresolved_uses
-                .entry((self.bb_id, name))
-                .or_default()
-                .push(use_expr_id);
+            self.unresolved_uses.insert(
+                (
+                    self.bb_id,
+                    Variable {
+                        name,
+                        version: use_expr_id,
+                    },
+                ),
+                UnresolvedUse {
+                    is_stack_manipulation,
+                },
+            );
             use_expr_id
         }
     }
@@ -218,10 +238,13 @@ impl<'arena, 'code> Machine<'arena, 'code> {
     }
 
     pub fn get_slot(&mut self, id: usize) -> ExprId {
-        self.get_var(VariableName {
-            id,
-            namespace: VariableNamespace::Slot,
-        })
+        self.get_var(
+            VariableName {
+                id,
+                namespace: VariableNamespace::Slot,
+            },
+            false,
+        )
     }
 
     pub fn set_slot(&mut self, id: usize, value: ExprId) {
@@ -233,17 +256,21 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         self.active_defs.insert(
             name,
             ActiveDef {
+                def_expr_id: Some(var.version),
                 var,
                 copy_stack_from_predecessor: None,
             },
         );
     }
 
-    fn get_stack(&mut self, position: usize) -> ExprId {
-        self.get_var(VariableName {
-            id: position,
-            namespace: VariableNamespace::Stack,
-        })
+    fn get_stack(&mut self, position: usize, is_stack_manipulation: bool) -> ExprId {
+        self.get_var(
+            VariableName {
+                id: position,
+                namespace: VariableNamespace::Stack,
+            },
+            is_stack_manipulation,
+        )
     }
 
     fn set_stack(&mut self, position: usize, value: ExprId) {
@@ -268,11 +295,10 @@ impl<'arena, 'code> Machine<'arena, 'code> {
             // to save their definitions. This significantly reduces the size of the hashmap.
         };
 
-        let copy_stack_from_predecessor = if let Expression::Variable(Variable { name, .. }) =
-            self.arena[value]
-            && name.namespace == VariableNamespace::Stack
+        let copy_stack_from_predecessor = if let Expression::Variable(var) = self.arena[value]
+            && var.name.namespace == VariableNamespace::Stack
         {
-            Some(name.id)
+            Some(var)
         } else {
             None
         };
@@ -283,6 +309,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
                 namespace: VariableNamespace::Stack,
             },
             ActiveDef {
+                def_expr_id: None,
                 var: value_var,
                 copy_stack_from_predecessor,
             },
@@ -297,7 +324,6 @@ impl<'arena, 'code> Machine<'arena, 'code> {
                 order_id: self.next_order_id,
             },
         );
-
         self.next_order_id += 1;
     }
 
@@ -309,16 +335,19 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         let mut delayed_stack_assignments: Vec<(usize, StackWrite)> =
             self.stack_state.drain().collect();
         delayed_stack_assignments.sort_by_key(|(_, write)| write.order_id);
+
         for (position, write) in delayed_stack_assignments {
+            let name = VariableName {
+                namespace: VariableNamespace::Stack,
+                id: position,
+            };
             let def_expr_id = self.arena.alloc_with(|def_expr_id| {
                 Expression::Variable(Variable {
-                    name: VariableName {
-                        namespace: VariableNamespace::Stack,
-                        id: position,
-                    },
+                    name,
                     version: def_expr_id,
                 })
             });
+            self.active_defs.get_mut(&name).unwrap().def_expr_id = Some(def_expr_id);
             self.statements
                 .push(Statement::Basic(BasicStatement::Assign {
                     target: def_expr_id,
@@ -339,7 +368,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
     }
 
     pub fn copy(&mut self, target: usize, source: usize) {
-        let value = self.get_stack(source);
+        let value = self.get_stack(source, true);
         self.set_stack(target, value);
     }
 

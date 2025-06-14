@@ -5,7 +5,9 @@ extern crate alloc;
 mod arena;
 mod arrows;
 mod ast;
+mod dsu;
 mod linking;
+mod splitting;
 mod stackless;
 // mod cfg;
 mod abstract_eval;
@@ -164,7 +166,8 @@ fn main() {
 
     // let raw_bytes =
     //     &*std::fs::read("/home/purplesyringa/mc/public/server-1.21.5/exv$a.class").unwrap();
-    // // let raw_bytes = &*std::fs::read("Test.class").unwrap();
+
+    // let raw_bytes = &*std::fs::read("Test.class").unwrap();
     // if let Err(e) = decompile_class_file(raw_bytes) {
     //     panic!("class decompilation failed: {e}");
     // }

@@ -5,7 +5,7 @@ use core::fmt::{self, Display};
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::{Index, IndexMut};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExprId(pub u32);
 
 // We want `last_id` at the start for performance and code size. Padding so that the start of the
@@ -24,6 +24,10 @@ impl<'code> Arena<'code> {
             _padding: MaybeUninit::uninit(),
             last_id: Cell::new(31),
         }
+    }
+
+    pub fn capacity(&self) -> u32 {
+        self.last_id.get() + 1
     }
 
     #[inline]
@@ -56,8 +60,8 @@ impl<'code> Arena<'code> {
 
     #[cold]
     unsafe fn allocate_new_chunk(&self, drop_cb: unsafe fn(*mut ()), drop_arg: *mut ()) {
-        let id = self.last_id.get().wrapping_add(1);
-        if id == 0 {
+        let id = self.last_id.get() + 1;
+        if id == i32::MIN as u32 {
             unsafe {
                 drop_cb(drop_arg);
             }
@@ -132,6 +136,26 @@ impl<'code> Arena<'code> {
         }
 
         IrDisplay { value, arena: self }
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Expression<'code>> {
+        let mut current_id = 32;
+        let end_id = self.last_id.get() + 1;
+        let mut chunk_ptr = core::ptr::null_mut();
+        core::iter::from_fn(move || {
+            if current_id == end_id {
+                return None;
+            }
+            if current_id & (current_id - 1) == 0 {
+                unsafe {
+                    core::hint::assert_unchecked(current_id >= 32);
+                }
+                chunk_ptr = self.chunks[current_id.ilog2() as usize - 5].get();
+            }
+            let expr_ptr = chunk_ptr.wrapping_add(current_id as usize);
+            current_id += 1;
+            Some(unsafe { &mut *expr_ptr })
+        })
     }
 }
 
