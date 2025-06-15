@@ -95,11 +95,13 @@ impl<'arena, 'code> Machine<'arena, 'code> {
                 }
             })
             .collect();
-        Ok(parameter_sizes
+        let mut arguments = parameter_sizes
             .iter()
             .rev()
             .map(|size| self.pop_sized(*size))
-            .collect::<Result<_, _>>()?)
+            .collect::<Result<Vec<ExprId>, _>>()?;
+        arguments.reverse();
+        Ok(arguments)
     }
 
     pub fn pop_nat(
