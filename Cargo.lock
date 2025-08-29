@@ -54,7 +54,7 @@ dependencies = [
 [[package]]
 name = "noak"
 version = "0.6.3"
-source = "git+https://github.com/purplesyringa/noak#e0bac3252d74ffe84697c93c343a32cc7873c9fb"
+source = "git+https://github.com/purplesyringa/noak#57dcf7824815da8bc19bd5cc51a9f0c083aaa38c"
 dependencies = [
  "bitflags",
  "indexmap",

@@ -62,7 +62,7 @@ impl<'code> DebugIr<'code> for Program<'code> {
 pub enum Statement {
     Basic(BasicStatement),
     Label {
-        address: u32,
+        bb_id: usize,
     },
     Jump {
         condition: ExprId,
@@ -79,7 +79,7 @@ impl<'code> DebugIr<'code> for Statement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         match self {
             Self::Basic(stmt) => write!(f, "{}", arena.debug(stmt)),
-            Self::Label { address } => write!(f, "I{address}:"),
+            Self::Label { bb_id } => write!(f, "bb{bb_id}:"),
             Self::Jump { condition, target } => {
                 write!(f, "if ({}) jump {target};", arena.debug(condition))
             }
@@ -277,6 +277,11 @@ pub fn build_stackless_ir<'code>(
             ir_basic_blocks[*succ_bb_id].predecessors.push(bb_id);
         }
 
+        // Place a label at the beginning of each BB, since we need to resolve addresses in jump
+        // targets or `try` blocks to statement indices. We can't read `statements.len()` and
+        // populate a map directly here, as statements will be rearranged in a bit.
+        machine.add(Statement::Label { bb_id });
+
         for row in code.raw_instructions_from(Index::new(bb.instruction_range.start))? {
             let (address, insn) = row?;
             let address = address.as_u32();
@@ -284,10 +289,6 @@ pub fn build_stackless_ir<'code>(
                 assert_eq!(address, bb.instruction_range.end);
                 break;
             }
-
-            // XXX: We could only add labels at the exact places we need to resolve, but this
-            // doesn't seem to reduce performance too much.
-            machine.add(Statement::Label { address });
 
             let stack_size_before_insn = machine.stack_size;
             // Jump targets are initialized to instruction addresses. We'll remap them to statement
@@ -322,8 +323,11 @@ pub fn build_stackless_ir<'code>(
             stmt_index += 1;
             true
         }
-        Statement::Label { address } => {
-            addresses_and_statements.push((*address, stmt_index));
+        Statement::Label { bb_id } => {
+            addresses_and_statements.push((
+                preparse_basic_blocks[*bb_id].instruction_range.start,
+                stmt_index,
+            ));
             false
         }
         Statement::Jump { .. } | Statement::Switch { .. } => {
@@ -351,37 +355,33 @@ pub fn build_stackless_ir<'code>(
         }
     }
 
-    // // Compute new exception handlers
+    // Compute new exception handlers
     let mut exception_handlers = Vec::new();
     for handler in code.exception_handlers() {
-        // Look for the region of statements that fit within the range, as some instructions could
-        // have been optimized out as unreachable.
+        // Since some instructions could have been optimized out as unreachable, `start_pc` and
+        // `stop_pc` don't necessarily correspond to any existing basic block boundary! Look for the
+        // region of present basic blocks that fit within the range.
+
         let start_index = addresses_and_statements
             .partition_point(|(address, _)| *address < handler.start().as_u32());
-        if start_index == addresses_and_statements.len() {
-            continue;
-        }
-        let start = addresses_and_statements[start_index].1;
-
         let end_index = addresses_and_statements
-            .partition_point(|(address, _)| *address <= handler.end().as_u32())
-            - 1;
-        let end = addresses_and_statements[end_index].1;
-        if end <= start {
+            .partition_point(|(address, _)| *address < handler.end().as_u32());
+        if start_index == addresses_and_statements.len() || end_index <= start_index {
             continue;
         }
 
-        let target = address_to_stmt_index(handler.handler().as_u32() as usize);
-
-        let class = match handler.catch_type() {
-            Some(catch_type) => Some(Str(pool.retrieve(catch_type)?.name)),
-            None => None,
-        };
         exception_handlers.push(ExceptionHandler {
-            start,
-            end,
-            target,
-            class,
+            start: addresses_and_statements[start_index].1,
+            end: if end_index == addresses_and_statements.len() {
+                statements.len()
+            } else {
+                addresses_and_statements[end_index].1
+            },
+            target: address_to_stmt_index(handler.handler().as_u32() as usize),
+            class: match handler.catch_type() {
+                Some(catch_type) => Some(Str(pool.retrieve(catch_type)?.name)),
+                None => None,
+            },
         });
     }
 

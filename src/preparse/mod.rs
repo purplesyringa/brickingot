@@ -56,11 +56,11 @@ pub fn extract_basic_blocks(
     cpool: &ConstantPool<'_>,
     code: &Code<'_>,
 ) -> Result<Vec<BasicBlock>, BytecodePreparsingError> {
-    // Insert splits after every explicit jump, at each jump target, and at each exception handler.
-    // Also at the end and the beginning for implementation simplicity. Save all non-trivial
-    // transitions to build the CFG without reparsing the instructions.
+    // Insert splits after every explicit jump, at each jump target, at each exception handler, and
+    // at `try` boundaries. Also at the end and the beginning for implementation simplicity. Save
+    // all non-trivial transitions to build the CFG without reparsing the instructions.
     let mut should_insert_split_here = false;
-    let mut splits = vec![0, u32::MAX];
+    let mut splits = vec![0, code.byte_len()];
     let mut transitions: Vec<(u32, InsnControlFlow)> = Vec::new();
 
     for row in code.raw_instructions() {
@@ -83,13 +83,25 @@ pub fn extract_basic_blocks(
 
     // `should_insert_split_here` can be ignored, as there's an implicit split at the end.
 
-    splits.extend(
-        code.exception_handlers()
-            .map(|handler| handler.handler().as_u32()),
-    );
+    // Splitting BBs at `try` block enters and exits is not necessary from the CFG point of view,
+    // but it simplifies address/statement index tracking during IR construction. It is not spelled
+    // entirely clearly in the specification, but it seems like valid JVM bytecode never has
+    // `start_pc`/`end_pc` point into the middle of instructions, and HotSpot also verifies that's
+    // the case, so we're in good company.
+    splits.extend(code.exception_handlers().flat_map(|handler| {
+        [
+            handler.start().as_u32(),
+            handler.end().as_u32(),
+            handler.handler().as_u32(),
+        ]
+    }));
 
     splits.sort();
     splits.dedup();
+
+    if *splits.last().unwrap() > code.byte_len() {
+        return Err(BytecodePreparsingError::CodeOffsetOutOfBounds);
+    }
 
     // For malformed bytecode, splits can be in the middle of instructions. We'll have verified the
     // correctness by the end of this function during DFS.
@@ -186,7 +198,7 @@ pub fn extract_basic_blocks(
             .try_into()
             .map_err(|_| BytecodePreparsingError::StackUnderflow)?;
 
-        if reached_end_of_stream && bb.instruction_range.end != u32::MAX {
+        if reached_end_of_stream && bb.instruction_range.end != code.byte_len() {
             // This can also be a jump into the middle of the last instruction (which is also
             // erroneous), but we don't have an easy way to disambiguate that.
             return Err(BytecodePreparsingError::CodeFallthrough);
