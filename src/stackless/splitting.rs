@@ -1,4 +1,4 @@
-use super::{abstract_eval::UnresolvedUse, BasicBlock, Statement};
+use super::{BasicBlock, Statement, abstract_eval::UnresolvedUse};
 use crate::arena::{Arena, ExprId};
 use crate::ast::{BasicStatement, Expression, Variable, VariableName, VariableNamespace};
 use crate::dsu::DisjointSetUnion;
@@ -91,6 +91,8 @@ pub fn merge_versions_across_basic_blocks(
         }
     }
 
+    // This iterates through possibly dead expressions, but since `resolve` is infallible, it
+    // doesn't break anything.
     for expr in arena.iter_mut() {
         if let Expression::Variable(Variable { version, .. }) = expr {
             *version = merger.resolve(*version);
