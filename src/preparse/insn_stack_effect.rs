@@ -26,7 +26,7 @@ pub fn get_insn_stack_effect(
     pool: &ConstantPool<'_>,
     insn: &RawInstruction<'_>,
 ) -> Result<isize, InsnStackEffectError> {
-    // This could be resolve via a table in most cases. LLVM compiles this as a jump table instead,
+    // This could resolve via a table in most cases. LLVM compiles this as a jump table instead,
     // which is not ideal, but fine. No need to optimize this, at least for now.
     Ok(match insn {
         // Array loads/stores

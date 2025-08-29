@@ -145,7 +145,7 @@ pub fn build_stackless_ir<'code>(
     // We obviously have variables for locals, named `slotN`. We also need to simulate stack and
     // be able to deduce what value each stack element contains across BBs -- so we have variables
     // named `stackN`, denoting the N-th element from the bottom of the stack (category two types
-    // are counted as two elements).
+    // occupy two elements, with the entire value stored in the first element).
     //
     // We want to, in a certain sense, inline certain variable definitions, but not others.
     // Specifically, assignments to and reads from locals can be interpreted as side effects, as
@@ -167,7 +167,7 @@ pub fn build_stackless_ir<'code>(
     // groups -- synthetics, like `stackN`, and locals, like `slotN`, only one of which is subject
     // to inlining.
     //
-    // We use a slightly different, unified approach. Each non-trivial expresison is assigned to
+    // We use a slightly different, unified approach. Each non-trivial expression is assigned to
     // a unique `valueN` variable, which is then copied into a stack variable:
     //     value0 = <expr>
     //     stack0 = value0
@@ -176,6 +176,10 @@ pub fn build_stackless_ir<'code>(
     // `stack0` are equivalent to `stack0 = value0`. For lack of a better word, we call this process
     // "linking". Linking can see through chains of moves and replaces most `stackN` uses with
     // `valueM`.
+    //
+    // For the purposes of linking, most expressions are considered non-trivial, including literals.
+    // The only exception is statements like `stackN = stackM`: in this case, an explicit `valueK`
+    // variable will not be created to save `stackM` to if `stackM` already has a known value.
     //
     // Note that linking is only superficially similar to inlining:
     // - Inlining optimizes `x = <expr>; ... x` to `<expr>` when `...` has no side effects; linking
@@ -189,12 +193,22 @@ pub fn build_stackless_ir<'code>(
     // `stackN = stackM` copies.
     //
     // The uses of `stackN` that linking cannot optimize out are precisely the places where SSA
-    // would place `phi` functions. Such variables are retained.
+    // would place `phi` functions. Such variables are retained. This can happen in a ternary
+    // expression or in a loop, but javac never accesses stack elements populated by the previous
+    // loop iteration, so this doesn't need explicit handling in practice.
     //
-    // It's worth noting that there's an exception to the rule that `stackN` is always either
-    // optimized to `valueM`, or is retained as-is. In exception handlers, `stackN` can also be
-    // optimized to `exception0`. Note that such a replacement is not guaranteed, i.e. further
-    // passes cannot assume that exceptions aren't referred to directly via `stack0`.
+    // A minor complication arises in exception handlers, which are populated with the expection
+    // object in `stack0`. The exception is assumed to be stored in the synthetic variable
+    // `exception0`, and certain accesses to `stack0` (as well as copies in other stack elements)
+    // may be optimized to use `exception0`. This is, however, not guaranteed. For example, in
+    //     value0 = 1
+    //     stack0 = value0
+    //     // exception handler starts here
+    //     stack1 = stack0
+    // `stack0` may refer either to `1` or to the exception handler depending on control flow, so
+    // the `stack0` read will not be optimized to either. This means that although moves of the
+    // exception object across stack locations are typically tracked, that is not guaranteed to be
+    // the case, and implicit writes to `stack0` need to be considered during each pass.
     //
     // On a higher level, linking can be seen as merging certain variables together. However, it's
     // also important to split identical variables apart when they have non-intersecting uses. This
@@ -203,9 +217,14 @@ pub fn build_stackless_ir<'code>(
     //
     // Splitting is implemented by adding "versions" to each `slotN`/`stackN` variable mention and
     // merging together versions in use-def chains. This ensures that all definitions that a given
-    // use sees, as well as the use itself, access the same variable. Uses from dead stack stores
-    // are ignored: `stack0 = value0` do not count as a use of `value0` unless `stack0` is
-    // transitively used by something other than a dead stack store.
+    // use sees, as well as the use itself, access the same variable.
+    //
+    // In this sense, splitting is actually merging; don't let that confuse you. Versioning does not
+    // create *new* variables: different versions of a variable still use the same storage on the IR
+    // level, and only reads of the latest version are allowed.
+    //
+    // Uses from dead stack stores are ignored: `stack0 = value0` do not count as a use of `value0`
+    // unless `stack0` is transitively used by something other than a dead stack store.
     //
     // Splitting is performed after linking for two reasons: a) linking has enough to worry about
     // without versions, b) linking turns many stack stores dead, enabling better and faster
@@ -218,10 +237,11 @@ pub fn build_stackless_ir<'code>(
     let mut machine = Machine::new(arena);
 
     let mut ir_basic_blocks = Vec::new();
+    // +1 for a fake entry BB populating method arguments. This needs to be done in a separate basic
+    // block and not as part of the first real BB, as the first BB may have predecessors.
     ir_basic_blocks.resize_with(preparse_basic_blocks.len() + 1, BasicBlock::new);
 
-    // Initialize method arguments. This needs to be done in a separate basic block and not as part
-    // of the first BB, as the first BB may have predecessors.
+    // Initialize method arguments
     let entry_bb_id = preparse_basic_blocks.len();
     machine.bb_id = entry_bb_id;
     let mut next_slot_id = 0;
@@ -250,6 +270,7 @@ pub fn build_stackless_ir<'code>(
         ir_basic_blocks[bb_id].unique_exception_expr_id = if bb.eh_entry_for_ranges.is_empty() {
             None
         } else {
+            // Doesn't have to point to anything specific, just a unique ID for versioning.
             Some(arena.alloc(Expression::Null))
         };
         for succ_bb_id in &bb.successors {
