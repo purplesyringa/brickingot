@@ -20,9 +20,9 @@ pub struct Arena<'code> {
 impl<'code> Arena<'code> {
     pub const fn new() -> Self {
         Self {
-            chunks: [const { Cell::new(core::ptr::without_provenance_mut(usize::MAX)) }; 27],
-            _padding: MaybeUninit::uninit(),
             last_id: Cell::new(31),
+            _padding: MaybeUninit::uninit(),
+            chunks: [const { Cell::new(core::ptr::without_provenance_mut(usize::MAX)) }; 27],
         }
     }
 
@@ -71,12 +71,12 @@ impl<'code> Arena<'code> {
             core::hint::assert_unchecked(id >= 32);
         }
         let chunk_id = id.ilog2();
-        let layout = Self::get_chunk_layout(chunk_id);
         if self.chunks[chunk_id as usize - 5].get().addr() != usize::MAX {
             // Chunk already allocated, this can happen if `cb` panics on the first element of
             // a chunk.
             return;
         }
+        let layout = Self::get_chunk_layout(chunk_id);
         let ptr: *mut Expression<'code> = unsafe { alloc::alloc(layout) }.cast();
         if ptr.is_null() {
             unsafe {
@@ -118,7 +118,6 @@ impl<'code> Arena<'code> {
         self.alloc(Expression::ConstInt(value))
     }
 
-    #[unsafe(no_mangle)]
     pub fn null(&self) -> ExprId {
         self.alloc(Expression::Null)
     }
