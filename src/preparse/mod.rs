@@ -1,8 +1,8 @@
 pub mod insn_control_flow;
 pub mod insn_stack_effect;
 
-use self::insn_control_flow::{get_insn_control_flow, InsnControlFlow};
-use self::insn_stack_effect::{get_insn_stack_effect, InsnStackEffectError};
+use self::insn_control_flow::{InsnControlFlow, get_insn_control_flow};
+use self::insn_stack_effect::{InsnStackEffectError, get_insn_stack_effect};
 use core::ops::Range;
 use noak::{
     error::DecodeError,
@@ -99,7 +99,10 @@ pub fn extract_basic_blocks(
         .map(|(bb_id, range)| BasicBlock {
             instruction_range: range[0]..range[1],
             stack_size_at_start: 0,
-            successors: vec![bb_id + 1], // We'll remove this for divergent control flow in a moment
+            // `successors` can only be populated after BB boundaries have been decided, so this
+            // stays in a sentinel-like state where only the trivial successor is recorded. We'll
+            // remove it for divergent control flow a bit later.
+            successors: vec![bb_id + 1],
             eh_entry_for_ranges: Vec::new(),
         })
         .collect();
@@ -112,23 +115,23 @@ pub fn extract_basic_blocks(
         }
 
         if !control_flow.can_fallthrough {
-            // There can be at most one transition per BB, so this BB is in a pristine state.
+            // There can be at most one jump origin per BB, so this BB is in a pristine state, and
+            // this `clear` call only removes the jump to the next BB.
             basic_blocks[bb_id].successors.clear();
         }
 
         for target_address in control_flow.can_jump_to {
-            // We could use a hashmap here, but there's usually little enough data that binary
-            // search is probably better.
+            // We could use a hashmap here, but that would require us to populate it for each
+            // instruction rather than just BB boundaries, so binary search is probably better.
             let target_bb_id = basic_blocks
                 .binary_search_by_key(&target_address, |bb| bb.instruction_range.start)
                 .expect("jump not to BB start");
             basic_blocks[bb_id].successors.push(target_bb_id);
         }
-    }
 
-    for bb in &mut basic_blocks {
-        bb.successors.sort();
-        bb.successors.dedup();
+        let successors = &mut basic_blocks[bb_id].successors;
+        successors.sort();
+        successors.dedup();
     }
 
     // *Typically*, the last BB cannot fallthrough, i.e. jump to the non-existent BB after it. We
@@ -184,8 +187,8 @@ pub fn extract_basic_blocks(
             .map_err(|_| BytecodePreparsingError::StackUnderflow)?;
 
         if reached_end_of_stream && bb.instruction_range.end != u32::MAX {
-            // This can also be a jump into the middle of the last instruction, but we don't have
-            // an easy way to disambiguate that.
+            // This can also be a jump into the middle of the last instruction (which is also
+            // erroneous), but we don't have an easy way to disambiguate that.
             return Err(BytecodePreparsingError::CodeFallthrough);
         }
 
@@ -209,9 +212,9 @@ pub fn extract_basic_blocks(
         }
     }
 
-    // Erase unreachable BBs. We don't really remove them from this list, but we clean them up just
-    // enough that they're guaranteed not to refer to invalid bytecode, which could cause problems
-    // in future passes.
+    // Erase unreachable BBs. We don't really remove them from this list, since that would affect BB
+    // IDs, but we clean them up just enough that they're guaranteed not to refer to invalid
+    // bytecode, which could cause problems in future passes.
     for (in_stack, bb) in in_stack.iter().zip(&mut basic_blocks) {
         if !in_stack {
             *bb = BasicBlock {
