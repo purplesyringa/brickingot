@@ -15,12 +15,12 @@
 // stack elements are held over a significant amount of basic blocks, which basically only happens
 // when a ton of ternaries are stuck together. This is so rare that the graph is, in practice, tiny.
 //
-// There's a tiny problem with SCCs -- during DFS, vertices that aren't entries to an SCC may
-// contain information that doesn't include values reachable from the entire SCC, and that's
-// an issue because we run DFS multiple times, one per unresolved use. This is fixed by locating
-// SCCs with Tarjan's algorithm and propagating the up-to-date information.
+// There's a small problem with using DFS on cyclic graphs: not all vertices in an SCCs will contain
+// information about the entire SCC, since we don't visit nodes recursively multiple times. This is
+// fixed by locating SCCs with Tarjan's algorithm and propagating the up-to-date information from
+// the entry vertex to the whole SCC.
 
-use super::{abstract_eval::UnresolvedUse, BasicBlock};
+use super::{BasicBlock, abstract_eval::UnresolvedUse};
 use crate::arena::Arena;
 use crate::ast::{Expression, Variable, VariableName, VariableNamespace};
 use rustc_hash::FxHashMap;
@@ -167,24 +167,29 @@ pub fn link_stack_across_basic_blocks(
         assert!(linker.tarjan_stack.is_empty());
 
         // Suppose that `stack1` could only be populated from a single `value0`. That doesn't,
-        // however, clearly imply that `stack1` equals the contents of `value0` *at time of use*.
-        // Specifically, the concern is that a program execution with the following subsequence
-        // could exist:
+        // however, clearly imply that `stack1` equals the contents of `value0` *at time of use*,
+        // i.e. that another store to `value0` hasn't occured.
+        //
+        // Specifically, the concern is that a program execution with the following subsequence of
+        // statements could exist:
         //     value0 <- ...
         //     [eventually move value0 to stack0, perhaps via multiple copies]
         //     [the above may repeat several times]
         //     value0 <- ...
         //     [eventually move stack0 to stack1, perhaps via multiple copies]
-        //     f(stack1)
-        // Consider the path in the control flow graph this execution takes. Collapsing the part of
-        // the path between the first `value0 <- ...` and the last `value0 <- ...` before
-        // `f(stack1)` produces a different valid control flow path with the following semantics:
+        //     f(stack1) // populated from value0, but not from the latest store to value0!
+        //
+        // Consider the path in the control flow graph this execution takes. Collapse the part of
+        // the path between the first store `value0 <- ...` in program order and the last store
+        // `value0 <- ...` before the call `f(stack1)`. This produces a different, statically valid
+        // control flow path with the following semantics:
         //     value0 <- ...
         //     [eventually move stack0 to stack1, perhaps via multiple copies]
         //     f(stack1)
         // In this execution, `value0` has not been saved to `stack0`, and so `stack0` must have
-        // been produced by something other than `value0`. Therefore, `value0` cannot be the only
-        // source of `stack1`, and so the concern is irrelevant.
+        // been produced by something older than this store to `value0` -- but since it's the first
+        // store to `value0`, it must be produced from a different `valueN`. Therefore, `value0`
+        // cannot be the only source of `stack1`, and so the concern is irrelevant.
 
         match source {
             Source::Value(value_var) => arena[var.version] = Expression::Variable(value_var),
