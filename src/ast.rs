@@ -1,8 +1,8 @@
 use crate::arena::{Arena, DebugIr, ExprId};
 use core::fmt::{self, Display};
 use displaydoc::Display;
-use noak::reader::cpool::value::{Dynamic, MethodHandle};
 use noak::MStr;
+use noak::reader::cpool::value::{Dynamic, MethodHandle};
 
 #[derive(Debug)]
 pub enum BasicStatement {

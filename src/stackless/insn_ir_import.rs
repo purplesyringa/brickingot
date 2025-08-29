@@ -1,6 +1,6 @@
 use super::{
-    abstract_eval::{Machine, StackUnderflowError},
     Statement,
+    abstract_eval::{Machine, StackUnderflowError},
 };
 use crate::arena::{Arena, ExprId};
 use crate::ast::{BasicStatement, BinOp, CallKind, Expression, PrimitiveType, Str, Type, UnaryOp};
@@ -13,8 +13,8 @@ use noak::{
             RawInstruction::{self, *},
         },
         cpool::{
-            self, value::FieldRef, ConstantPool, Dynamic, Index, InterfaceMethodRef, Item,
-            MethodHandle, MethodRef,
+            self, ConstantPool, Dynamic, Index, InterfaceMethodRef, Item, MethodHandle, MethodRef,
+            value::FieldRef,
         },
     },
 };

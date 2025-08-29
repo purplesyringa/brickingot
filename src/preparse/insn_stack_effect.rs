@@ -3,7 +3,7 @@ use noak::{
     error::DecodeError,
     reader::{
         attributes::RawInstruction::{self, *},
-        cpool::{value::NameAndType, ConstantPool, InterfaceMethodRef, Item, MethodRef},
+        cpool::{ConstantPool, InterfaceMethodRef, Item, MethodRef, value::NameAndType},
     },
 };
 use thiserror::Error;

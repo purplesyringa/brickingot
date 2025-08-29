@@ -4,7 +4,7 @@ mod linking;
 mod splitting;
 
 use self::abstract_eval::{ActiveDef, Machine};
-use self::insn_ir_import::{import_insn_to_ir, InsnIrImportError};
+use self::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use self::linking::link_stack_across_basic_blocks;
 use self::splitting::merge_versions_across_basic_blocks;
 use crate::arena::{Arena, DebugIr, ExprId};
@@ -13,13 +13,13 @@ use crate::preparse;
 use crate::preparse::insn_stack_effect::is_type_descriptor_double_width;
 use core::fmt::{self, Display};
 use noak::{
+    MStr,
     descriptor::MethodDescriptor,
     error::DecodeError,
     reader::{
         attributes::{Code, Index},
         cpool::ConstantPool,
     },
-    MStr,
 };
 use rustc_hash::FxHashMap;
 use thiserror::Error;
@@ -29,7 +29,9 @@ pub enum StacklessIrError {
     #[error("Failed to parse class file: {0}")]
     Noak(#[from] DecodeError),
 
-    #[error("While importing instruction `{address}: {insn}` to IR: {error} (stack size before instruction was {stack_size_before_insn})")]
+    #[error(
+        "While importing instruction `{address}: {insn}` to IR: {error} (stack size before instruction was {stack_size_before_insn})"
+    )]
     InsnIrImport {
         address: u32,
         insn: String,

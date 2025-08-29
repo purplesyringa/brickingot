@@ -19,10 +19,10 @@ use crate::stackless::{build_stackless_ir, StacklessIrError};
 // use crate::matcher::rewrite_control_flow;
 // use crate::unstructured::{convert_code_to_stackless, StatementGenerationError};
 use noak::{
+    AccessFlags, MStr,
     descriptor::MethodDescriptor,
     error::DecodeError,
-    reader::{attributes::Code, cpool::ConstantPool, Class, Method},
-    AccessFlags, MStr,
+    reader::{Class, Method, attributes::Code, cpool::ConstantPool},
 };
 use std::time::Instant;
 use thiserror::Error;
