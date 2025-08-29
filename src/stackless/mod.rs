@@ -264,6 +264,11 @@ pub fn build_stackless_ir<'code>(
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
     // bytecode and we'd rather not worry about that.
     for (bb_id, bb) in preparse_basic_blocks.iter().enumerate() {
+        if bb.instruction_range.end == 0 {
+            // Skip empty BBs -- don't let them emit out-of-order labels.
+            continue;
+        }
+
         machine.stack_size = bb.stack_size_at_start;
         machine.bb_id = bb_id;
 
