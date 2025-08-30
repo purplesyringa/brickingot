@@ -45,7 +45,10 @@ pub enum RequirementKind {
     /// The block must allow jumps to `range.end` via `continue`.
     ForwardJump,
     /// The block must catch exceptions.
-    Try,
+    Try {
+        /// ...and optionally jump according to this requirement in `catch`.
+        with_backward_jump: Option<usize>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -54,9 +57,7 @@ pub enum RequirementKey {
     Jump { stmt_index: usize },
     /// `case` or `default` in a `switch`.
     Switch { stmt_index: usize, key: Option<i32> },
-    /// A forward `try` with the catch handler right after the end of the block.
-    TryCatch { index: usize },
-    /// A `try` with a backward jump to the handler, specified via `BackwardCatch`.
+    /// A `try` block.
     Try { index: usize },
     /// A backward jump from `catch` to the real exception handler.
     BackwardCatch { index: usize },
@@ -129,68 +130,37 @@ pub fn compute_block_requirements(
         .into_iter()
         .enumerate()
     {
-        if handler.end <= handler.target {
-            // Typically, the `try` block range ends before the handler; in this case, we emit
-            // a slightly larger `try` block so that the handler directly follows its end and
-            // `catch` can fallthrough into the handler without any explicit jumps.
-            //
-            // If this contains more statements than necessary, we'll sort it out later with
-            // synthetic variables. It's easier than adding jumps and then optimizing them out.
-            keys.push(RequirementKey::TryCatch { index });
-            requirements.push(BlockRequirement {
-                range: handler.start..handler.target,
-                kind: RequirementKind::Try,
-            });
-        } else if handler.target <= handler.start {
-            // But the handler can also be located before the `try` block. In this case, we want to
-            // jump from `catch` to the handler via `continue`. In the lowering, this will require
-            // both a normal block and a `try` block.
-            //
-            // Note that the normal block must always be outside the `try` block, even if their
-            // ranges match exactly, since the `catch` is logically located *after* the `try` block,
-            // not at the last statement of `try`, and `catch` cannot access any blocks inside `try`
-            // body.
-            //
-            // The method we use for building the tree guarantees that `try`s are never preferred to
-            // blocks, so this works fine.
-            keys.push(RequirementKey::BackwardCatch { index });
-            requirements.push(BlockRequirement {
-                range: handler.target..handler.end,
-                kind: RequirementKind::BackwardJump,
-            });
-            keys.push(RequirementKey::Try { index });
-            requirements.push(BlockRequirement {
-                range: handler.start..handler.end,
-                kind: RequirementKind::Try,
-            });
+        let with_backward_jump = if handler.end == handler.target {
+            // If `handler.target > handler.end`, `treeify_try_blocks` would have extended `end`.
+            None
         } else {
-            // The handler can also be inside `try`, in which case we have to split the `try` into
-            // two parts.
+            // If the handler is located before or within the `try` block, we have to emit a jump.
             //
-            // We could also keep one `try`, place a dispatcher at the start of the `try` body, jump
-            // to before the start of `try` so that we enter the dispatcher, and place a block
-            // around `try` so that this jump can be performed from `catch`. This is cursed and hard
-            // to formalize since we don't track virtual statements inside `catch` and don't have
-            // a way to represent that it's not "really" inside `try`, so don't do that. It also
-            // leads to terrible codegen.
-            keys.push(RequirementKey::TryCatch { index });
-            requirements.push(BlockRequirement {
-                range: handler.start..handler.target,
-                kind: RequirementKind::Try,
-            });
-            // Note that the order of these two requirements matches the one in the previous `if`
-            // branch.
+            // The problem is that since the `try` block and the jump have matching ends, it's
+            // possible that the jump ends up nested within `try`; but `catch` does not have access
+            // to `try` internals since it's located *after* `try`, not at the end of `try`. We want
+            // to force the jump to be handled before `try` regardless of apparent nesting.
+            //
+            // A special variation of this problem arises if the handler is inside `try`: if we
+            // split `try` into two parts and handled them separately, and a smaller nested `try`
+            // block crosses `handler.target`, we would have an invalid tree; moreover, since each
+            // individual part can be smaller than the nested `try` block, the `try` order may
+            // become swapped. This forces us to emit a single `try` even if it produces worse
+            // codegen.
+            let jump_req_id = requirements.len();
             keys.push(RequirementKey::BackwardCatch { index });
             requirements.push(BlockRequirement {
                 range: handler.target..handler.end,
                 kind: RequirementKind::BackwardJump,
             });
-            keys.push(RequirementKey::Try { index });
-            requirements.push(BlockRequirement {
-                range: handler.target..handler.end,
-                kind: RequirementKind::Try,
-            });
-        }
+            Some(jump_req_id)
+        };
+
+        keys.push(RequirementKey::Try { index });
+        requirements.push(BlockRequirement {
+            range: handler.start..handler.end,
+            kind: RequirementKind::Try { with_backward_jump },
+        });
     }
 
     (requirements, keys)
@@ -205,28 +175,34 @@ fn treeify_try_blocks<'code>(
 
     let mut handlers = Vec::from(handlers);
     for handler in &mut handlers {
-        let mut new_range = handler.start..handler.end;
+        // Typically, the `try` block range ends before the handler; in this case, we emit
+        // a slightly larger `try` block so that the handler directly follows its end and `catch`
+        // can fallthrough into the handler without any explicit jumps. If the range contains more
+        // statements than necessary, we'll sort it out later with synthetic variables.
+        //
+        // We could also emit `handler.start..handler.end` and a forward jump, but it's not yet
+        // clear if that's any better, since that might be harder to optimize.
+        let mut new_start = handler.start;
+        let mut new_end = handler.end.max(handler.target);
 
-        // Find the subset of ranges intersecting `handler.start..handler.end`. Unfortunately, this
-        // has to be hacky without cursors.
-
-        // The start of the first range possibly intersecting `handler`; it's not guaranteed to
-        // intersect it, but it's valid for `extract_if`.
+        // Find the subset of ranges intersecting `new_start..new_end`. Unfortunately, this has to
+        // be hacky without cursors.
         let it_start = active_ranges
-            .range(..handler.start)
+            .range(..new_start)
             .last()
             .map(|(start, _)| *start)
             .unwrap_or(0);
-        for (start, end) in active_ranges.extract_if(it_start..handler.end, |start, end| {
-            *start < handler.end && *end > handler.start
+        for (start, end) in active_ranges.extract_if(it_start..new_end, move |start, end| {
+            *start < new_end && *end > new_start
         }) {
             // Make the new range encompass the old ones.
-            new_range = new_range.start.min(start)..new_range.end.max(end);
+            new_start = new_start.min(start);
+            new_end = new_end.max(end);
         }
 
-        active_ranges.insert(new_range.start, new_range.end);
-        handler.start = new_range.start;
-        handler.end = new_range.end;
+        active_ranges.insert(new_start, new_end);
+        handler.start = new_start;
+        handler.end = new_end;
     }
 
     handlers
@@ -327,7 +303,8 @@ pub fn satisfy_block_requirements(
                 forward_jumps_to[req.range.end].push(i);
                 forward_or_try_req_cover.add_segment(req.range.clone());
             }
-            RequirementKind::Try => {
+            RequirementKind::Try { .. } => {
+                // Largest `try` block goes last.
                 tries_to[req.range.end].push(i);
                 forward_or_try_req_cover.add_segment(req.range.clone());
             }
@@ -427,50 +404,20 @@ impl Treeificator {
         // Recognize backward jumps forming head-to-head collisions that need to be resolved via
         // this block.
         if let Some(forward_gap) = self.forward_or_try_req_cover.first_gap(range.clone()) {
-            let dispatcher = self.dispatcher_at_stmt.entry(range.start).or_default();
-
-            for req_id in self.backward_jumps.extract_containing(forward_gap) {
+            let mut backward_jumps = core::mem::take(&mut self.backward_jumps);
+            for req_id in backward_jumps.extract_containing(forward_gap) {
                 if self.imps[req_id].is_some() {
                     // Either extracted twice or already removed.
                     continue;
                 }
-
-                let target = self.reqs[req_id].range.start;
-
                 // Implement this jump with a jump to the dispatcher.
                 self.req_cover
                     .remove_segment(self.reqs[req_id].range.clone());
-
-                let next_selector = (dispatcher.known_targets.len() + 1)
-                    .try_into()
-                    .expect("too many jumps");
-                let target = dispatcher.known_targets.entry(target).or_insert_with(|| {
-                    // Create a new dispatch forward jump.
-                    let jump_req = BlockRequirement {
-                        range: range.start..target,
-                        kind: RequirementKind::ForwardJump,
-                    };
-                    let jump_req_id = self.reqs.len();
-                    self.req_cover.add_segment(jump_req.range.clone());
-                    self.forward_jumps_to[jump_req.range.end].push(jump_req_id);
-                    self.forward_or_try_req_cover
-                        .add_segment(jump_req.range.clone());
-                    self.reqs.push(jump_req);
-                    self.imps.push(None);
-
-                    DispatchTarget {
-                        selector: next_selector,
-                        jump_req_id,
-                    }
-                });
-
-                self.imps[req_id] = Some(RequirementImplementation::ContinueToDispatcher {
-                    block_id,
-                    selector: target.selector,
-                });
-
+                self.imps[req_id] =
+                    Some(self.add_dispatch(block_id, range.start, self.reqs[req_id].range.start));
                 found_jumps = true;
             }
+            self.backward_jumps = backward_jumps;
         }
 
         if found_jumps {
@@ -509,16 +456,57 @@ impl Treeificator {
         //     } catch { ... }
         // It's not that big of a deal, since we have to deal with this for nested loops anyway, but
         // it's good to keep in mind.
-        let mut found_tries = false;
-        for req_id in self.tries_to[range.end].drain(..) {
-            let range = self.reqs[req_id].range.clone();
-            self.req_cover.remove_segment(range.clone());
-            self.forward_or_try_req_cover.remove_segment(range);
-            self.imps[req_id] = Some(RequirementImplementation::Try { block_id });
-            found_tries = true;
+        //
+        // We only take out the largest `try` block here, since smaller ones ending at the same
+        // location cannot really be easily implemented with the same `try`, unlike with forward
+        // jumps. The `try` block is thus only extended as much as necessary if it has multiple
+        // entries.
+
+        if let Some(req_id) = self.tries_to[range.end].last()
+            && let RequirementKind::Try {
+                with_backward_jump: Some(jump_req_id),
+            } = self.reqs[*req_id].kind
+            && self.imps[jump_req_id].is_none()
+        {
+            // If there backward jump from `catch` hasn't been implemented yet, emit a block for it
+            // right now, since this is the last chance to generate it outside `try`.
+            let BlockRequirement {
+                range: jump_range,
+                kind: RequirementKind::BackwardJump,
+            } = self.reqs[jump_req_id].clone()
+            else {
+                panic!("unexpected requirement pair for try");
+            };
+            assert_eq!(
+                jump_range.end, range.end,
+                "invalid backward jump from catch"
+            );
+            let target = jump_range.start;
+
+            self.req_cover.remove_segment(jump_range.clone());
+
+            let imp = if target == range.start {
+                // Jump directly to the beginning of the block, can be a normal backward jump.
+                RequirementImplementation::Break { block_id }
+            } else {
+                // Jump via dispatcher.
+                self.add_dispatch(block_id, range.start, target)
+            };
+            self.imps[jump_req_id] = Some(imp);
+
+            out.push(Node::Block {
+                id: block_id,
+                children: self.build_list(range),
+            });
+            return;
         }
 
-        if found_tries {
+        if let Some(req_id) = self.tries_to[range.end].pop() {
+            let try_range = self.reqs[req_id].range.clone();
+            self.req_cover.remove_segment(try_range.clone());
+            self.forward_or_try_req_cover
+                .remove_segment(try_range.clone());
+            self.imps[req_id] = Some(RequirementImplementation::Try { block_id });
             out.push(Node::Try {
                 id: block_id,
                 children: self.build_list(range),
@@ -543,5 +531,45 @@ impl Treeificator {
             // Decompress coordinates
             stmt_range: self.used_indices[range.start]..self.used_indices[range.end],
         });
+    }
+
+    fn add_dispatch(
+        &mut self,
+        block_id: usize,
+        dispatcher: usize,
+        target: usize,
+    ) -> RequirementImplementation {
+        let dispatcher_obj = self.dispatcher_at_stmt.entry(dispatcher).or_default();
+
+        let next_selector = (dispatcher_obj.known_targets.len() + 1)
+            .try_into()
+            .expect("too many jumps");
+        let target = dispatcher_obj
+            .known_targets
+            .entry(target)
+            .or_insert_with(|| {
+                // Create a new dispatch forward jump.
+                let jump_req = BlockRequirement {
+                    range: dispatcher..target,
+                    kind: RequirementKind::ForwardJump,
+                };
+                let jump_req_id = self.reqs.len();
+                self.req_cover.add_segment(jump_req.range.clone());
+                self.forward_jumps_to[jump_req.range.end].push(jump_req_id);
+                self.forward_or_try_req_cover
+                    .add_segment(jump_req.range.clone());
+                self.reqs.push(jump_req);
+                self.imps.push(None);
+
+                DispatchTarget {
+                    selector: next_selector,
+                    jump_req_id,
+                }
+            });
+
+        RequirementImplementation::ContinueToDispatcher {
+            block_id,
+            selector: target.selector,
+        }
     }
 }

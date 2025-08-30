@@ -24,27 +24,18 @@ pub fn structure_control_flow<'code>(
         key
     });
 
-    let mut try_block_to_handlers: FxHashMap<usize, Vec<Handler>> = FxHashMap::default();
+    let mut try_block_to_handlers: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
     let mut jump_implementations = FxHashMap::default();
     let mut has_dispatch = false;
     for (key, imp) in keys.into_iter().zip(implementations) {
         if let RequirementImplementation::Try { block_id } = imp {
-            let handlers = try_block_to_handlers.entry(block_id).or_default();
-            match key {
-                RequirementKey::TryCatch { index } => {
-                    handlers.push(Handler {
-                        index,
-                        has_backward_jump: false,
-                    });
-                }
-                RequirementKey::Try { index } => {
-                    handlers.push(Handler {
-                        index,
-                        has_backward_jump: true,
-                    });
-                }
-                _ => panic!("unexpected key for try implementation"),
-            }
+            let RequirementKey::Try { index } = key else {
+                panic!("unexpected key for try implementation");
+            };
+            try_block_to_handlers
+                .entry(block_id)
+                .or_default()
+                .push(index);
         } else {
             if let RequirementKey::Dispatch { .. } = key {
                 has_dispatch = true;
@@ -81,14 +72,9 @@ pub fn structure_control_flow<'code>(
 struct Structurizer<'arena, 'code> {
     arena: &'arena Arena<'code>,
     stackless_ir: stackless::Program<'code>,
-    try_block_to_handlers: FxHashMap<usize, Vec<Handler>>,
+    try_block_to_handlers: FxHashMap<usize, Vec<usize>>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
     next_block_id: usize,
-}
-
-struct Handler {
-    index: usize,
-    has_backward_jump: bool,
 }
 
 impl<'code> Structurizer<'_, 'code> {
@@ -122,15 +108,11 @@ impl<'code> Structurizer<'_, 'code> {
                     .into_iter()
                     .map(|handler| {
                         let mut children = Vec::new();
-                        if handler.has_backward_jump {
-                            self.emit_jump(
-                                RequirementKey::BackwardCatch {
-                                    index: handler.index,
-                                },
-                                &mut children,
-                            );
+                        let key = RequirementKey::BackwardCatch { index: handler };
+                        if self.jump_implementations.contains_key(&key) {
+                            self.emit_jump(key, &mut children);
                         }
-                        let handler = &self.stackless_ir.exception_handlers[handler.index];
+                        let handler = &self.stackless_ir.exception_handlers[handler];
                         Catch {
                             class: handler.class,
                             children,

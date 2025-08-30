@@ -1,5 +1,6 @@
 use core::ops::Range;
 
+#[derive(Default)]
 pub struct IntervalTree {
     max: usize,
     nodes: Vec<Node>,
