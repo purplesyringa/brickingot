@@ -1,23 +1,21 @@
 #![cfg_attr(false, no_std)]
+#![feature(btree_extract_if)] // on the road to stabilization
 
 extern crate alloc;
 
 mod arena;
-mod arrows;
 mod ast;
 mod dsu;
 mod stackless;
-// mod cfg;
 // mod matcher;
-// mod unstructured;
 mod preparse;
+mod structured;
 
 use crate::arena::Arena;
-use crate::preparse::{extract_basic_blocks, BytecodePreparsingError};
-use crate::stackless::{build_stackless_ir, StacklessIrError};
-// use crate::cfg::structurize_cfg;
+use crate::preparse::{BytecodePreparsingError, extract_basic_blocks};
+use crate::stackless::{StacklessIrError, build_stackless_ir};
+use crate::structured::structure_control_flow;
 // use crate::matcher::rewrite_control_flow;
-// use crate::unstructured::{convert_code_to_stackless, StatementGenerationError};
 use noak::{
     AccessFlags, MStr,
     descriptor::MethodDescriptor,
@@ -126,8 +124,7 @@ fn decompile_method<'code>(
 
     // The first IR we build is imperative and uses variables instead of JVM's stack. The control
     // flow is unstructured. The number of distinct statement types is greatly reduced because most
-    // instructions are translated as `var := expr`. Information about basic blocks is provided
-    // separately, but is not an intrinsic part of the IR.
+    // instructions are translated as `var := expr`.
     let stackless_ir = build_stackless_ir(
         &mut arena,
         pool,
@@ -137,8 +134,16 @@ fn decompile_method<'code>(
         basic_blocks,
     )?;
 
-    // let unstructured_program = convert_code_to_stackless(arena, pool, &code)?;
-    // let mut stmts = structurize_cfg(unstructured_program);
+    // The second IR has structured control flow represented via *blocks* -- not to be confused with
+    // basic blocks from the CFG world. A block is a syntactic construct that supports jumps to its
+    // beginning and end via `continue` and `break`, much like with loops. This IR also has
+    // `try`..`catch` blocks for exception handling. In all other ways, this IR is as low-level as
+    // the stackless one.
+    let structured_ir = structure_control_flow(&arena, stackless_ir);
+    // for stmt in structured_ir {
+    //     println!("{}", arena.debug(&stmt));
+    // }
+
     // rewrite_control_flow(&mut stmts);
 
     // for stmt in &stackless_ir.statements {

@@ -1,4 +1,4 @@
-use crate::ast::Expression;
+use crate::ast::{Expression, Variable, VariableName, VariableNamespace};
 use alloc::alloc;
 use core::cell::Cell;
 use core::fmt::{self, Display};
@@ -120,6 +120,18 @@ impl<'code> Arena<'code> {
 
     pub fn null(&self) -> ExprId {
         self.alloc(Expression::Null)
+    }
+
+    pub fn selector(&self) -> ExprId {
+        self.alloc_with(|version| {
+            Expression::Variable(Variable {
+                name: VariableName {
+                    id: 0,
+                    namespace: VariableNamespace::Selector,
+                },
+                version,
+            })
+        })
     }
 
     pub fn debug<'a, T: DebugIr<'code> + ?Sized>(&'a self, value: &'a T) -> impl Display {

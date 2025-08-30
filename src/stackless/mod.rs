@@ -94,7 +94,7 @@ impl<'code> DebugIr<'code> for Statement {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ExceptionHandler<'code> {
     pub start: usize,
     pub end: usize,
