@@ -390,14 +390,14 @@ impl Treeificator {
             }
             self.req_cover
                 .remove_segment(self.reqs[req_id].range.clone());
-            self.imps[req_id] = Some(RequirementImplementation::Break { block_id });
+            self.imps[req_id] = Some(RequirementImplementation::Continue { block_id });
             found_jumps = true;
         }
         for req_id in self.forward_jumps_to[range.end].drain(..) {
             let range = self.reqs[req_id].range.clone();
             self.req_cover.remove_segment(range.clone());
             self.forward_or_try_req_cover.remove_segment(range);
-            self.imps[req_id] = Some(RequirementImplementation::Continue { block_id });
+            self.imps[req_id] = Some(RequirementImplementation::Break { block_id });
             found_jumps = true;
         }
 
@@ -487,7 +487,7 @@ impl Treeificator {
 
             let imp = if target == range.start {
                 // Jump directly to the beginning of the block, can be a normal backward jump.
-                RequirementImplementation::Break { block_id }
+                RequirementImplementation::Continue { block_id }
             } else {
                 // Jump via dispatcher.
                 self.add_dispatch(block_id, range.start, target)
