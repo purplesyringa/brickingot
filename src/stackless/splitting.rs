@@ -176,7 +176,7 @@ pub fn merge_versions_across_basic_blocks(
 
     // Remove dead stack stores, i.e. definitions that weren't merged with any use during DFS.
     statements.retain(|stmt| {
-        if let Statement::Basic(BasicStatement::Assign { target, .. }) = stmt
+        if let Statement::Basic(BasicStatement::Assign { target, value }) = stmt
             && let Expression::Variable(Variable {
                 name,
                 version: def_expr_id,
@@ -184,6 +184,11 @@ pub fn merge_versions_across_basic_blocks(
             && name.namespace == VariableNamespace::Stack
             && merger.is_unique(def_expr_id)
         {
+            // `value` must be a `valueN` variable; remove it from the arena so that variable
+            // refcounts can be computed just by iterating over the arena without recursion.
+            // `high_level::main_opt` makes this assumption.
+            arena[*value] = Expression::Null;
+
             false
         } else {
             true

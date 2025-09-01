@@ -10,7 +10,8 @@ pub fn optimize<'code>(
     structured_ir: Vec<structured::Statement<'code>>,
 ) -> Vec<StmtMeta<'code>> {
     // This is a bit scetchy, but there shouldn't be any dead variable uses in the arena at this
-    // point, and a single linear iteration is better than yet another tree walk.
+    // point, and a single linear iteration is better than yet another tree walk. This assumption is
+    // a little tricky to support, e.g. `stackless::splitting` has some special handling for this.
     let mut n_var_mentions = FxHashMap::default();
     for expr in arena.iter_mut() {
         if let Expression::Variable(var) = expr {
