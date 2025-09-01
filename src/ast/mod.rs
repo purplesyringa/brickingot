@@ -138,7 +138,13 @@ impl<'code> DebugIr<'code> for Expression<'code> {
             Self::NewArray {
                 element_type,
                 lengths,
-            } => write!(f, "new {element_type}{lengths:?}"),
+            } => {
+                write!(f, "new {element_type}")?;
+                for len in lengths {
+                    write!(f, "[{}]", arena.debug(len))?;
+                }
+                Ok(())
+            }
             Self::NewUninitialized { class } => write!(f, "new uninitialized {class}"),
             Self::Null => write!(f, "null"),
             Self::Variable(var) => write!(f, "{var}"),
