@@ -174,7 +174,9 @@ pub fn merge_versions_across_basic_blocks(
         }
     }
 
-    // Remove dead stack stores, i.e. definitions that weren't merged with any use during DFS.
+    // Remove dead stack stores, i.e. definitions that weren't merged with any use during DFS. This
+    // is not the same thing as removing *post-optimization* dead stack stores, since this retains
+    // used definitions even if all uses were replaced with values.
     statements.retain(|stmt| {
         if let Statement::Basic(BasicStatement::Assign { target, value }) = stmt
             && let Expression::Variable(Variable {

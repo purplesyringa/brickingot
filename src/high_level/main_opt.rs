@@ -1,7 +1,7 @@
 use super::inlining::Inliner;
 use super::{Catch, Meta, Statement, StmtList, StmtMeta};
 use crate::arena::{Arena, ExprId};
-use crate::ast::{BasicStatement, Expression, Variable};
+use crate::ast::{BasicStatement, Expression, Variable, VariableNamespace};
 use crate::structured;
 use rustc_hash::FxHashMap;
 
@@ -91,6 +91,7 @@ impl<'code> Optimizer<'_, 'code> {
         // to have a single mention (the definition itself).
         if let BasicStatement::Assign { target, value } = stmt
             && let Expression::Variable(var) = self.arena[target]
+            && var.name.namespace != VariableNamespace::Slot // slot are retained as in source
             && *self
                 .n_var_mentions
                 .get(&var)
@@ -101,10 +102,13 @@ impl<'code> Optimizer<'_, 'code> {
             // generate dead stores (unless the original bytecode contains them; but then
             // representing it in the decompiled code is probably a good idea), so this can only
             // really happen under the following conditions:
-            // - While initializing method arguments (hence `this` and arguments).
+            // -- - While initializing method arguments (hence `this` and arguments).
             // - While saving a double-width value to stack (hence `null`).
-            if let Expression::This | Expression::Argument { .. } | Expression::Null =
-                self.arena[value]
+            // - When a stack store can be optimized out due to value linking.
+            if let/* Expression::This
+            | Expression::Argument { .. }
+            |*/ Expression::Null
+            | Expression::Variable(_) = self.arena[value]
             {
                 return;
             }
