@@ -1,6 +1,6 @@
 use super::inlining::Inliner;
 use super::{Catch, Meta, Statement, StmtList, StmtMeta};
-use crate::arena::Arena;
+use crate::arena::{Arena, ExprId};
 use crate::ast::{BasicStatement, Expression, Variable};
 use crate::structured;
 use rustc_hash::FxHashMap;
@@ -46,221 +46,274 @@ impl<'code> Optimizer<'_, 'code> {
         fallthrough_breaks_from: Option<usize>,
         out: &mut StmtList<'code>,
     ) {
-        out.push(match stmt {
-            structured::Statement::Basic { index, mut stmt } => {
-                // Replace never-used assignments with computations and drop no-op computations.
-                // This has to be done prior to inlining because such no-ops can break the
-                // assumption that definitions and uses are consecutive statements (the reason for
-                // this assumption is described in more detail in `inlining`).
-
-                // Since versions of unused variables are never merged, all unused variables are
-                // guaranteed to have a single mention (the definition itself).
-                if let BasicStatement::Assign { target, value } = stmt
-                    && let Expression::Variable(var) = self.arena[target]
-                    && *self
-                        .n_var_mentions
-                        .get(&var)
-                        .expect("used variable not mentioned")
-                        == 1
-                {
-                    // This can turn the assignment into a no-op if the value has no side effects.
-                    // We seldom generate dead stores, so this can only really happen under the
-                    // following conditions:
-                    // - While initializing method arguments (hence `this` and arguments).
-                    // - While saving a double-width value to stack (hence `null`).
-                    if let Expression::This | Expression::Argument { .. } | Expression::Null =
-                        self.arena[value]
-                    {
-                        return;
-                    }
-
-                    stmt = BasicStatement::Calculate(value);
-                }
-
-                let meta = Meta {
-                    is_divergent: stmt.is_divergent(),
-                };
-                StmtMeta {
-                    stmt: Statement::Basic { index, stmt },
-                    meta,
-                }
+        match stmt {
+            structured::Statement::Basic { index, stmt } => {
+                self.handle_basic_stmt(index, stmt, out);
             }
 
             structured::Statement::Block { id, children } => {
-                self.block_info.insert(
-                    id,
-                    BlockInfo {
-                        n_break_uses: 0,
-                        n_continue_uses: 0,
-                    },
-                );
-
-                let fallthrough_breaks_from = Some(fallthrough_breaks_from.unwrap_or(id));
-                let (children, meta) = self.handle_stmt_list(children, fallthrough_breaks_from);
-
-                let block_info = self.block_info.remove(&id).expect("missing block");
-
-                // If there's an `if` inside this block, this block might stop the `else` branch
-                // from being inlined into the `if`
-                //
-                // This is, however, trickier than it seems, since blocks may be used by `break`s
-                // and `continue`s, and whether to inline or not inline the `then` or `else`
-                // branches in this case is less clear.
-                //
-                // Consider
-                //     block #n {
-                //         ...
-                //         if (!cond) {
-                //             break #n;
-                //         }
-                //         then; // divergent
-                //     }
-                //     else;
-                // ...which we rewrite to:
-                //     block #n {
-                //         ...
-                //         if (!cond) {
-                //             // fallthrough
-                //         } else {
-                //             then; // divergent
-                //         }
-                //     }
-                //     else;
-                //
-                // If `break #n` is present after the rewrite, we cannot inline `else` into the
-                // block and we cannot move `if` outside the block.
-                //
-                // If `#n` is now unused, we can remove the block altogether; in fact, in this case,
-                // `...` is guaranteed to be empty.
-                //
-                // But what if there is no (other) `break #n`, but plenty of `continue #n`? In this
-                // case, `#n` is a loop. We know that `then;` must contain `continue #n`, or the
-                // block would be split into two. Thus `if (!cond)` is the only exit from this loop;
-                // it's likely similar to `do { ... } while (cond);`. Inlining `else;` into
-                // `break #n` would mean inlining the code after the loop into its only exit. This
-                // would complicate code without allowing any useful constructs to match, like
-                // ternaries, since the stack variable written by the ternary branches cannot be
-                // read across loop iterations, and that's what would happen here. So while we
-                // *could* inline `else;` in principle, it would not be useful in any way that
-                // matters.
-                //
-                // The solution is thus as simple as only removing unused blocks.
-                if block_info.n_break_uses == 0 && block_info.n_continue_uses == 0 {
-                    out.extend(children);
-                    return;
-                }
-
-                StmtMeta {
-                    stmt: Statement::Block { id, children },
-                    meta: Meta {
-                        is_divergent: meta.is_divergent && block_info.n_break_uses == 0,
-                    },
-                }
+                self.handle_block(id, children, fallthrough_breaks_from, out);
             }
 
-            structured::Statement::Continue { block_id } => {
-                self.block_info
-                    .get_mut(&block_id)
-                    .expect("missing block")
-                    .n_continue_uses += 1;
-                StmtMeta {
-                    stmt: Statement::Continue { block_id },
-                    meta: Meta { is_divergent: true },
-                }
-            }
+            structured::Statement::Continue { block_id } => self.handle_continue(block_id, out),
 
-            structured::Statement::Break { block_id } => {
-                self.block_info
-                    .get_mut(&block_id)
-                    .expect("missing block")
-                    .n_break_uses += 1;
-                StmtMeta {
-                    stmt: Statement::Break { block_id },
-                    meta: Meta { is_divergent: true },
-                }
-            }
+            structured::Statement::Break { block_id } => self.handle_break(block_id, out),
 
             structured::Statement::If {
                 condition,
                 then_children,
             } => {
-                let (then_children, _) =
-                    self.handle_stmt_list(then_children, fallthrough_breaks_from);
-                StmtMeta {
-                    stmt: Statement::If {
-                        condition,
-                        condition_inverted: false,
-                        then_children,
-                        else_children: Vec::new(),
-                    },
-                    meta: Meta {
-                        is_divergent: false, // since `else` is empty
-                    },
-                }
+                self.handle_if(condition, then_children, fallthrough_breaks_from, out);
             }
 
             structured::Statement::Switch { id, key, arms } => {
-                self.block_info.insert(
-                    id,
-                    BlockInfo {
-                        n_break_uses: 0,
-                        n_continue_uses: 0,
-                    },
-                );
-
-                let n_arms = arms.len();
-                let fallthrough_breaks_from = Some(fallthrough_breaks_from.unwrap_or(id));
-
-                let mut last_arm_is_divergent = false;
-                let arms = arms
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (value, children))| {
-                        let (children, arm_meta) = self.handle_stmt_list(
-                            children,
-                            if i == n_arms - 1 {
-                                fallthrough_breaks_from
-                            } else {
-                                None
-                            },
-                        );
-                        // Non-divergent `switch` arms fall through to the next arm.
-                        last_arm_is_divergent = arm_meta.is_divergent;
-                        (value, children)
-                    })
-                    .collect();
-
-                let block_info = self.block_info.remove(&id).expect("missing block");
-
-                StmtMeta {
-                    stmt: Statement::Switch { id, key, arms },
-                    meta: Meta {
-                        is_divergent: last_arm_is_divergent && block_info.n_break_uses == 0,
-                    },
-                }
+                self.handle_switch(id, key, arms, fallthrough_breaks_from, out);
             }
 
             structured::Statement::Try { children, catches } => {
-                let (children, try_meta) = self.handle_stmt_list(children, fallthrough_breaks_from);
-                let mut is_divergent = try_meta.is_divergent;
-                let catches = catches
-                    .into_iter()
-                    .map(|catch| {
-                        let (children, catch_meta) =
-                            self.handle_stmt_list(catch.children, fallthrough_breaks_from);
-                        is_divergent &= catch_meta.is_divergent;
-                        Catch {
-                            class: catch.class,
-                            children,
-                            active_range: catch.active_range,
-                        }
-                    })
-                    .collect();
-                StmtMeta {
-                    stmt: Statement::Try { children, catches },
-                    meta: Meta { is_divergent },
-                }
+                self.handle_try(children, catches, fallthrough_breaks_from, out);
             }
+        }
+    }
+
+    fn handle_basic_stmt(
+        &mut self,
+        index: Option<usize>,
+        mut stmt: BasicStatement,
+        out: &mut StmtList<'code>,
+    ) {
+        // Replace never-used assignments with computations and drop no-op computations. This has to
+        // be done prior to inlining because such no-ops can break the assumption that definitions
+        // and uses are consecutive statements (the reason for this assumption is described in more
+        // detail in `inlining`).
+
+        // Since versions of unused variables are never merged, all unused variables are guaranteed
+        // to have a single mention (the definition itself).
+        if let BasicStatement::Assign { target, value } = stmt
+            && let Expression::Variable(var) = self.arena[target]
+            && *self
+                .n_var_mentions
+                .get(&var)
+                .expect("used variable not mentioned")
+                == 1
+        {
+            // This can turn the assignment into a no-op if the value has no side effects. We seldom
+            // generate dead stores (unless the original bytecode contains them; but then
+            // representing it in the decompiled code is probably a good idea), so this can only
+            // really happen under the following conditions:
+            // - While initializing method arguments (hence `this` and arguments).
+            // - While saving a double-width value to stack (hence `null`).
+            if let Expression::This | Expression::Argument { .. } | Expression::Null =
+                self.arena[value]
+            {
+                return;
+            }
+
+            stmt = BasicStatement::Calculate(value);
+        }
+
+        let meta = Meta {
+            is_divergent: stmt.is_divergent(),
+        };
+        out.push(StmtMeta {
+            stmt: Statement::Basic { index, stmt },
+            meta,
+        });
+    }
+
+    fn handle_block(
+        &mut self,
+        id: usize,
+        children: Vec<structured::Statement<'code>>,
+        fallthrough_breaks_from: Option<usize>,
+        out: &mut StmtList<'code>,
+    ) {
+        self.block_info.insert(
+            id,
+            BlockInfo {
+                n_break_uses: 0,
+                n_continue_uses: 0,
+            },
+        );
+
+        let fallthrough_breaks_from = Some(fallthrough_breaks_from.unwrap_or(id));
+        let (children, meta) = self.handle_stmt_list(children, fallthrough_breaks_from);
+
+        let block_info = self.block_info.remove(&id).expect("missing block");
+
+        // If there's an `if` inside this block, this block might stop the `else` branch from being
+        // inlined into the `if`
+        //
+        // This is, however, trickier than it seems, since blocks may be used by `break`s and
+        // `continue`s, and whether to inline or not inline the `then` or `else` branches in this
+        // case is less clear.
+        //
+        // Consider
+        //     block #n {
+        //         ...
+        //         if (!cond) {
+        //             break #n;
+        //         }
+        //         then; // divergent
+        //     }
+        //     else;
+        // ...which we rewrite to:
+        //     block #n {
+        //         ...
+        //         if (!cond) {
+        //             // fallthrough
+        //         } else {
+        //             then; // divergent
+        //         }
+        //     }
+        //     else;
+        //
+        // If `break #n` is present after the rewrite, we cannot inline `else` into the block and we
+        // cannot move `if` outside the block.
+        //
+        // If `#n` is now unused, we can remove the block altogether; in fact, in this case, `...`
+        // is guaranteed to be empty.
+        //
+        // But what if there is no (other) `break #n`, but plenty of `continue #n`? In this case,
+        // `#n` is a loop. We know that `then;` must contain `continue #n`, or the block would be
+        // split into two. Thus `if (!cond)` is the only exit from this loop; it's likely similar to
+        // `do { ... } while (cond);`. Inlining `else;` into `break #n` would mean inlining the code
+        // after the loop into its only exit. This would complicate code without allowing any useful
+        // constructs to match, like ternaries, since the stack variable written by the ternary
+        // branches cannot be read across loop iterations, and that's what would happen here. So
+        // while we *could* inline `else;` in principle, it would not be useful in any way that
+        // matters.
+        //
+        // The solution is thus as simple as only removing unused blocks.
+        if block_info.n_break_uses == 0 && block_info.n_continue_uses == 0 {
+            out.extend(children);
+            return;
+        }
+
+        out.push(StmtMeta {
+            stmt: Statement::Block { id, children },
+            meta: Meta {
+                is_divergent: meta.is_divergent && block_info.n_break_uses == 0,
+            },
+        });
+    }
+
+    fn handle_continue(&mut self, block_id: usize, out: &mut StmtList<'code>) {
+        self.block_info
+            .get_mut(&block_id)
+            .expect("missing block")
+            .n_continue_uses += 1;
+        out.push(StmtMeta {
+            stmt: Statement::Continue { block_id },
+            meta: Meta { is_divergent: true },
+        });
+    }
+
+    fn handle_break(&mut self, block_id: usize, out: &mut StmtList<'code>) {
+        self.block_info
+            .get_mut(&block_id)
+            .expect("missing block")
+            .n_break_uses += 1;
+        out.push(StmtMeta {
+            stmt: Statement::Break { block_id },
+            meta: Meta { is_divergent: true },
+        });
+    }
+
+    fn handle_if(
+        &mut self,
+        condition: ExprId,
+        then_children: Vec<structured::Statement<'code>>,
+        fallthrough_breaks_from: Option<usize>,
+        out: &mut StmtList<'code>,
+    ) {
+        let (then_children, _) = self.handle_stmt_list(then_children, fallthrough_breaks_from);
+        out.push(StmtMeta {
+            stmt: Statement::If {
+                condition,
+                condition_inverted: false,
+                then_children,
+                else_children: Vec::new(),
+            },
+            meta: Meta {
+                is_divergent: false, // since `else` is empty
+            },
+        });
+    }
+
+    fn handle_switch(
+        &mut self,
+        id: usize,
+        key: ExprId,
+        arms: Vec<(Option<i32>, Vec<structured::Statement<'code>>)>,
+        fallthrough_breaks_from: Option<usize>,
+        out: &mut StmtList<'code>,
+    ) {
+        self.block_info.insert(
+            id,
+            BlockInfo {
+                n_break_uses: 0,
+                n_continue_uses: 0,
+            },
+        );
+
+        let n_arms = arms.len();
+        let fallthrough_breaks_from = Some(fallthrough_breaks_from.unwrap_or(id));
+
+        let mut last_arm_is_divergent = false;
+        let arms = arms
+            .into_iter()
+            .enumerate()
+            .map(|(i, (value, children))| {
+                let (children, arm_meta) = self.handle_stmt_list(
+                    children,
+                    if i == n_arms - 1 {
+                        fallthrough_breaks_from
+                    } else {
+                        None
+                    },
+                );
+                // Non-divergent `switch` arms fall through to the next arm.
+                last_arm_is_divergent = arm_meta.is_divergent;
+                (value, children)
+            })
+            .collect();
+
+        let block_info = self.block_info.remove(&id).expect("missing block");
+
+        out.push(StmtMeta {
+            stmt: Statement::Switch { id, key, arms },
+            meta: Meta {
+                is_divergent: last_arm_is_divergent && block_info.n_break_uses == 0,
+            },
+        });
+    }
+
+    fn handle_try(
+        &mut self,
+        children: Vec<structured::Statement<'code>>,
+        catches: Vec<structured::Catch<'code>>,
+        fallthrough_breaks_from: Option<usize>,
+        out: &mut StmtList<'code>,
+    ) {
+        let (children, try_meta) = self.handle_stmt_list(children, fallthrough_breaks_from);
+        let mut is_divergent = try_meta.is_divergent;
+        let catches = catches
+            .into_iter()
+            .map(|catch| {
+                let (children, catch_meta) =
+                    self.handle_stmt_list(catch.children, fallthrough_breaks_from);
+                is_divergent &= catch_meta.is_divergent;
+                Catch {
+                    class: catch.class,
+                    children,
+                    active_range: catch.active_range,
+                }
+            })
+            .collect();
+        out.push(StmtMeta {
+            stmt: Statement::Try { children, catches },
+            meta: Meta { is_divergent },
         });
     }
 
