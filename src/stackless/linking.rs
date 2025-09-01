@@ -90,36 +90,42 @@ impl<'a> Linker<'a> {
         };
 
         // Find all assignments to `stackN` reachable from the beginning of `bb_id`.
+
+        // We need to worry about implicit assignment to `stack0` at EH entry, but not about
+        // retaining any other variables on EH entry.
         if position == 0
-            && let Some(version) = self.basic_blocks[bb_id].unique_exception_expr_id
+            && let Some(eh) = &self.basic_blocks[bb_id].eh
         {
             state.source.merge(Source::Value(Variable {
                 name: VariableName {
                     namespace: VariableNamespace::Exception,
                     id: 0,
                 },
-                version,
+                version: eh.unique_exception_expr_id,
             }));
         }
 
         for pred_bb_id in &self.basic_blocks[bb_id].predecessors {
-            let next_node =
-                if let Some(def) = self.basic_blocks[*pred_bb_id].active_defs_at_end.get(&name) {
-                    if let Some(var) = def.copy_stack_from_predecessor {
-                        (*pred_bb_id, var.name.id)
-                    } else {
-                        assert!(
-                            def.var.name.namespace == VariableNamespace::Value,
-                            "invalid assignment {} = {}",
-                            name,
-                            def.var,
-                        );
-                        state.source.merge(Source::Value(def.var));
-                        continue;
-                    }
+            let next_node = if let Some(def) = self.basic_blocks[*pred_bb_id]
+                .sealed_bb
+                .active_defs_at_end
+                .get(&name)
+            {
+                if let Some(var) = def.copy_stack_from_predecessor {
+                    (*pred_bb_id, var.name.id)
                 } else {
-                    (*pred_bb_id, position)
-                };
+                    assert!(
+                        def.var.name.namespace == VariableNamespace::Value,
+                        "invalid assignment {} = {}",
+                        name,
+                        def.var,
+                    );
+                    state.source.merge(Source::Value(def.var));
+                    continue;
+                }
+            } else {
+                (*pred_bb_id, position)
+            };
 
             let next_state = self.visit(next_node);
             state.source.merge(next_state.source);

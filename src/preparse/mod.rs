@@ -48,8 +48,8 @@ pub struct BasicBlock {
     /// The IDs of BBs the last instruction in this BB can jump to. This includes fallthrough, but
     /// excludes jumps to exception handlers.
     pub successors: Vec<usize>,
-    /// The ranges of instructions that can jump to the start of this BB on exception.
-    pub eh_entry_for_ranges: Vec<Range<u32>>,
+    /// The ranges of basic blocks that can jump to the start of this BB on exception.
+    pub eh_entry_for_bb_ranges: Vec<Range<usize>>,
 }
 
 pub fn extract_basic_blocks(
@@ -115,7 +115,7 @@ pub fn extract_basic_blocks(
             // stays in a sentinel-like state where only the trivial successor is recorded. We'll
             // remove it for divergent control flow a bit later.
             successors: vec![bb_id + 1],
-            eh_entry_for_ranges: Vec::new(),
+            eh_entry_for_bb_ranges: Vec::new(),
         })
         .collect();
 
@@ -153,13 +153,17 @@ pub fn extract_basic_blocks(
     // Fill EH info
     let mut eh_entry_bb_ids = Vec::new();
     for handler in code.exception_handlers() {
-        let bb_id = basic_blocks
-            .binary_search_by_key(&handler.handler().as_u32(), |bb| bb.instruction_range.start)
-            .expect("EH not to BB start");
-        eh_entry_bb_ids.push(bb_id);
-        basic_blocks[bb_id]
-            .eh_entry_for_ranges
-            .push(handler.start().as_u32()..handler.end().as_u32());
+        let [start_bb_id, end_bb_id, handler_bb_id] =
+            [handler.start(), handler.end(), handler.handler()].map(|offset| {
+                basic_blocks
+                    .binary_search_by_key(&offset.as_u32(), |bb| bb.instruction_range.start)
+                    .expect("EH not aligned to BB")
+            });
+
+        eh_entry_bb_ids.push(handler_bb_id);
+        basic_blocks[handler_bb_id]
+            .eh_entry_for_bb_ranges
+            .push(start_bb_id..end_bb_id);
     }
 
     // Calculate reachability and stack sizes via DFS. The first BB and all exception handling BBs
@@ -233,7 +237,7 @@ pub fn extract_basic_blocks(
                 instruction_range: 0..0,
                 stack_size_at_start: 0,
                 successors: Vec::new(),
-                eh_entry_for_ranges: Vec::new(),
+                eh_entry_for_bb_ranges: Vec::new(),
             };
         }
     }

@@ -34,10 +34,17 @@ struct StackWrite {
     order_id: usize,
 }
 
+#[derive(Default)]
+pub struct SealedBlock {
+    pub active_defs_at_end: FxHashMap<VariableName, ActiveDef>,
+    pub slot_defs: FxHashMap<VariableName, Vec<ExprId>>,
+}
+
 pub struct Machine<'arena, 'code> {
     pub arena: &'arena Arena<'code>,
     pub stack_size: usize,
     active_defs: FxHashMap<VariableName, ActiveDef>,
+    slot_defs: FxHashMap<VariableName, Vec<ExprId>>, // `ExprId`s correspond to the LHS expr
     stack_state: FxHashMap<usize, StackWrite>,
     pub unresolved_uses: FxHashMap<(usize, Variable), UnresolvedUse>,
     pub bb_id: usize,
@@ -56,6 +63,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
             arena,
             stack_size: 0,
             active_defs: FxHashMap::default(),
+            slot_defs: FxHashMap::default(),
             stack_state: FxHashMap::default(),
             unresolved_uses: FxHashMap::default(),
             bb_id: usize::MAX,
@@ -265,6 +273,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
                 copy_stack_from_predecessor: None,
             },
         );
+        self.slot_defs.entry(name).or_default().push(var.version);
     }
 
     fn get_stack(&mut self, position: usize, is_stack_manipulation: bool) -> ExprId {
@@ -366,9 +375,12 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         self.stack_state.clear();
     }
 
-    pub fn seal_basic_block(&mut self) -> FxHashMap<VariableName, ActiveDef> {
+    pub fn seal_basic_block(&mut self) -> SealedBlock {
         self.flush_stack_writes();
-        core::mem::take(&mut self.active_defs)
+        SealedBlock {
+            active_defs_at_end: core::mem::take(&mut self.active_defs),
+            slot_defs: core::mem::take(&mut self.slot_defs),
+        }
     }
 
     pub fn copy(&mut self, target: usize, source: usize) {

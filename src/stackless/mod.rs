@@ -3,12 +3,12 @@ mod insn_ir_import;
 mod linking;
 mod splitting;
 
-use self::abstract_eval::{ActiveDef, Machine};
+use self::abstract_eval::{Machine, SealedBlock};
 use self::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use self::linking::link_stack_across_basic_blocks;
 use self::splitting::merge_versions_across_basic_blocks;
 use crate::arena::{Arena, DebugIr, ExprId};
-use crate::ast::{BasicStatement, Expression, Str, VariableName};
+use crate::ast::{BasicStatement, Expression, Str};
 use crate::preparse;
 use crate::preparse::insn_stack_effect::is_type_descriptor_double_width;
 use core::fmt::{self, Display};
@@ -21,7 +21,6 @@ use noak::{
         cpool::ConstantPool,
     },
 };
-use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -117,17 +116,23 @@ impl Display for ExceptionHandler<'_> {
 }
 
 pub struct BasicBlock {
-    pub active_defs_at_end: FxHashMap<VariableName, ActiveDef>,
+    pub sealed_bb: SealedBlock,
+    /// Excludes throwing locations that call into this BB for exception handling.
     pub predecessors: Vec<usize>,
-    pub unique_exception_expr_id: Option<ExprId>,
+    pub eh: Option<ExceptionHandlerBlock>,
+}
+
+pub struct ExceptionHandlerBlock {
+    pub throw_sites: Vec<usize>, // BBs that can enter this BB on throw
+    pub unique_exception_expr_id: ExprId,
 }
 
 impl BasicBlock {
     fn new() -> Self {
         Self {
-            active_defs_at_end: FxHashMap::default(),
+            sealed_bb: SealedBlock::default(),
             predecessors: Vec::new(),
-            unique_exception_expr_id: None,
+            eh: None,
         }
     }
 }
@@ -258,7 +263,7 @@ pub fn build_stackless_ir<'code>(
             1
         };
     }
-    ir_basic_blocks[entry_bb_id].active_defs_at_end = machine.seal_basic_block();
+    ir_basic_blocks[entry_bb_id].sealed_bb = machine.seal_basic_block();
     ir_basic_blocks[0].predecessors.push(entry_bb_id);
 
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
@@ -272,11 +277,22 @@ pub fn build_stackless_ir<'code>(
         machine.stack_size = bb.stack_size_at_start;
         machine.bb_id = bb_id;
 
-        ir_basic_blocks[bb_id].unique_exception_expr_id = if bb.eh_entry_for_ranges.is_empty() {
+        ir_basic_blocks[bb_id].eh = if bb.eh_entry_for_bb_ranges.is_empty() {
             None
         } else {
-            // Doesn't have to point to anything specific, just a unique ID for versioning.
-            Some(arena.alloc(Expression::Null))
+            // XXX: This gets quadratic and worse -- how do we fix this?
+            let mut throw_sites = Vec::new();
+            for range in &bb.eh_entry_for_bb_ranges {
+                throw_sites.extend(range.clone());
+            }
+            throw_sites.sort();
+            throw_sites.dedup();
+
+            Some(ExceptionHandlerBlock {
+                throw_sites,
+                // Doesn't have to point to anything specific, just a unique ID for versioning.
+                unique_exception_expr_id: arena.alloc(Expression::Null),
+            })
         };
         for succ_bb_id in &bb.successors {
             ir_basic_blocks[*succ_bb_id].predecessors.push(bb_id);
@@ -310,7 +326,7 @@ pub fn build_stackless_ir<'code>(
             })?;
         }
 
-        ir_basic_blocks[bb_id].active_defs_at_end = machine.seal_basic_block();
+        ir_basic_blocks[bb_id].sealed_bb = machine.seal_basic_block();
     }
 
     let unresolved_uses = machine.unresolved_uses;
