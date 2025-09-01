@@ -1,3 +1,5 @@
+mod iterate;
+
 use crate::arena::{Arena, DebugIr, ExprId};
 use core::fmt::{self, Display};
 use displaydoc::Display;

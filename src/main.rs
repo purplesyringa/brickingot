@@ -1,21 +1,22 @@
 #![cfg_attr(false, no_std)]
 #![feature(btree_extract_if)] // on the road to stabilization
+#![feature(substr_range)]
 
 extern crate alloc;
 
 mod arena;
 mod ast;
 mod dsu;
-mod stackless;
-// mod matcher;
+mod high_level;
 mod preparse;
+mod stackless;
 mod structured;
 
 use crate::arena::Arena;
+use crate::high_level::decompile_cf_constructs;
 use crate::preparse::{BytecodePreparsingError, extract_basic_blocks};
 use crate::stackless::{StacklessIrError, build_stackless_ir};
 use crate::structured::structure_control_flow;
-// use crate::matcher::rewrite_control_flow;
 use noak::{
     AccessFlags, MStr,
     descriptor::MethodDescriptor,
@@ -47,8 +48,6 @@ pub enum MethodDecompileError {
 
     #[error("While building stackless IR: {0}")]
     StacklessIr(#[from] StacklessIrError),
-    // #[error("While generating initial statements: {0}")]
-    // StatementGeneration(#[from] StatementGenerationError),
 }
 
 fn decompile_class_file(raw_bytes: &[u8]) -> Result<(), ClassDecompileError> {
@@ -134,14 +133,29 @@ fn decompile_method<'code>(
         basic_blocks,
     )?;
 
+    // for stmt in &stackless_ir.statements {
+    //     println!("{}", arena.debug(&stmt));
+    // }
+
     // The second IR has structured control flow represented via *blocks* -- not to be confused with
     // basic blocks from the CFG world. A block is a syntactic construct that supports jumps to its
     // beginning and end via `continue` and `break`, much like with loops. This IR also has
     // `try`..`catch` blocks for exception handling. In all other ways, this IR is as low-level as
     // the stackless one.
     let structured_ir = structure_control_flow(&arena, stackless_ir);
-    // for stmt in structured_ir {
+
+    // for stmt in &structured_ir {
     //     println!("{}", arena.debug(&stmt));
+    // }
+
+    // This pass extends the IR with higher-level constructs and transforms blocks into such.
+    // Calling this an optimization pass would be dishonest, since there is no reasoning involved
+    // and only trivial inlining is performed, but that's the main idea. This pass also annotates
+    // statements with some useful control flow metadata.
+    let cf_ir = decompile_cf_constructs(&mut arena, structured_ir);
+
+    // for stmt_meta in &cf_ir {
+    //     println!("{}", arena.debug(&stmt_meta));
     // }
 
     // rewrite_control_flow(&mut stmts);

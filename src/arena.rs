@@ -156,6 +156,13 @@ impl<'code> Arena<'code> {
             Some(unsafe { &mut *expr_ptr })
         })
     }
+
+    pub fn swap(&mut self, a: ExprId, b: ExprId) {
+        // `ptr::swap` handles overlapping regions.
+        unsafe {
+            core::ptr::swap(self.get_raw(a), self.get_raw(b));
+        }
+    }
 }
 
 impl<'code> Drop for Arena<'code> {

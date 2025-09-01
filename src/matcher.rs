@@ -2,53 +2,7 @@ use crate::ast::{BasicStatement, Expression};
 use crate::cfg::Statement;
 use std::collections::HashMap;
 
-struct BlockUses {
-    // (continue, break)
-    counters: HashMap<usize, (usize, usize)>,
-}
-
-impl BlockUses {
-    fn new() -> Self {
-        Self {
-            counters: HashMap::new(),
-        }
-    }
-
-    fn from_continue(block_id: usize) -> Self {
-        Self {
-            counters: core::iter::once((block_id, (1, 0))).collect(),
-        }
-    }
-
-    fn from_break(block_id: usize) -> Self {
-        Self {
-            counters: core::iter::once((block_id, (0, 1))).collect(),
-        }
-    }
-
-    fn merge(&mut self, mut rhs: BlockUses) {
-        if self.counters.len() < rhs.counters.len() {
-            // Small to large so that this is O(n log n) rather than quadratic
-            core::mem::swap(self, &mut rhs);
-        }
-        for (key, source) in rhs.counters {
-            let target = self.counters.entry(key).or_default();
-            target.0 += source.0;
-            target.1 += source.1;
-        }
-    }
-
-    // Returns (continue, break)
-    fn take(&mut self, key: usize) -> (usize, usize) {
-        self.counters.remove(&key).unwrap_or_default()
-    }
-}
-
 pub struct ConditionalInfo {
-    // This doesn't cover bound blocks, i.e. blocks within the range.
-    uses: BlockUses,
-    is_divergent: bool,
-    is_if_with_divergent_then: bool,
     first_unhandled_switch_arm_index: usize,
     n_breaks_from_switch: usize,
 }
@@ -56,83 +10,33 @@ pub struct ConditionalInfo {
 fn rewrite_conditionals_in_stmt(stmt: &mut Statement<'_>) -> ConditionalInfo {
     match stmt {
         Statement::Basic(stmt) => ConditionalInfo {
-            uses: BlockUses::new(),
-            is_divergent: stmt.is_divergent(),
-            is_if_with_divergent_then: false,
             first_unhandled_switch_arm_index: 0,
             n_breaks_from_switch: 0,
         },
 
         Statement::Block { .. } => rewrite_conditionals_in_block(stmt),
 
-        Statement::DoWhile { .. } => {
-            panic!("do..while shouldn't have appeared in the AST at this pass");
-        }
-
-        Statement::While { .. } => panic!("while shouldn't have appeared in the AST at this pass"),
-
         Statement::If {
             then_children,
             else_children,
             ..
-        } => {
-            let mut uses = BlockUses::new();
-            let mut last_then_stmt_is_divergent = false;
-            let mut last_else_stmt_is_divergent = false;
-            for (is_then, child) in core::iter::repeat(true)
-                .zip(then_children)
-                .chain(core::iter::repeat(false).zip(else_children))
-            {
-                let child_info = rewrite_conditionals_in_stmt(child);
-                uses.merge(child_info.uses);
-                if is_then {
-                    last_then_stmt_is_divergent = child_info.is_divergent;
-                } else {
-                    last_else_stmt_is_divergent = child_info.is_divergent;
-                }
-            }
-            ConditionalInfo {
-                uses,
-                is_divergent: last_then_stmt_is_divergent && last_else_stmt_is_divergent,
-                is_if_with_divergent_then: last_then_stmt_is_divergent,
-                first_unhandled_switch_arm_index: 0,
-                n_breaks_from_switch: 0,
-            }
-        }
+        } => ConditionalInfo {
+            first_unhandled_switch_arm_index: 0,
+            n_breaks_from_switch: 0,
+        },
 
-        Statement::Switch { id, arms, .. } => {
-            let mut uses = BlockUses::new();
-            let mut last_stmt_is_divergent = false;
-            for (_, children) in arms {
-                for child in children {
-                    let child_info = rewrite_conditionals_in_stmt(child);
-                    uses.merge(child_info.uses);
-                    last_stmt_is_divergent = child_info.is_divergent;
-                }
-            }
-            let n_breaks = uses.take(*id).1;
-            let is_divergent = n_breaks == 0 && last_stmt_is_divergent;
-            ConditionalInfo {
-                uses,
-                is_divergent,
-                is_if_with_divergent_then: false,
-                first_unhandled_switch_arm_index: 0,
-                n_breaks_from_switch: n_breaks,
-            }
-        }
+        Statement::Switch { id, arms, .. } => ConditionalInfo {
+            uses,
+            first_unhandled_switch_arm_index: 0,
+            n_breaks_from_switch: n_breaks,
+        },
 
         Statement::Continue { block_id } => ConditionalInfo {
-            uses: BlockUses::from_continue(*block_id),
-            is_divergent: true,
-            is_if_with_divergent_then: false,
             first_unhandled_switch_arm_index: 0,
             n_breaks_from_switch: 0,
         },
 
         Statement::Break { block_id } => ConditionalInfo {
-            uses: BlockUses::from_break(*block_id),
-            is_divergent: true,
-            is_if_with_divergent_then: false,
             first_unhandled_switch_arm_index: 0,
             n_breaks_from_switch: 0,
         },
@@ -148,25 +52,15 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> ConditionalInfo {
         unreachable!()
     };
 
-    let mut uses = BlockUses::new();
     let mut first_switch_first_unhandled_switch_arm_index = 0;
     let mut first_switch_n_breaks_from_switch = 0;
     let mut last_stmt_is_divergent = false;
-    let mut optimizable_ifs = Vec::new();
     for (i, child) in children.iter_mut().enumerate() {
         let child_info = rewrite_conditionals_in_stmt(child);
-        uses.merge(child_info.uses);
         if i == 0 {
             first_switch_first_unhandled_switch_arm_index =
                 child_info.first_unhandled_switch_arm_index;
             first_switch_n_breaks_from_switch = child_info.n_breaks_from_switch;
-        }
-        last_stmt_is_divergent = child_info.is_divergent;
-        if child_info.is_if_with_divergent_then
-            && let Statement::If { else_children, .. } = child
-            && else_children.is_empty()
-        {
-            optimizable_ifs.push(i);
         }
     }
 
@@ -174,8 +68,6 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> ConditionalInfo {
 
     let mut info = ConditionalInfo {
         uses,
-        is_divergent: last_stmt_is_divergent && n_breaks == 0,
-        is_if_with_divergent_then: false,
         first_unhandled_switch_arm_index: 0,
         n_breaks_from_switch: 0,
     };
@@ -218,89 +110,6 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> ConditionalInfo {
     // that in another pass, as, chances are, there *are* breaks, they'll just become avoidable only
     // after inlining, and we don't want to optimized out breaks from all over the place all the
     // time, we'll do it just once afterwards.
-    //
-    // Although it may look like inlining into `else` increases code nesting without a benefit,
-    // that's not the case: while an `if` statement is being parsed, `then` is *always* divergent,
-    // even if it won't be after optimization:
-    //     block #n {
-    //         if (cond) {
-    //             then;
-    //             break #n;
-    //         }
-    //         else;
-    //     }
-    // -> (what we'll do in this pass)
-    //     block #n {
-    //         if (cond) {
-    //             then;
-    //             break #n;
-    //         } else {
-    //             else;
-    //         }
-    //     }
-    // -> (what we'll optimize this to later on)
-    //     if (cond) {
-    //         then;
-    //     } else {
-    //         else;
-    //     }
-    //
-    // If `optimizable_ifs` is non-empty, it provably includes 0 if the code is generated by cfg.
-    if n_continues == 0 && optimizable_ifs.get(0) == Some(&0) {
-        let mut first_if_is_trivial = false;
-
-        for i in optimizable_ifs.into_iter().rev() {
-            let rest: Vec<Statement<'_>> = children.drain(i + 1..).collect();
-            let Some(Statement::If {
-                condition_inverted,
-                then_children,
-                else_children,
-                ..
-            }) = children.last_mut()
-            else {
-                unreachable!()
-            };
-            let is_trivial = matches!(
-                **then_children,
-                [Statement::Break {
-                    block_id: break_block_id,
-                }] if break_block_id == block_id,
-            );
-            first_if_is_trivial = is_trivial;
-            if is_trivial {
-                *condition_inverted = !*condition_inverted;
-                *then_children = rest;
-            } else {
-                *else_children = rest;
-            }
-        }
-
-        if first_if_is_trivial {
-            let Some(Statement::If {
-                condition,
-                condition_inverted,
-                then_children,
-                ..
-            }) = children.pop()
-            else {
-                unreachable!()
-            };
-            *stmt = Statement::If {
-                condition,
-                condition_inverted,
-                then_children: vec![Statement::Block {
-                    id: block_id,
-                    children: then_children,
-                }],
-                else_children: Vec::new(),
-            };
-            // `then` doesn't diverge if someone uses inside the `then` block still effectively uses
-            // `break #n`.
-            info.is_if_with_divergent_then = last_stmt_is_divergent && n_breaks == 1;
-        }
-
-        return info;
-    }
 
     // Current goal: merge arms into `switch`.
     //     block #n {
@@ -337,9 +146,11 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> ConditionalInfo {
 
         let mut left = first_switch_first_unhandled_switch_arm_index; // that's a mouthful...
         while left < arms.len() {
-            if let [Statement::Break {
-                block_id: break_block_id,
-            }] = *arms[left].1
+            if let [
+                Statement::Break {
+                    block_id: break_block_id,
+                },
+            ] = *arms[left].1
                 && break_block_id <= *switch_id
             {
                 break;
@@ -349,9 +160,11 @@ fn rewrite_conditionals_in_block(stmt: &mut Statement<'_>) -> ConditionalInfo {
 
         let mut right = left;
         while right < arms.len()
-            && let [Statement::Break {
-                block_id: break_block_id,
-            }] = *arms[right].1
+            && let [
+                Statement::Break {
+                    block_id: break_block_id,
+                },
+            ] = *arms[right].1
             && break_block_id == *switch_id
         {
             right += 1;
@@ -403,8 +216,6 @@ fn iterate_with_is_last<T>(vec: Vec<T>) -> impl Iterator<Item = (bool, T)> {
 }
 
 struct LoopInfo {
-    // This doesn't cover bound blocks, i.e. blocks within the range.
-    uses: BlockUses,
     is_divergent: bool,
 }
 
@@ -419,7 +230,6 @@ fn make_loops<'a>(
 ) -> LoopInfo {
     let info = match stmt {
         Statement::Basic(ref stmt) => LoopInfo {
-            uses: BlockUses::new(),
             is_divergent: stmt.is_divergent(),
         },
 
@@ -442,9 +252,11 @@ fn make_loops<'a>(
                 else_children,
                 ..
             }) = children.last()
-                && let [Statement::Continue {
-                    block_id: continue_block_id,
-                }] = **then_children
+                && let [
+                    Statement::Continue {
+                        block_id: continue_block_id,
+                    },
+                ] = **then_children
                 && continue_block_id == id
                 && else_children.is_empty()
                 && n_continues == 1
@@ -556,57 +368,20 @@ fn make_loops<'a>(
             }
         }
 
-        Statement::Continue { block_id } => LoopInfo {
-            uses: BlockUses::from_continue(block_id),
-            is_divergent: true,
-        },
+        Statement::Continue { block_id } => LoopInfo { is_divergent: true },
 
         Statement::Break { block_id } => {
             if fallthrough_breaks_from == Some(block_id) {
                 return LoopInfo {
-                    uses: BlockUses::new(),
                     is_divergent: false,
                 };
             }
-            LoopInfo {
-                uses: BlockUses::from_break(block_id),
-                is_divergent: true,
-            }
+            LoopInfo { is_divergent: true }
         }
     };
 
     out.push(stmt);
     info
-}
-
-fn make_loops_in_list(
-    stmts: &mut Vec<Statement<'_>>,
-    fallthrough_breaks_from: Option<usize>,
-) -> LoopInfo {
-    let mut uses = BlockUses::new();
-    let mut last_stmt_is_divergent = false;
-
-    let mut new_stmts = Vec::new();
-    for (is_last, stmt) in iterate_with_is_last(core::mem::take(stmts)) {
-        let stmt_info = make_loops(
-            stmt,
-            if is_last {
-                fallthrough_breaks_from
-            } else {
-                None
-            },
-            &mut new_stmts,
-        );
-        uses.merge(stmt_info.uses);
-        last_stmt_is_divergent = stmt_info.is_divergent;
-    }
-
-    *stmts = new_stmts;
-
-    LoopInfo {
-        uses,
-        is_divergent: last_stmt_is_divergent,
-    }
 }
 
 fn with_entry(
