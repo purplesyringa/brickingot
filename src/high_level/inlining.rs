@@ -65,8 +65,18 @@ impl<'a, 'code> Inliner<'a, 'code> {
     }
 
     fn handle_expr(&mut self, expr_id: ExprId) {
-        let Expression::Variable(var) = self.arena[expr_id] else {
-            for sub_expr_id in self.arena[expr_id].subexprs().rev() {
+        let expr = &self.arena[expr_id];
+
+        if let Expression::Ternary { condition, .. } = expr {
+            // Don't recurse into ternary's branches: it'd be a) unsound because we'd inline across
+            // control flow, b) slow because the branches were populated from an `if`, which we've
+            // already invoked `inline_expressions` on, and this would be the second time.
+            self.handle_expr(*condition);
+            return;
+        }
+
+        let Expression::Variable(var) = *expr else {
+            for sub_expr_id in expr.subexprs().rev() {
                 self.handle_expr(sub_expr_id);
             }
             return;

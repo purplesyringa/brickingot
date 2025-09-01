@@ -63,6 +63,11 @@ impl Expression<'_> {
                 arguments,
             ),
 
+            Self::Ternary {
+                condition,
+                branches,
+            } => (Some(*condition), branches),
+
             Self::This
             | Self::Argument { .. }
             | Self::NewUninitialized { .. }

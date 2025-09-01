@@ -126,6 +126,13 @@ pub enum Expression<'code> {
         // signature.
         descriptor: Str<'code>,
     },
+    Ternary {
+        condition: ExprId,
+        // This is typed weirdly due to the iteration implementation, which assumes that the
+        // expressions have at most 2 child expressions or lists of expressions, whereas this would
+        // have 3.
+        branches: [ExprId; 2], // [if_true, if_false]
+    },
 }
 
 impl<'code> DebugIr<'code> for Expression<'code> {
@@ -217,6 +224,16 @@ impl<'code> DebugIr<'code> for Expression<'code> {
                 }
                 write!(f, ")")
             }
+            Self::Ternary {
+                condition,
+                branches: [if_then, if_else],
+            } => write!(
+                f,
+                "({}) ? ({}) : ({})",
+                arena.debug(condition),
+                arena.debug(if_then),
+                arena.debug(if_else)
+            ),
         }
     }
 }
@@ -330,6 +347,8 @@ impl Display for BinOp {
 pub enum UnaryOp {
     /// -
     Neg,
+    /// !
+    Not,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

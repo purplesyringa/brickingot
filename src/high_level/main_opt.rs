@@ -1,7 +1,7 @@
 use super::inlining::Inliner;
 use super::{Catch, Meta, Statement, StmtList, StmtMeta};
 use crate::arena::{Arena, ExprId};
-use crate::ast::{BasicStatement, Expression, Variable, VariableNamespace};
+use crate::ast::{BasicStatement, BinOp, Expression, UnaryOp, Variable, VariableNamespace};
 use crate::structured;
 use rustc_hash::FxHashMap;
 
@@ -446,12 +446,17 @@ impl<'code> Optimizer<'_, 'code> {
                 // Inline the rest of `stmts` into `else_children`.
                 let local_else_children = stmts.split_off(i + 1);
 
-                let Statement::If {
-                    condition_inverted,
-                    then_children,
-                    else_children,
-                    ..
-                } = &mut stmts[i].stmt
+                let StmtMeta {
+                    stmt:
+                        Statement::If {
+                            condition,
+                            condition_inverted,
+                            then_children,
+                            else_children,
+                            ..
+                        },
+                    meta,
+                } = &mut stmts[i]
                 else {
                     unreachable!()
                 };
@@ -485,7 +490,72 @@ impl<'code> Optimizer<'_, 'code> {
                         .n_break_uses -= 1;
                 }
 
-                if !*condition_inverted {
+                *meta = Meta {
+                    is_divergent: list_is_divergent(&then_children)
+                        && list_is_divergent(&else_children),
+                };
+
+                if *condition_inverted {
+                    // See if this looks like a ternary. We don't have to worry about inlining it
+                    // into anything because it's the last statement; and we don't have to worry
+                    // about inlining expressions *into* the ternary branches because that'd be
+                    // unsound due to side effects anyway, and javac generates such expressions
+                    // inside `if` branches.
+                    if let [
+                        StmtMeta {
+                            stmt:
+                                Statement::Basic {
+                                    stmt:
+                                        BasicStatement::Assign {
+                                            target: then_target,
+                                            value: then_value,
+                                        },
+                                    ..
+                                },
+                            ..
+                        },
+                    ] = then_children[..]
+                        && let Expression::Variable(then_var) = self.arena[then_target]
+                        // `slotN` targets are normal `if`s, not ternaries; it'd be *sound*, but
+                        // farther from source.
+                        && then_var.name.namespace == VariableNamespace::Stack
+                        && let [
+                            StmtMeta {
+                                stmt:
+                                    Statement::Basic {
+                                        stmt:
+                                            BasicStatement::Assign {
+                                                target: else_target,
+                                                value: else_value,
+                                            },
+                                        ..
+                                    },
+                                ..
+                            },
+                        ] = else_children[..]
+                        && let Expression::Variable(else_var) = self.arena[else_target]
+                        && then_var == else_var
+                    {
+                        let condition = self.invert_condition(*condition);
+
+                        stmts[i].stmt = Statement::Basic {
+                            index: None, // FIXME: handle try ranges here
+                            stmt: BasicStatement::Assign {
+                                target: then_target,
+                                value: self.arena.alloc(Expression::Ternary {
+                                    condition,
+                                    branches: [then_value, else_value],
+                                }),
+                            },
+                        };
+                        // Decrement refcount for the variable so that it can be inlined.
+                        self.arena[else_target] = Expression::Null;
+                        *self
+                            .n_var_mentions
+                            .get_mut(&else_var)
+                            .expect("used variable not mentioned") -= 1;
+                    }
+                } else {
                     // javac usually compiles `if`s with `if (!cond)`, so we swap `then` and `else`
                     // branches and invert the condition to get closer to source. This is only
                     // performed the first time `if` is considered. This also allows the same `if`
@@ -496,12 +566,44 @@ impl<'code> Optimizer<'_, 'code> {
                     core::mem::swap(then_children, else_children);
                     *condition_inverted = true;
                 }
-
-                stmts[i].meta = Meta {
-                    is_divergent: list_is_divergent(&then_children)
-                        && list_is_divergent(&else_children),
-                };
             }
+        }
+    }
+
+    // This consumes the `condition` (i.e. assumes it isn't used anywhere else and can be inlined
+    // directly into the output).
+    fn invert_condition(&mut self, condition: ExprId) -> ExprId {
+        match self.arena[condition] {
+            // Occasionally used as `true`/`false`.
+            Expression::ConstInt(int) => self.arena.int(if int == 0 { 1 } else { 0 }),
+
+            Expression::BinOp { ref mut op, .. } => {
+                *op = match op {
+                    BinOp::Eq => BinOp::Ne,
+                    BinOp::Ne => BinOp::Eq,
+                    BinOp::Lt => BinOp::Ge,
+                    BinOp::Le => BinOp::Gt,
+                    BinOp::Gt => BinOp::Le,
+                    BinOp::Ge => BinOp::Lt,
+                    _ => {
+                        return self.arena.alloc(Expression::UnaryOp {
+                            op: UnaryOp::Not,
+                            argument: condition,
+                        });
+                    }
+                };
+                condition
+            }
+
+            Expression::UnaryOp {
+                op: UnaryOp::Not,
+                argument,
+            } => argument,
+
+            _ => self.arena.alloc(Expression::UnaryOp {
+                op: UnaryOp::Not,
+                argument: condition,
+            }),
         }
     }
 }
