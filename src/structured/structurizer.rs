@@ -3,8 +3,8 @@ use super::solver::{
     satisfy_block_requirements,
 };
 use super::{Catch, Statement};
-use crate::arena::Arena;
-use crate::ast::{BasicStatement, Expression};
+use crate::arena::{Arena, ExprId};
+use crate::ast::{BasicStatement, Expression, Variable, VariableName, VariableNamespace};
 use crate::stackless;
 use rustc_hash::FxHashMap;
 
@@ -50,6 +50,7 @@ pub fn structure_control_flow<'code>(
         try_block_to_handlers,
         jump_implementations,
         next_block_id,
+        unique_selector_id: arena.alloc(Expression::Null), // doesn't matter, just a unique ID
     };
 
     let mut stmts = Vec::new();
@@ -57,7 +58,7 @@ pub fn structure_control_flow<'code>(
         stmts.push(Statement::Basic {
             index: None,
             stmt: BasicStatement::Assign {
-                target: arena.selector(),
+                target: structurizer.selector(),
                 value: arena.int(0),
             },
         });
@@ -75,6 +76,7 @@ struct Structurizer<'arena, 'code> {
     try_block_to_handlers: FxHashMap<usize, Vec<usize>>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
     next_block_id: usize,
+    unique_selector_id: ExprId,
 }
 
 impl<'code> Structurizer<'_, 'code> {
@@ -127,14 +129,14 @@ impl<'code> Structurizer<'_, 'code> {
                 self.next_block_id += 1;
                 out.push(Statement::Switch {
                     id,
-                    key: self.arena.selector(),
+                    key: self.selector(),
                     arms: dispatch_targets
                         .into_iter()
                         .map(|target| {
                             let mut stmts = vec![Statement::Basic {
                                 index: None,
                                 stmt: BasicStatement::Assign {
-                                    target: self.arena.selector(),
+                                    target: self.selector(),
                                     value: self.arena.int(0),
                                 },
                             }];
@@ -230,7 +232,7 @@ impl<'code> Structurizer<'_, 'code> {
                 out.push(Statement::Basic {
                     index: None,
                     stmt: BasicStatement::Assign {
-                        target: self.arena.selector(),
+                        target: self.selector(),
                         value: self.arena.int(selector),
                     },
                 });
@@ -240,5 +242,18 @@ impl<'code> Structurizer<'_, 'code> {
                 panic!("jump cannot be implemented with try")
             }
         }
+    }
+
+    fn selector(&self) -> ExprId {
+        // This pass runs after variables are merged, so we need to explicitly use the same version
+        // for all selectors. That's not *quite* correct in the sense that this can merge
+        // independent selectors, but later passes are prepared to deal with that.
+        self.arena.alloc(Expression::Variable(Variable {
+            name: VariableName {
+                id: 0,
+                namespace: VariableNamespace::Selector,
+            },
+            version: self.unique_selector_id,
+        }))
     }
 }
