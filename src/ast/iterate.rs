@@ -30,6 +30,10 @@ impl BasicStatement {
     pub fn subexprs_from_single(expr_id: ExprId) -> StmtIter {
         Some(expr_id).into_iter().chain(None)
     }
+
+    pub fn subexprs_empty() -> StmtIter {
+        None.into_iter().chain(None)
+    }
 }
 
 impl Expression<'_> {

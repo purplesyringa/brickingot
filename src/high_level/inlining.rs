@@ -50,7 +50,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
                 Statement::Block { .. }
                 | Statement::Continue { .. }
                 | Statement::Break { .. }
-                | Statement::Try { .. } => continue,
+                | Statement::Try { .. } => BasicStatement::subexprs_empty(),
             };
 
             for expr_id in subexprs.rev() {
