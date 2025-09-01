@@ -175,9 +175,7 @@ impl<'code> Structurizer<'_, 'code> {
                 } else {
                     out.push(Statement::If {
                         condition,
-                        condition_inverted: false,
                         then_children: Vec::new(),
-                        else_children: Vec::new(),
                     });
                     let Some(Statement::If { then_children, .. }) = out.last_mut() else {
                         unreachable!()

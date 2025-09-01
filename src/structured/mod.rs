@@ -32,13 +32,7 @@ pub enum Statement<'code> {
     },
     If {
         condition: ExprId,
-        // This could be simulated by swapping `then_children` and `else_children`, but that
-        // reorders statements and thus complicates AST optimization. It could also be implemented
-        // by updating `condition`, but we occasionally need to invert conditions several times, and
-        // just flicking a bool is simpler.
-        condition_inverted: bool,
         then_children: Vec<Statement<'code>>,
-        else_children: Vec<Statement<'code>>,
     },
     Switch {
         id: usize,
@@ -82,25 +76,11 @@ impl<'code> DebugIr<'code> for Statement<'code> {
 
             Self::If {
                 condition,
-                condition_inverted,
                 then_children,
-                else_children,
             } => {
-                write!(f, "if (")?;
-                if *condition_inverted {
-                    write!(f, "!({})", arena.debug(condition))?;
-                } else {
-                    write!(f, "{}", arena.debug(condition))?;
-                }
-                write!(f, ") {{\n")?;
+                write!(f, "if ({}) {{\n", arena.debug(condition))?;
                 for child in then_children {
                     write!(f, "{}\n", arena.debug(child))?;
-                }
-                if !else_children.is_empty() {
-                    write!(f, "}} else {{\n")?;
-                    for child in else_children {
-                        write!(f, "{}\n", arena.debug(child))?;
-                    }
                 }
                 write!(f, "}}")
             }
