@@ -79,7 +79,7 @@ struct Structurizer<'arena, 'code> {
 
 impl<'code> Structurizer<'_, 'code> {
     fn emit_tree(&mut self, tree: Vec<Node>) -> Vec<Statement<'code>> {
-        let mut stmts = Vec::new();
+        let mut stmts = Vec::with_capacity(tree.len()); // underestimating, but better than nothing
         for node in tree {
             self.emit_node(node, &mut stmts);
         }
