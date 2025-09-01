@@ -42,35 +42,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
     fn handle_stmt_list(&mut self) -> StmtList<'code> {
         let mut out = Vec::new();
 
-        while let Some(mut stmt_meta) = self.rev_stmts.next() {
-            // While we're at it, replace never-used assignments with computations. We don't have to
-            // track uses here explicitly, since versions of unused variables will never be merged.
-            if let Statement::Basic {
-                index,
-                stmt: BasicStatement::Assign { target, value },
-            } = stmt_meta.stmt
-                && let Expression::Variable(var) = self.arena[target]
-                && *self
-                    .n_var_mentions
-                    .get(&var)
-                    .expect("used variable not mentioned")
-                    == 1
-            {
-                // This can turn the assignment into a no-op if we're initializing arguments --
-                // remove such assignments.
-                if let Expression::This | Expression::Argument { .. } = self.arena[value] {
-                    continue;
-                }
-
-                stmt_meta.stmt = Statement::Basic {
-                    index,
-                    stmt: BasicStatement::Calculate(value),
-                };
-            }
-
-            out.push(stmt_meta);
-            let stmt_meta = out.last_mut().unwrap();
-
+        while let Some(stmt_meta) = self.rev_stmts.next() {
             let subexprs = match &stmt_meta.stmt {
                 Statement::Basic { stmt, .. } => stmt.subexprs(),
                 Statement::If { condition, .. } => BasicStatement::subexprs_from_single(*condition),
@@ -84,6 +56,8 @@ impl<'a, 'code> Inliner<'a, 'code> {
             for expr_id in subexprs.rev() {
                 self.handle_expr(expr_id);
             }
+
+            out.push(stmt_meta);
         }
 
         out.reverse();

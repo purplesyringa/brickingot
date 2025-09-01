@@ -1,7 +1,7 @@
 use super::inlining::Inliner;
 use super::{Catch, Meta, Statement, StmtList, StmtMeta};
 use crate::arena::Arena;
-use crate::ast::{Expression, Variable};
+use crate::ast::{BasicStatement, Expression, Variable};
 use crate::structured;
 use rustc_hash::FxHashMap;
 
@@ -47,7 +47,36 @@ impl<'code> Optimizer<'_, 'code> {
         out: &mut StmtList<'code>,
     ) {
         out.push(match stmt {
-            structured::Statement::Basic { index, stmt } => {
+            structured::Statement::Basic { index, mut stmt } => {
+                // Replace never-used assignments with computations and drop no-op computations.
+                // This has to be done prior to inlining because such no-ops can break the
+                // assumption that definitions and uses are consecutive statements (the reason for
+                // this assumption is described in more detail in `inlining`).
+
+                // Since versions of unused variables are never merged, all unused variables are
+                // guaranteed to have a single mention (the definition itself).
+                if let BasicStatement::Assign { target, value } = stmt
+                    && let Expression::Variable(var) = self.arena[target]
+                    && *self
+                        .n_var_mentions
+                        .get(&var)
+                        .expect("used variable not mentioned")
+                        == 1
+                {
+                    // This can turn the assignment into a no-op if the value has no side effects.
+                    // We seldom generate dead stores, so this can only really happen under the
+                    // following conditions:
+                    // - While initializing method arguments (hence `this` and arguments).
+                    // - While saving a double-width value to stack (hence `null`).
+                    if let Expression::This | Expression::Argument { .. } | Expression::Null =
+                        self.arena[value]
+                    {
+                        return;
+                    }
+
+                    stmt = BasicStatement::Calculate(value);
+                }
+
                 let meta = Meta {
                     is_divergent: stmt.is_divergent(),
                 };
