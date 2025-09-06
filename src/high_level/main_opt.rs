@@ -9,9 +9,11 @@ pub fn optimize<'code>(
     arena: &mut Arena<'code>,
     structured_ir: Vec<structured::Statement<'code>>,
 ) -> Vec<StmtMeta<'code>> {
-    // This is a bit scetchy, but there shouldn't be any dead variable uses in the arena at this
+    // This is a bit sketchy, but there shouldn't be any dead variable uses in the arena at this
     // point, and a single linear iteration is better than yet another tree walk. This assumption is
     // a little tricky to support, e.g. `stackless::splitting` has some special handling for this.
+    // If this ever becomes too difficult to implement without bugs, we'll have to implement this
+    // recursively instead.
     let mut n_var_mentions = FxHashMap::default();
     for expr in arena.iter_mut() {
         if let Expression::Variable(var) = expr {
@@ -102,7 +104,11 @@ impl<'code> Optimizer<'_, 'code> {
             // generate dead stores (unless the original bytecode contains them; but then
             // representing it in the decompiled code is probably a good idea), so this can only
             // really happen under the following conditions:
-            // -- - While initializing method arguments (hence `this` and arguments).
+            // - While initializing method arguments (hence `this` and arguments).
+            //   FIXME: we don't handle currently this for multiple reasons, e.g. that those are
+            //   assignments to slots which we ignore; it's not quite clear how to best support
+            //   this, since those assignments are closer to forced variable naming than actual
+            //   assignments, and we might want to use a different method to represent that.
             // - While saving a double-width value to stack (hence `null`).
             // - When a stack store can be optimized out due to value linking.
             if let/* Expression::This
@@ -145,14 +151,16 @@ impl<'code> Optimizer<'_, 'code> {
 
         let block_info = self.block_info.remove(&id).expect("missing block");
 
-        // If there's an `if` inside this block, this block might stop the `else` branch from being
-        // inlined into the `if`
+        // If there's an `if` inside this block and statements after this block outside it, this
+        // block existing in the middle of the two might prevent the `else` branch from being
+        // inlined into the `if`.
         //
-        // This is, however, trickier than it seems, since blocks may be used by `break`s and
-        // `continue`s, and whether to inline or not inline the `then` or `else` branches in this
-        // case is less clear.
+        // Handling this is, however, trickier than it seems, since blocks may be used by `break`s
+        // and `continue`s, so we can't always remove this block if we detect this condition.
+        // Moreover, whether to inline or not inline the `then` or `else` branches in this case is
+        // less clear, since it can lead to worse code.
         //
-        // Consider
+        // To make the reasoning more intuitive, consider:
         //     block #n {
         //         ...
         //         if (!cond) {
@@ -172,11 +180,11 @@ impl<'code> Optimizer<'_, 'code> {
         //     }
         //     else;
         //
-        // If `break #n` is present after the rewrite, we cannot inline `else` into the block and we
-        // cannot move `if` outside the block.
+        // If `break #n` is present after the rewrite anywhere within the block, we can neither
+        // inline `else` into the block, nor move `if` outside the block. So that case is sealed.
         //
-        // If `#n` is now unused, we can remove the block altogether; in fact, in this case, `...`
-        // is guaranteed to be empty.
+        // If `#n` is unused after the rewrite, we can remove the block altogether; in fact, in this
+        // case, `...` is guaranteed to be empty, so is clearly worthwhile.
         //
         // But what if there is no (other) `break #n`, but plenty of `continue #n`? In this case,
         // `#n` is a loop. We know that `then;` must contain `continue #n`, or the block would be
@@ -277,7 +285,8 @@ impl<'code> Optimizer<'_, 'code> {
                         None
                     },
                 );
-                // Non-divergent `switch` arms fall through to the next arm.
+                // Non-divergent `switch` arms fall through to the next arm, so only the divergence
+                // of the last arm matters.
                 last_arm_is_divergent = arm_meta.is_divergent;
                 (value, children)
             })
@@ -353,7 +362,7 @@ impl<'code> Optimizer<'_, 'code> {
             &self.n_var_mentions,
         );
 
-        self.decompile_ifs(&mut out, fallthrough_breaks_from);
+        self.inline_tails(&mut out, fallthrough_breaks_from);
 
         let last_stmt_is_divergent = out
             .last()
@@ -364,20 +373,26 @@ impl<'code> Optimizer<'_, 'code> {
         (out, meta)
     }
 
-    fn decompile_ifs(
+    fn inline_tails(
         &mut self,
         stmts: &mut StmtList<'code>,
         fallthrough_breaks_from: Option<usize>,
     ) {
-        // `if` statements are typically compiled as
+        // If a statement with multiple children has a single non-divergent arm, it might make sense
+        // to inline every statement after it into the arm. This is useful for decoding `if`,
+        // `switch`, and `try`, which start with (almost) empty arms that are slowly populated by
+        // inlining.
+        //
+        // This is easier to understand on an example `if` lowering:
         //         if (!cond) goto after_then;
         //         then;
         //         goto end;
         //     after_then:
         //         else;
         //     end:
-        // ...but if `then` diverges, `goto end` won't be present. Even if it is present, it could
-        // point to something other than the first instruction after `else` due to jump threading.
+        // If `then` diverges, `goto end` will be absent, so we can't rely on `goto end` to
+        // determine where `else` starts and ends. Even if it is present, it could point to
+        // something other than the first instruction after `else` due to jump threading.
         // `goto after_then` is also subject to jump threading, so really, the only common pattern
         // is:
         //     if (cond) <divergent>
@@ -412,9 +427,9 @@ impl<'code> Optimizer<'_, 'code> {
         //         else;
         //     }
         // ...assuming no-op `break`s and unused blocks are removed.
-
-        // Specifically due to the goal of this pass, we strive to make everything as nested and
-        // compact as possible, e.g. prefer
+        //
+        // Specifically due to the goal of this pass -- inlining everything that can possibly be
+        // inlined --  we strive to make everything as nested and compact as possible, e.g. prefer
         //     if (cond) {
         //         then;
         //     } else {
@@ -428,145 +443,175 @@ impl<'code> Optimizer<'_, 'code> {
         //     else;
         // even if `then` is short and `else` is long, since it's easier to pattern-match and
         // analyze and will not lead to false negatives in ternaries and similar cases. If we find
-        // the decompiled code ugly, we can always adjust it at a later pass.
+        // the decompiled code ugly, we can always adjust it at a later pass after inlining is
+        // complete.
+        //
+        // We don't *always* force the inlining, since we only need to force nesting to detect
+        // things like ternaries, and otherwise it's better to retain the structure of the source.
 
         for i in (0..stmts.len()).rev() {
-            if let Statement::If {
-                then_children,
-                else_children,
-                ..
-            } = &mut stmts[i].stmt
-                && list_is_divergent(then_children)
-                // Not strictly necessary, but it's easier this way. Saves us the worry about "what
-                // if `else_children` is not a single expression and `stmts[i + 1..]` is not
-                // a single expression, but their concatenation is" that we can't resolve
-                // efficiently.
-                && else_children.is_empty()
-            {
-                // Inline the rest of `stmts` into `else_children`.
-                let local_else_children = stmts.split_off(i + 1);
+            // This could be nicer :/ We want to pass both the statement and the tail of the vector
+            // to the individual inliners, but we only want to move out the tail conditionally.
+            // There is no `split_at_mut`-like helper for `split_off`, so we have to do this mess.
+            let mut stmt_meta = core::mem::replace(
+                &mut stmts[i],
+                StmtMeta {
+                    meta: Meta {
+                        is_divergent: false,
+                    },
+                    stmt: Statement::Basic {
+                        index: None,
+                        stmt: BasicStatement::ReturnVoid,
+                    },
+                },
+            );
 
-                let StmtMeta {
-                    stmt:
-                        Statement::If {
-                            condition,
-                            condition_inverted,
-                            then_children,
-                            else_children,
-                            ..
-                        },
-                    meta,
-                } = &mut stmts[i]
-                else {
-                    unreachable!()
-                };
-                *else_children = local_else_children;
+            let take_tail = || stmts.split_off(i + 1);
 
-                // This movement may cause some `break`s/`continue`s within `then` that previously
-                // jumped over `else` to become equivalent to fallthrough. We cannot fix that now
-                // without making the code quadratic, but we don't need to do that in the general
-                // case: it will only affect the quality of this pass if `then` would otherwise
-                // become a single `Assign`, so we only need to consider the last statement in
-                // `then`.
-                //
-                // We don't have to optimize out `continue`s here because ternary branches never
-                // jump upward, and it'd be tricky to attempt it anyway because the meaning of
-                // `continue` is different between blocks and loops, and we'd rather not think about
-                // that right now.
-                if let Some(fallthrough_breaks_from) = fallthrough_breaks_from
-                    && then_children
-                        .pop_if(|stmt| {
-                            matches!(
-                                stmt.stmt,
-                                Statement::Break { block_id }
-                                    if block_id == fallthrough_breaks_from,
-                            )
-                        })
-                        .is_some()
-                {
-                    self.block_info
-                        .get_mut(&fallthrough_breaks_from)
-                        .expect("missing block")
-                        .n_break_uses -= 1;
+            match stmt_meta.stmt {
+                Statement::If { .. } => {
+                    self.inline_if(&mut stmt_meta, take_tail, fallthrough_breaks_from);
                 }
+                _ => {}
+            }
 
-                *meta = Meta {
-                    is_divergent: list_is_divergent(&then_children)
-                        && list_is_divergent(&else_children),
-                };
+            stmts[i] = stmt_meta;
+        }
+    }
 
-                if *condition_inverted {
-                    // See if this looks like a ternary. We don't have to worry about inlining it
-                    // into anything because it's the last statement; and we don't have to worry
-                    // about inlining expressions *into* the ternary branches because that'd be
-                    // unsound due to side effects anyway, and javac generates such expressions
-                    // inside `if` branches.
-                    if let [
-                        StmtMeta {
+    fn inline_if(
+        &mut self,
+        stmt_meta: &mut StmtMeta<'code>,
+        take_tail: impl FnOnce() -> StmtList<'code>,
+        fallthrough_breaks_from: Option<usize>,
+    ) {
+        let Statement::If {
+            condition,
+            condition_inverted,
+            then_children,
+            else_children,
+        } = &mut stmt_meta.stmt
+        else {
+            panic!("inline_if invoked on something other than if");
+        };
+
+        if !list_is_divergent(then_children) {
+            return;
+        }
+
+        // Not strictly necessary, but it's easier this way. Saves us the worry about "what if
+        // `else_children` is not a single expression and `stmts[i + 1..]` is not a single
+        // expression, but their concatenation is" that we can't resolve efficiently. Overall,
+        // handling this case is just unnecessary in practice.
+        if !else_children.is_empty() {
+            return;
+        }
+
+        *else_children = take_tail();
+
+        // This movement may cause some `break`s/`continue`s within `then` that previously jumped
+        // over `else` to become equivalent to fallthrough. We cannot fix that now without making
+        // the code quadratic, but we don't need to do that in the general case: it will only affect
+        // the quality of this pass if `then` would otherwise become a single `Assign`, so we only
+        // need to consider the last statement in `then`.
+        //
+        // We don't have to optimize out `continue`s here because ternary branches never jump
+        // upward, and it'd be tricky to attempt it anyway because the meaning of `continue` is
+        // different between blocks and loops, and we'd rather not think about that right now.
+        if let Some(fallthrough_breaks_from) = fallthrough_breaks_from
+            && then_children
+                .pop_if(|stmt| {
+                    matches!(
+                        stmt.stmt,
+                        Statement::Break { block_id }
+                            if block_id == fallthrough_breaks_from,
+                    )
+                })
+                .is_some()
+        {
+            self.block_info
+                .get_mut(&fallthrough_breaks_from)
+                .expect("missing block")
+                .n_break_uses -= 1;
+        }
+
+        stmt_meta.meta = Meta {
+            is_divergent: list_is_divergent(&then_children) && list_is_divergent(&else_children),
+        };
+
+        if !*condition_inverted {
+            // javac usually compiles `if`s with `if (!cond)`, so we swap `then` and `else` branches
+            // and invert the condition to get closer to source. This is only performed the first
+            // time `if` is considered. This also allows the same `if` to be recognized the second
+            // time to parse `then` and `else` branches.
+            //
+            // The exception to "usually" here is exit/continue conditions in loops and
+            // `||`/`&&`/`?:` lowering, which we'll handle later.
+            core::mem::swap(then_children, else_children);
+            *condition_inverted = true;
+            return;
+        }
+
+        // We've just populated both branches.
+
+        // See if this looks like a ternary. We don't have to worry about inlining it into anything
+        // because it's the last statement (and thus it'll be inlined as part of the outer block);
+        // and we don't have to worry about inlining expressions *into* the ternary branches because
+        // that'd be unsound due to side effects anyway, and javac always generates such expressions
+        // inside `if` branches.
+        if let [
+            StmtMeta {
+                stmt:
+                    Statement::Basic {
+                        stmt:
+                            BasicStatement::Assign {
+                                target: then_target,
+                                value: then_value,
+                            },
+                        ..
+                    },
+                ..
+            },
+        ] = then_children[..]
+            && let Expression::Variable(then_var) = self.arena[then_target]
+            // `slotN` targets are normal `if`s, not ternaries; it'd be *sound* to rewrite, but
+            // farther from source.
+            && then_var.name.namespace == VariableNamespace::Stack
+            && let [
+                StmtMeta {
+                    stmt:
+                        Statement::Basic {
                             stmt:
-                                Statement::Basic {
-                                    stmt:
-                                        BasicStatement::Assign {
-                                            target: then_target,
-                                            value: then_value,
-                                        },
-                                    ..
+                                BasicStatement::Assign {
+                                    target: else_target,
+                                    value: else_value,
                                 },
                             ..
                         },
-                    ] = then_children[..]
-                        && let Expression::Variable(then_var) = self.arena[then_target]
-                        // `slotN` targets are normal `if`s, not ternaries; it'd be *sound*, but
-                        // farther from source.
-                        && then_var.name.namespace == VariableNamespace::Stack
-                        && let [
-                            StmtMeta {
-                                stmt:
-                                    Statement::Basic {
-                                        stmt:
-                                            BasicStatement::Assign {
-                                                target: else_target,
-                                                value: else_value,
-                                            },
-                                        ..
-                                    },
-                                ..
-                            },
-                        ] = else_children[..]
-                        && let Expression::Variable(else_var) = self.arena[else_target]
-                        && then_var == else_var
-                    {
-                        let condition = self.invert_condition(*condition);
+                    ..
+                },
+            ] = else_children[..]
+            && let Expression::Variable(else_var) = self.arena[else_target]
+            && then_var == else_var
+        {
+            let condition = self.invert_condition(*condition);
 
-                        stmts[i].stmt = Statement::Basic {
-                            index: None, // FIXME: handle try ranges here
-                            stmt: BasicStatement::Assign {
-                                target: then_target,
-                                value: self.arena.alloc(Expression::Ternary {
-                                    condition,
-                                    branches: [then_value, else_value],
-                                }),
-                            },
-                        };
-                        // Decrement refcount for the variable so that it can be inlined.
-                        self.arena[else_target] = Expression::Null;
-                        *self
-                            .n_var_mentions
-                            .get_mut(&else_var)
-                            .expect("used variable not mentioned") -= 1;
-                    }
-                } else {
-                    // javac usually compiles `if`s with `if (!cond)`, so we swap `then` and `else`
-                    // branches and invert the condition to get closer to source. This is only
-                    // performed the first time `if` is considered. This also allows the same `if`
-                    // to be recognized the second time to parse `then` and `else` branches.
-                    //
-                    // The exception to "usually" here is exit/continue conditions in loops and
-                    // `||`/`&&`/`?:` lowering, which we'll handle later.
-                    core::mem::swap(then_children, else_children);
-                    *condition_inverted = true;
-                }
-            }
+            stmt_meta.stmt = Statement::Basic {
+                index: None, // FIXME: handle try ranges here
+                stmt: BasicStatement::Assign {
+                    target: then_target,
+                    value: self.arena.alloc(Expression::Ternary {
+                        condition,
+                        branches: [then_value, else_value],
+                    }),
+                },
+            };
+            // Decrement refcount for the variable so that it can be inlined.
+            self.arena[else_target] = Expression::Null;
+            *self
+                .n_var_mentions
+                .get_mut(&else_var)
+                .expect("used variable not mentioned") -= 1;
         }
     }
 

@@ -224,13 +224,13 @@ pub fn satisfy_block_requirements(
     }
 
     // The general approach we follow to translate possibly contradictory requirements to a tree
-    // structures is described here:
+    // structure is described here:
     // https://purplesyringa.moe/blog/recovering-control-flow-structures-without-cfgs/.
     //
-    // In a nutshell, at each step, we select a segment entirely covered by ranges of requirements
-    // and place a block at that segment; we then remove requirements that are satisfied by this
-    // block. For example, if there are requirements "1..4 backward" and "2..7 forward", we will
-    // create a block covering 1..7 and satisfy both.
+    // In a nutshell, at each step, we select the minimal segment entirely covered by ranges of
+    // requirements and place a block at that segment; we then remove requirements that are
+    // satisfied by this block. For example, if there are requirements "1..4 backward" and
+    // "2..7 forward", we will create a single block covering 1..7 and satisfy both.
     //
     // This leaves out combinations like "1..3 forward, 2..5 backward", which cannot be implemented
     // with non-overlapping blocks:
@@ -241,8 +241,8 @@ pub fn satisfy_block_requirements(
     //     { }          inner block
     //     ----->       this jump stays as-is
     //     <---------   this one jumps to the beginning of the outer block
-    //     -->          this one jumps via `break` in of the inner block
-    // In effect, we rewrite certain requirements on the fly.
+    //     -->          ...and is then forwarded via `break` in the inner block
+    // We rewrite such requirements on the fly.
     //
     // While jumps are independent, `try` blocks and jumps from `catch`es aren't, meaning that we
     // want to retain nesting order in some cases. For example,
@@ -261,9 +261,9 @@ pub fn satisfy_block_requirements(
     //     } catch {
     //         continue #2;
     //     }
-    // isn't, even though the ranges of `block` and `try` requirements are the same. In addition,
-    // the order in which `catch` closures match types matters since one catch a subclass of the
-    // other.
+    // isn't, even though the ranges of `block` and `try` requirements are the same. We force the
+    // jump in `continue` to be lowered before attempting to lower `try`. In addition, the order in
+    // which `catch` closures match types matters since one catch a subclass of the other.
 
     // Many data structures here are indiced by statement ID -- don't waste cache on whitespace.
     let mut used_indices: Vec<usize> = [0, program_len]
