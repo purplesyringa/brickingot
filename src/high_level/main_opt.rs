@@ -177,6 +177,14 @@ impl<'code> Optimizer<'_, 'code> {
         // an `if`/`switch`/etc., the current block's tail was inlined into that statement, and the
         // `break` was replaced with a fallthrough. Thus the `if`/`switch`/etc. must be the only
         // current child.
+        //
+        // One problem still exists, though. Normally, each statement is handled by the routines
+        // invoked within `handle_stmt_lists` exactly once, but this process causes a single
+        // statement to be handled multiple times. That's by design, since we do want to inline
+        // multiple tails into a single statement. This forces routines like `inline_switch` to take
+        // precautions to work in linear time overall, e.g. by not recursing into all child nodes
+        // every time.
+        // XXX: how does this interact with `inline_expressions`?
 
         if block_info.n_continue_uses == 0 && children.len() == 1 {
             // `if`s are guaranteed not to refer to this block at all. Consider:
