@@ -132,8 +132,12 @@ impl<'a, 'code> Inliner<'a, 'code> {
             self.rev_stmts.next();
 
             // Inline recursively. We don't have to worry about `handle_expr` being called twice for
-            // the value because its defining statement has just been dropped from iteration.
-            self.handle_expr(value);
+            // the value because its defining statement has just been dropped from iteration. See
+            // the comment in `handle_stmt_list` for why we need to skip this if the assignment came
+            // from the first statement.
+            if self.rev_stmts.peek().is_some() {
+                self.handle_expr(value);
+            }
 
             // We can't modify `arena` here directly because there's an immutable reference to its
             // elements up the stack; delay it until later.
