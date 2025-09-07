@@ -537,10 +537,7 @@ impl<'code> Optimizer<'_, 'code> {
             let mut stmt_meta = core::mem::replace(
                 &mut stmts[i],
                 StmtMeta {
-                    meta: Meta {
-                        is_divergent: false,
-                        ..Meta::default()
-                    },
+                    meta: Meta::default(),
                     stmt: Statement::Basic {
                         index: None,
                         stmt: BasicStatement::ReturnVoid,
