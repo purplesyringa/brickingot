@@ -184,7 +184,20 @@ impl<'code> Optimizer<'_, 'code> {
         // multiple tails into a single statement. This forces routines like `inline_switch` to take
         // precautions to work in linear time overall, e.g. by not recursing into all child nodes
         // every time.
-        // XXX: how does this interact with `inline_expressions`?
+        //
+        // `inline_expressions` is in a particularly interesting situation, since it recurses not
+        // into statements, but into *expressions*; and so invoking `inline_expressions` on
+        // a statement multiple times may be catastrophic. But it turns out that we're in luck, if
+        // only narrowly.
+        //
+        // A statement that can be inlined to, like `if`, can only be handled for the second time if
+        // it becomes the sole statement in the block; this means that it must be the first
+        // statement in `out`. But `inline_expressions` doesn't need to recurse into the first
+        // statement, since no definitions can be inlined into uses within that statement. This
+        // means that `inline_expressions` will actually touch the `if` for the first time when it
+        // stops being the first statement. But that implies that there is either a `continue` to
+        // the block or the first statement contains a `break` and thus isn't an assignment that
+        // `inline_expressions` can remove; in either case, this block won't be optimized out.
 
         if block_info.n_continue_uses == 0 && children.len() == 1 {
             // `if`s are guaranteed not to refer to this block at all. Consider:

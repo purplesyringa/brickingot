@@ -43,18 +43,27 @@ impl<'a, 'code> Inliner<'a, 'code> {
         let mut out = Vec::new();
 
         while let Some(stmt_meta) = self.rev_stmts.next() {
-            let subexprs = match &stmt_meta.stmt {
-                Statement::Basic { stmt, .. } => stmt.subexprs(),
-                Statement::If { condition, .. } => BasicStatement::subexprs_from_single(*condition),
-                Statement::Switch { key, .. } => BasicStatement::subexprs_from_single(*key),
-                Statement::Block { .. }
-                | Statement::Continue { .. }
-                | Statement::Break { .. }
-                | Statement::Try { .. } => BasicStatement::subexprs_empty(),
-            };
+            // No need to recurse into the first statement, since its uses can never be resolved to
+            // any assignment. This `if` is not a micro-optimization and is much more important than
+            // it seems: recursing unconditionally can cause the overall time complexity of
+            // optimization to become quadratic. See the comment in `Optimizer::handle_block` for
+            // more information about why this matters.
+            if self.rev_stmts.peek().is_some() {
+                let subexprs = match &stmt_meta.stmt {
+                    Statement::Basic { stmt, .. } => stmt.subexprs(),
+                    Statement::If { condition, .. } => {
+                        BasicStatement::subexprs_from_single(*condition)
+                    }
+                    Statement::Switch { key, .. } => BasicStatement::subexprs_from_single(*key),
+                    Statement::Block { .. }
+                    | Statement::Continue { .. }
+                    | Statement::Break { .. }
+                    | Statement::Try { .. } => BasicStatement::subexprs_empty(),
+                };
 
-            for expr_id in subexprs.rev() {
-                self.handle_expr(expr_id);
+                for expr_id in subexprs.rev() {
+                    self.handle_expr(expr_id);
+                }
             }
 
             out.push(stmt_meta);
