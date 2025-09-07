@@ -125,6 +125,8 @@ impl<'code> Structurizer<'_, 'code> {
             }),
 
             Node::DispatchSwitch { dispatch_targets } => {
+                // Dispatch targets can never point to the statement after the switch, since such
+                // jumps would be trivially lowered to a normal, non-dispatch jump to this `switch`.
                 let id = self.next_block_id;
                 self.next_block_id += 1;
                 out.push(Statement::Switch {
@@ -201,13 +203,30 @@ impl<'code> Structurizer<'_, 'code> {
                     id,
                     key,
                     arms: arms
-                        .into_iter()
-                        .map(|(key, _)| {
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &(key, target))| {
                             let mut children = Vec::new();
-                            self.emit_jump(
-                                RequirementKey::Switch { stmt_index, key },
-                                &mut children,
-                            );
+                            if let Some((_, next_target)) = arms.get(i + 1)
+                                && target == *next_target
+                            {
+                                // Allow arms to the same target to fallthrough, so that we get
+                                // a nice `case 1: case 2: ... case n:` decompilation.
+                                // `Optimizer::inline_switch` relies on this to produce good code,
+                                // though not for correctness.
+                            } else if target == stmt_index + 1 {
+                                // Jumps to the statement after the switch can be performed by
+                                // breaking from the switch itself. Breaks from the last arm don't
+                                // have to be emitted.
+                                if i != arms.len() - 1 {
+                                    children.push(Statement::Break { block_id: id });
+                                }
+                            } else {
+                                self.emit_jump(
+                                    RequirementKey::Switch { stmt_index, key },
+                                    &mut children,
+                                );
+                            }
                             (key, children)
                         })
                         .collect(),

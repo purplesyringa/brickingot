@@ -51,9 +51,11 @@ struct Catch<'code> {
     active_range: Range<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct Meta {
     is_divergent: bool,
+    first_uninlined_switch_arm: usize,
+    n_breaks_from_switch: usize,
 }
 
 #[derive(Debug)]

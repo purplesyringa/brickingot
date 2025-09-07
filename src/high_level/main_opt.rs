@@ -124,6 +124,7 @@ impl<'code> Optimizer<'_, 'code> {
 
         let meta = Meta {
             is_divergent: stmt.is_divergent(),
+            ..Meta::default()
         };
         out.push(StmtMeta {
             stmt: Statement::Basic { index, stmt },
@@ -147,18 +148,17 @@ impl<'code> Optimizer<'_, 'code> {
         );
 
         let fallthrough_breaks_from = Some(fallthrough_breaks_from.unwrap_or(id));
-        let (children, meta) = self.handle_stmt_list(children, fallthrough_breaks_from);
+        let (mut children, meta) = self.handle_stmt_list(children, fallthrough_breaks_from);
 
         let block_info = self.block_info.remove(&id).expect("missing block");
 
-        // If there's an `if` inside this block and statements after this block outside it, this
-        // block existing in the middle of the two might prevent the `else` branch from being
-        // inlined into the `if`.
+        // Since this block stands between an `if`/`switch`/etc. nested inside it and the statements
+        // after it, it can prevent inlining `else` branches, `case`s, etc. Therefore, we want to
+        // optimize out blocks under certain conditions.
         //
         // Handling this is, however, trickier than it seems, since blocks may be used by `break`s
-        // and `continue`s, so we can't always remove this block if we detect this condition.
-        // Moreover, whether to inline or not inline the `then` or `else` branches in this case is
-        // less clear, since it can lead to worse code.
+        // and `continue`s, so we can't always remove this block. It's also not quite clear whether
+        // inlining improves or worsens the resulting code.
         //
         // To make the reasoning more intuitive, consider:
         //     block #n {
@@ -184,7 +184,7 @@ impl<'code> Optimizer<'_, 'code> {
         // inline `else` into the block, nor move `if` outside the block. So that case is sealed.
         //
         // If `#n` is unused after the rewrite, we can remove the block altogether; in fact, in this
-        // case, `...` is guaranteed to be empty, so is clearly worthwhile.
+        // case, `...` is guaranteed to be empty, so it's clearly worthwhile.
         //
         // But what if there is no (other) `break #n`, but plenty of `continue #n`? In this case,
         // `#n` is a loop. We know that `then;` must contain `continue #n`, or the block would be
@@ -202,10 +202,54 @@ impl<'code> Optimizer<'_, 'code> {
             return;
         }
 
+        // `switch`es are nastier. We couldn't remove `break`s equivalent to fallthrough from the
+        // `switch` from arms, as that would only fallthrough to the next arm; but there is nothing
+        // in principle forbidding us from replacing `break`s to this block with `break`s to the
+        // switch itself after inlining the tail. This could make this block unnecessary and allow
+        // us to optimize it out.
+        //
+        // We couldn't perform that rewrite immediately, since looking for such `break`s on each
+        // iteration would be quadratic, but that doesn't mean we don't want to achieve the goal in
+        // a different manner. Rather than replacing block IDs with switch IDs in each `break`, we
+        // can replace the switch ID *itself* with the block ID.
+        //
+        // We only need to do that if the block would be removable, so expect no `continue`s; and we
+        // can only do this if there are no `break`s from the `switch` itself and no code outside
+        // `switch` accesses this block.
+        //
+        // The last condition is less restrictive than it seems. `break`s from the switch prior to
+        // inlining should all be gone after inlining. `break`s to this block from before the switch
+        // denote jumps into the middle of the `switch`, which would forbid inlining anyway. There
+        // can be no statements after the `switch` on successful inlining.
+        //
+        // All in all, we only have to deal with a single `switch` statement within this block.
+        if block_info.n_continue_uses == 0
+            && let [
+                StmtMeta {
+                    stmt:
+                        Statement::Switch {
+                            id: ref mut switch_id,
+                            ..
+                        },
+                    meta:
+                        Meta {
+                            n_breaks_from_switch: ref mut n_breaks_from_switch @ 0,
+                            ..
+                        },
+                },
+            ] = children[..]
+        {
+            *switch_id = id;
+            *n_breaks_from_switch = block_info.n_break_uses;
+            out.extend(children);
+            return;
+        }
+
         out.push(StmtMeta {
             stmt: Statement::Block { id, children },
             meta: Meta {
                 is_divergent: meta.is_divergent && block_info.n_break_uses == 0,
+                ..Meta::default()
             },
         });
     }
@@ -217,7 +261,10 @@ impl<'code> Optimizer<'_, 'code> {
             .n_continue_uses += 1;
         out.push(StmtMeta {
             stmt: Statement::Continue { block_id },
-            meta: Meta { is_divergent: true },
+            meta: Meta {
+                is_divergent: true,
+                ..Meta::default()
+            },
         });
     }
 
@@ -228,7 +275,10 @@ impl<'code> Optimizer<'_, 'code> {
             .n_break_uses += 1;
         out.push(StmtMeta {
             stmt: Statement::Break { block_id },
-            meta: Meta { is_divergent: true },
+            meta: Meta {
+                is_divergent: true,
+                ..Meta::default()
+            },
         });
     }
 
@@ -249,6 +299,7 @@ impl<'code> Optimizer<'_, 'code> {
             },
             meta: Meta {
                 is_divergent: false, // since `else` is empty
+                ..Meta::default()
             },
         });
     }
@@ -261,6 +312,12 @@ impl<'code> Optimizer<'_, 'code> {
         fallthrough_breaks_from: Option<usize>,
         out: &mut StmtList<'code>,
     ) {
+        if arms.is_empty() {
+            // Not sure how this can possibly happen, but I'm not certain the bytecode forbids it,
+            // so might as well handle this, since `inline_switch` assumes non-empty `switch`.
+            return;
+        }
+
         self.block_info.insert(
             id,
             BlockInfo {
@@ -292,12 +349,17 @@ impl<'code> Optimizer<'_, 'code> {
             })
             .collect();
 
-        let block_info = self.block_info.remove(&id).expect("missing block");
+        let block_info = self
+            .block_info
+            .remove(&id)
+            .expect("missing block for switch");
 
         out.push(StmtMeta {
             stmt: Statement::Switch { id, key, arms },
             meta: Meta {
                 is_divergent: last_arm_is_divergent && block_info.n_break_uses == 0,
+                first_uninlined_switch_arm: 0,
+                n_breaks_from_switch: block_info.n_break_uses,
             },
         });
     }
@@ -326,7 +388,10 @@ impl<'code> Optimizer<'_, 'code> {
             .collect();
         out.push(StmtMeta {
             stmt: Statement::Try { children, catches },
-            meta: Meta { is_divergent },
+            meta: Meta {
+                is_divergent,
+                ..Meta::default()
+            },
         });
     }
 
@@ -369,6 +434,7 @@ impl<'code> Optimizer<'_, 'code> {
             .is_some_and(|stmt_meta| stmt_meta.meta.is_divergent);
         let meta = Meta {
             is_divergent: last_stmt_is_divergent,
+            ..Meta::default()
         };
         (out, meta)
     }
@@ -458,6 +524,7 @@ impl<'code> Optimizer<'_, 'code> {
                 StmtMeta {
                     meta: Meta {
                         is_divergent: false,
+                        ..Meta::default()
                     },
                     stmt: Statement::Basic {
                         index: None,
@@ -466,11 +533,16 @@ impl<'code> Optimizer<'_, 'code> {
                 },
             );
 
+            let tail_is_empty = i == stmts.len() - 1;
             let take_tail = || stmts.split_off(i + 1);
 
             match stmt_meta.stmt {
                 Statement::If { .. } => {
                     self.inline_if(&mut stmt_meta, take_tail, fallthrough_breaks_from);
+                }
+                // switches don't like inlining empty tails, see `inline_switch` for more.
+                Statement::Switch { .. } if !tail_is_empty => {
+                    self.inline_switch(&mut stmt_meta, take_tail, fallthrough_breaks_from);
                 }
                 _ => {}
             }
@@ -483,7 +555,7 @@ impl<'code> Optimizer<'_, 'code> {
         &mut self,
         stmt_meta: &mut StmtMeta<'code>,
         take_tail: impl FnOnce() -> StmtList<'code>,
-        fallthrough_breaks_from: Option<usize>,
+        tail_fallthrough_breaks_from: Option<usize>,
     ) {
         let Statement::If {
             condition,
@@ -518,25 +590,26 @@ impl<'code> Optimizer<'_, 'code> {
         // We don't have to optimize out `continue`s here because ternary branches never jump
         // upward, and it'd be tricky to attempt it anyway because the meaning of `continue` is
         // different between blocks and loops, and we'd rather not think about that right now.
-        if let Some(fallthrough_breaks_from) = fallthrough_breaks_from
+        if let Some(tail_fallthrough_breaks_from) = tail_fallthrough_breaks_from
             && then_children
                 .pop_if(|stmt| {
                     matches!(
                         stmt.stmt,
                         Statement::Break { block_id }
-                            if block_id == fallthrough_breaks_from,
+                            if block_id == tail_fallthrough_breaks_from,
                     )
                 })
                 .is_some()
         {
             self.block_info
-                .get_mut(&fallthrough_breaks_from)
+                .get_mut(&tail_fallthrough_breaks_from)
                 .expect("missing block")
                 .n_break_uses -= 1;
         }
 
         stmt_meta.meta = Meta {
             is_divergent: list_is_divergent(&then_children) && list_is_divergent(&else_children),
+            ..Meta::default()
         };
 
         if !*condition_inverted {
@@ -649,6 +722,148 @@ impl<'code> Optimizer<'_, 'code> {
                 op: UnaryOp::Not,
                 argument: condition,
             }),
+        }
+    }
+
+    fn inline_switch(
+        &mut self,
+        stmt_meta: &mut StmtMeta<'code>,
+        take_tail: impl FnOnce() -> StmtList<'code>,
+        tail_fallthrough_breaks_from: Option<usize>,
+    ) {
+        let Statement::Switch { id, arms, .. } = &mut stmt_meta.stmt else {
+            panic!("inline_switch invoked on something other than switch");
+        };
+
+        // Used a bit later, calculated here due to borrowck.
+        let last_arm_is_divergent = list_is_divergent(&arms.last().expect("switch with no arms").1);
+
+        // A switch with `N` arms can be inlined to `N` times, so we don't want to iterate over
+        // `arms` here, lest we get quadratic complexity. Since switch arms are ordered by
+        // increasing target, we can expect to inline arms in the same order they are listed in, so
+        // this can be turned into a linear scan by passing a bit of metadata between iterations.
+        let i = &mut stmt_meta.meta.first_uninlined_switch_arm;
+        let arms_len = arms.len();
+        while *i < arms.len() {
+            let arm = &mut arms[*i].1;
+            *i += 1;
+            let is_last_arm = *i == arms_len;
+
+            // A lot of complexity here stems from the fact that fallthrough from an arm continues
+            // to the next arm instead of breaking out of the `switch`.
+            //
+            // For one thing, it's harder to find which arms are ready to accept the tail than with
+            // `if`, where we could just use an empty arm. Instead, we want to find either an arm
+            // containing a single `break` equivalent to a fallthrough *from the switch* (which, for
+            // non-empty tails, can only be a break from the switch specifically), or an empty last
+            // arm.
+            //
+            // This also means that, when we do inline an arm, we cannot replace *any* breaks with
+            // fallthroughs, except for breaks in the last arm.
+            //
+            // Finally, inlining into an arm is only allowed if no other arm can enter the tail,
+            // i.e. if the `switch` would be divergent without this arm.
+            let n_breaks = &mut stmt_meta.meta.n_breaks_from_switch;
+
+            // Theoretically, multiple arms can match, but that only happens if multiple arms have
+            // the same target in bytecode, and we have already optimized such arms to
+            // `case 1: ... case n: break #m;` during IR construction in `Structurizer::emit_stmt`.
+            // Thus there will be at most one matching arm that we need to inline to.
+            //
+            // On the flip side, this means that if there are ways to escape the `switch` without
+            // going through the matched arm (i.e. with `break`s or fallthrough from the last arm),
+            // we can't really do much and have to abort inlining.
+
+            if arm.is_empty() {
+                if !is_last_arm {
+                    // Can't inline into this arm right now. This implies that this arm will never
+                    // be inlined to, since the tail will either be inlined into another, later arm,
+                    // or be left as-is after the switch, preventing any other inlines. The only
+                    // exception is an empty tail, which we've prefiltered. Thus we can advance to
+                    // the next arm safely.
+                    continue;
+                }
+                // Other arms can only be non-divergent (excluding fallthrough into this arm) if
+                // they have `break`s.
+                if *n_breaks > 0 {
+                    return;
+                }
+            } else {
+                let is_break = matches!(
+                    arm[..],
+                    [StmtMeta {
+                        stmt: Statement::Break { block_id },
+                        ..
+                    }] if block_id == *id,
+                );
+                if !is_break {
+                    continue;
+                }
+                // Other arms can only be non-divergent (excluding fallthrough into this arm) if
+                // they have `break`s or if the last arm is non-divergent. There is a special case
+                // if *this* is the last arm; but since it contains `break`, it's automatically
+                // considered divergent, so this test will work just fine.
+                if *n_breaks > 1 || !last_arm_is_divergent {
+                    return;
+                }
+                // Inlining overwrites this `break`.
+                *n_breaks -= 1;
+            }
+
+            // Inline into this arm.
+            *arm = take_tail();
+
+            // This is the second place affected by unorthodox fallthrough behavior: if the tail is
+            // not divergent and this is not the last arm, execution will continue to the next arm
+            // instead of breaking from the switch, so we have to add a `break` in this case.
+            if is_last_arm || list_is_divergent(arm) {
+                break;
+            }
+
+            let break_id = tail_fallthrough_breaks_from.unwrap_or(*id);
+
+            // The obvious exception is if we *want* execution to continue to the next arm. If the
+            // tail and the next arm would reach the same target, i.e.: if the next non-empty arm
+            // contains the same `break` that we want to insert, we shouldn't do that, since it'd
+            // make the `break` non-unique and prevent further inlining.
+            //
+            // This check is a little ugly, but still linear, since for each inlined arm, we only
+            // scan the statements corresponding to the next inlineable arm once.
+            let fallthrough_to_next_arm = arms[*i..]
+                .iter()
+                .find(|next_arm| !next_arm.1.is_empty())
+                .is_some_and(|next_arm| {
+                    matches!(
+                        next_arm.1[..],
+                        [StmtMeta {
+                            stmt: Statement::Break { block_id },
+                            ..
+                        }]if block_id == break_id,
+                    )
+                });
+            if fallthrough_to_next_arm {
+                break;
+            }
+
+            // `arm.1.push` would be nicer, but we've just invalidated the borrow.
+            arms[*i - 1].1.push(StmtMeta {
+                stmt: Statement::Break { block_id: break_id },
+                meta: Meta {
+                    is_divergent: true,
+                    ..Meta::default()
+                },
+            });
+            if break_id == *id {
+                // The `switch` has already been popped from `block_info`, so we have to patch this
+                // variable instead. A bit ugly.
+                *n_breaks += 1;
+            } else {
+                self.block_info
+                    .get_mut(&break_id)
+                    .expect("missing block")
+                    .n_break_uses += 1;
+            }
+            break;
         }
     }
 }

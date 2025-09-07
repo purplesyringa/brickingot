@@ -104,18 +104,19 @@ pub fn compute_block_requirements(
                 requirements.push(jump(stmt_index, *target));
             }
             stackless::Statement::Switch { arms, default, .. } => {
-                for (key, successor) in arms {
-                    keys.push(RequirementKey::Switch {
-                        stmt_index,
-                        key: Some(*key),
-                    });
-                    requirements.push(jump(stmt_index, *successor));
+                for (key, successor) in arms
+                    .iter()
+                    .map(|(key, successor)| (Some(*key), *successor))
+                    .chain(core::iter::once((None, *default)))
+                {
+                    // Jumps to the next statement can be lowered as a break from the switch itself
+                    // and don't require new blocks.
+                    if successor == stmt_index + 1 {
+                        continue;
+                    }
+                    keys.push(RequirementKey::Switch { stmt_index, key });
+                    requirements.push(jump(stmt_index, successor));
                 }
-                keys.push(RequirementKey::Switch {
-                    stmt_index,
-                    key: None,
-                });
-                requirements.push(jump(stmt_index, *default));
             }
         }
     }
@@ -518,13 +519,21 @@ impl Treeificator {
         // be a range of length 1.
         assert_eq!(range.len(), 1, "failed to manifest a gap");
 
+        // We don't need to create any block, so free up the block ID. This is not necessary, but it
+        // slightly simplifies the resulting IR for debugging.
+        self.next_block_id -= 1;
+
         if let Some(dispatcher) = self.dispatcher_at_stmt.remove(&range.start)
             && !dispatcher.known_targets.is_empty()
         {
-            let mut dispatch_targets: Vec<DispatchTarget> =
-                dispatcher.known_targets.into_values().collect();
-            dispatch_targets.sort_unstable_by_key(|target| target.selector);
-            out.push(Node::DispatchSwitch { dispatch_targets });
+            // `switch` arms should be sorted by target so that they can be inlined. Allocating
+            // twice here is a bit messy, but this isn't a hot path.
+            let mut by_target: Vec<(usize, DispatchTarget)> =
+                dispatcher.known_targets.into_iter().collect();
+            by_target.sort_unstable_by_key(|(target, _)| *target);
+            out.push(Node::DispatchSwitch {
+                dispatch_targets: by_target.into_iter().map(|(_, target)| target).collect(),
+            });
         }
 
         out.push(Node::Linear {
