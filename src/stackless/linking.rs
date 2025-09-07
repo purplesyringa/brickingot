@@ -101,7 +101,7 @@ impl<'a> Linker<'a> {
                     namespace: VariableNamespace::Exception,
                     id: 0,
                 },
-                version: eh.unique_exception_expr_id,
+                version: eh.exception0_use,
             }));
         }
 

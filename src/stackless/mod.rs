@@ -8,7 +8,7 @@ use self::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use self::linking::link_stack_across_basic_blocks;
 use self::splitting::merge_versions_across_basic_blocks;
 use crate::arena::{Arena, DebugIr, ExprId};
-use crate::ast::{BasicStatement, Expression, Str};
+use crate::ast::{BasicStatement, Expression, Str, Variable, VariableName, VariableNamespace};
 use crate::preparse;
 use crate::preparse::insn_stack_effect::is_type_descriptor_double_width;
 use core::fmt::{self, Display};
@@ -21,6 +21,7 @@ use noak::{
         cpool::ConstantPool,
     },
 };
+use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -99,6 +100,7 @@ pub struct ExceptionHandler<'code> {
     pub end: usize,
     pub target: usize,
     pub class: Option<Str<'code>>,
+    pub stack0_exception0_copy_versions: Option<(ExprId, ExprId)>,
 }
 
 impl Display for ExceptionHandler<'_> {
@@ -124,7 +126,11 @@ pub struct BasicBlock {
 
 pub struct ExceptionHandlerBlock {
     pub throw_sites: Vec<usize>, // BBs that can enter this BB on throw
-    pub unique_exception_expr_id: ExprId,
+    // stack0 in implicit `stack0 = exception0`.
+    pub stack0_def: ExprId,
+    // exception0 in implicit `stack0 = exception0`.
+    pub exception0_use: ExprId,
+    pub stack0_exception0_copy_is_necessary: bool,
 }
 
 impl BasicBlock {
@@ -204,38 +210,42 @@ pub fn build_stackless_ir<'code>(
     //
     // A minor complication arises in exception handlers, which are populated with the expection
     // object in `stack0`. The exception is assumed to be stored in the synthetic variable
-    // `exception0`, and certain accesses to `stack0` (as well as copies in other stack elements)
-    // may be optimized to use `exception0`. This is, however, not guaranteed. For example, in
+    // `exception0`; but we cannot really insert the statement `stack0 = exception0` anywhere in the
+    // IR, because EH BBs can be also entered by fallthrough. We thus simulate this statement by
+    // storing it in the per-handler `struct` and tuning passes to assume it's part of the CFG. This
+    // allows many accesses to `stack0` (as well as copies in other stack elements) to be optimized
+    // to use `exception0`, but still allows for sound handling of situations like:
     //     value0 = 1
     //     stack0 = value0
     //     // exception handler starts here
     //     stack1 = stack0
-    // `stack0` may refer either to `1` or to the exception handler depending on control flow, so
-    // the `stack0` read will not be optimized to either. This means that although moves of the
-    // exception object across stack locations are typically tracked, that is not guaranteed to be
-    // the case, and implicit writes to `stack0` need to be considered during each pass.
+    // ...where `stack0` may refer either to the exception or another value depending on control
+    // flow. The assignment will be inserted into the IR when we generate structured IR in this
+    // case.
     //
     // On a higher level, linking can be seen as merging certain variables together. However, it's
     // also important to split identical variables apart when they have non-intersecting uses. This
     // includes not just `stackN` variables, but also `slotN` variables, as locals in
     // non-intersecting scopes can be allocated to the same slot. We call this process "splitting".
     //
-    // Splitting is implemented by adding "versions" to each `slotN`/`stackN` variable mention and
-    // merging together versions in use-def chains. This ensures that all definitions that a given
-    // use sees, as well as the use itself, access the same variable.
+    // Splitting is implemented by adding unique "versions" to each `slotN`/`stackN` variable
+    // mention and merging together versions in use-def chains. This ensures that all definitions
+    // that a given use sees, as well as the use itself, access the same variable.
     //
-    // In this sense, splitting is actually merging; don't let that confuse you. Versioning does not
-    // create *new* variables: different versions of a variable still use the same storage on the IR
-    // level, and only reads of the latest version are allowed.
+    // In this sense, splitting is actually merging; but don't let that confuse you. Versioning does
+    // not create *new* variables from the semantic point of view: different versions of a variable
+    // still use the same storage on the IR level, and only reads of the latest version are allowed.
+    // This is sound to *implement* by having multiple variables, but passes cannot assume that is
+    // the case.
     //
-    // Uses from dead stack stores are ignored: `stack0 = value0` do not count as a use of `value0`
-    // unless `stack0` is transitively used by something other than a dead stack store.
+    // Uses from dead stack stores are ignored: `stack0 = value0` does not count as a use of
+    // `value0` unless `stack0` is transitively used by something other than a dead stack store.
     //
     // Splitting is performed after linking for two reasons: a) linking has enough to worry about
     // without versions, b) linking turns many stack stores dead, enabling better and faster
     // splitting.
     //
-    // Both of these processes can be performed without SSA, using simpler algorithms with better
+    // Both processes can be performed without SSA, using simpler algorithms with better
     // performance. Both linking and splitting require tracking use-def chains, so we use the same
     // data structures for both tasks.
 
@@ -290,8 +300,25 @@ pub fn build_stackless_ir<'code>(
 
             Some(ExceptionHandlerBlock {
                 throw_sites,
-                // Doesn't have to point to anything specific, just a unique ID for versioning.
-                unique_exception_expr_id: arena.alloc(Expression::Null),
+                stack0_def: arena.alloc_with(|version| {
+                    Expression::Variable(Variable {
+                        name: VariableName {
+                            namespace: VariableNamespace::Stack,
+                            id: 0,
+                        },
+                        version,
+                    })
+                }),
+                exception0_use: arena.alloc_with(|version| {
+                    Expression::Variable(Variable {
+                        name: VariableName {
+                            namespace: VariableNamespace::Exception,
+                            id: 0,
+                        },
+                        version,
+                    })
+                }),
+                stack0_exception0_copy_is_necessary: true, // populated by `splitting`
             })
         };
         for succ_bb_id in &bb.successors {
@@ -381,7 +408,19 @@ pub fn build_stackless_ir<'code>(
         }
     }
 
-    // Compute new exception handlers
+    // Compute new exception handlers.
+    let mut handler_to_copy = FxHashMap::default();
+    for (prepare_bb, ir_bb) in preparse_basic_blocks.iter().zip(&ir_basic_blocks) {
+        if let Some(eh) = &ir_bb.eh
+            && eh.stack0_exception0_copy_is_necessary
+        {
+            handler_to_copy.insert(
+                prepare_bb.instruction_range.start,
+                (eh.stack0_def, eh.exception0_use),
+            );
+        }
+    }
+
     let mut exception_handlers = Vec::new();
     for handler in code.exception_handlers() {
         // Since some instructions could have been optimized out as unreachable, `start_pc` and
@@ -408,6 +447,11 @@ pub fn build_stackless_ir<'code>(
                 Some(catch_type) => Some(Str(pool.retrieve(catch_type)?.name)),
                 None => None,
             },
+            // Since multiple handlers can have the same target, these IDs are not unique and can
+            // only be used as versions, not as expression IDs.
+            stack0_exception0_copy_versions: handler_to_copy
+                .get(&handler.handler().as_u32())
+                .copied(),
         });
     }
 

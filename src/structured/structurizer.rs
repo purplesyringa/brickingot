@@ -109,12 +109,37 @@ impl<'code> Structurizer<'_, 'code> {
                     .expect("try block without catches")
                     .into_iter()
                     .map(|handler| {
-                        let mut children = Vec::new();
                         let key = RequirementKey::BackwardCatch { index: handler };
+                        let handler = self.stackless_ir.exception_handlers[handler].clone();
+
+                        let mut children = Vec::new();
+                        if let Some((stack0_version, exception0_version)) =
+                            handler.stack0_exception0_copy_versions
+                        {
+                            children.push(Statement::Basic {
+                                index: None,
+                                stmt: BasicStatement::Assign {
+                                    target: self.arena.alloc(Expression::Variable(Variable {
+                                        name: VariableName {
+                                            id: 0,
+                                            namespace: VariableNamespace::Stack,
+                                        },
+                                        version: stack0_version,
+                                    })),
+                                    value: self.arena.alloc(Expression::Variable(Variable {
+                                        name: VariableName {
+                                            id: 0,
+                                            namespace: VariableNamespace::Exception,
+                                        },
+                                        version: exception0_version,
+                                    })),
+                                },
+                            });
+                        }
                         if self.jump_implementations.contains_key(&key) {
                             self.emit_jump(key, &mut children);
                         }
-                        let handler = &self.stackless_ir.exception_handlers[handler];
+
                         Catch {
                             class: handler.class,
                             children,

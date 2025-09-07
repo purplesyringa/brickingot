@@ -22,14 +22,14 @@ enum Predicate {
 }
 
 struct Merger<'a> {
-    basic_blocks: &'a [BasicBlock],
+    basic_blocks: &'a mut [BasicBlock],
     dsu: DisjointSetUnion,
     resolved_uses: FxHashMap<(usize, VariableName), ExprId>,
     tasks: Vec<UseDefTask>,
 }
 
 impl<'a> Merger<'a> {
-    fn new(basic_blocks: &'a [BasicBlock], dsu_len: u32) -> Self {
+    fn new(basic_blocks: &'a mut [BasicBlock], dsu_len: u32) -> Self {
         Self {
             basic_blocks,
             dsu: DisjointSetUnion::new(dsu_len),
@@ -83,11 +83,7 @@ impl<'a> Merger<'a> {
 
             if let Some(eh) = &self.basic_blocks[bb_id].eh {
                 if name.namespace == VariableNamespace::Stack && name.id == 0 {
-                    // This one's a bit weird -- we're merging ExprId's associated with different
-                    // variable names. The point here is to merge all uses of a single exception0
-                    // together. We couldn't care less about the version of exception0 itself: they
-                    // may eventually even alias between basic blocks.
-                    self.dsu.merge(use_expr_id.0, eh.unique_exception_expr_id.0);
+                    self.dsu.merge(use_expr_id.0, eh.stack0_def.0);
                 } else {
                     // Exception handlers can see `slotN` definitions from the throw site, but not
                     // `stackN` (since stack is cleared on entry) or `valueN` (since it can only be
@@ -141,6 +137,16 @@ impl<'a> Merger<'a> {
         }
     }
 
+    fn finish(self) -> MergedVariables {
+        MergedVariables { dsu: self.dsu }
+    }
+}
+
+struct MergedVariables {
+    dsu: DisjointSetUnion,
+}
+
+impl MergedVariables {
     fn resolve(&mut self, expr_id: ExprId) -> ExprId {
         ExprId(self.dsu.resolve(expr_id.0))
     }
@@ -152,7 +158,7 @@ impl<'a> Merger<'a> {
 
 pub fn merge_versions_across_basic_blocks(
     arena: &mut Arena<'_>,
-    basic_blocks: &[BasicBlock],
+    basic_blocks: &mut [BasicBlock],
     unresolved_uses: &FxHashMap<(usize, Variable), UnresolvedUse>,
     statements: &mut Vec<Statement>,
 ) {
@@ -167,12 +173,19 @@ pub fn merge_versions_across_basic_blocks(
             merger.visit_use(bb_id, var.name, var.version);
         }
     }
+    let mut merged = merger.finish();
 
     // Update all versions to the merged version. This iterates through possibly dead expressions,
     // but since `resolve` is infallible, it doesn't break anything.
     for expr in arena.iter_mut() {
         if let Expression::Variable(Variable { version, .. }) = expr {
-            *version = merger.resolve(*version);
+            *version = merged.resolve(*version);
+        }
+    }
+    for bb in &mut *basic_blocks {
+        if let Some(eh) = &mut bb.eh {
+            eh.stack0_def = merged.resolve(eh.stack0_def);
+            eh.exception0_use = merged.resolve(eh.exception0_use);
         }
     }
 
@@ -196,7 +209,7 @@ pub fn merge_versions_across_basic_blocks(
                 version: def_expr_id,
             }) = arena[*target]
             && name.namespace == VariableNamespace::Stack
-            && merger.is_unique(def_expr_id)
+            && merged.is_unique(def_expr_id)
         {
             // `value` must be a `valueN` variable; remove it from the arena so that variable
             // refcounts can be computed just by iterating over the arena without recursion.
@@ -208,4 +221,10 @@ pub fn merge_versions_across_basic_blocks(
             true
         }
     });
+
+    for bb in basic_blocks {
+        if let Some(eh) = &mut bb.eh {
+            eh.stack0_exception0_copy_is_necessary = !merged.is_unique(eh.stack0_def);
+        }
+    }
 }
