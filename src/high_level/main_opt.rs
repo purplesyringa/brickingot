@@ -154,95 +154,89 @@ impl<'code> Optimizer<'_, 'code> {
 
         // Since this block stands between an `if`/`switch`/etc. nested inside it and the statements
         // after it, it can prevent inlining `else` branches, `case`s, etc. Therefore, we want to
-        // optimize out blocks under certain conditions.
+        // optimize out blocks by removing the block and directly emitting its children under
+        // certain conditions.
         //
-        // Handling this is, however, trickier than it seems, since blocks may be used by `break`s
-        // and `continue`s, so we can't always remove this block. It's also not quite clear whether
-        // inlining improves or worsens the resulting code.
+        // Consider N nested unused blocks with N statements inside the most nested block. If we
+        // optimize out every unused block, we'll force time complexity to O(N^2). We *could* do
+        // that and generate the input IR in a way that this is not reached, but it'd probably be
+        // less hacky to limit the conditions under which such inlining is performed to something
+        // like `children.len() == 1`, which guarantees linear time overall.
         //
-        // To make the reasoning more intuitive, consider:
-        //     block #n {
-        //         ...
-        //         if (!cond) {
-        //             break #n;
-        //         }
-        //         then; // divergent
-        //     }
-        //     else;
-        // ...which we rewrite to:
-        //     block #n {
-        //         ...
-        //         if (!cond) {
-        //             // fallthrough
-        //         } else {
-        //             then; // divergent
-        //         }
-        //     }
-        //     else;
+        // This is less restrictive than it seems.
         //
-        // If `break #n` is present after the rewrite anywhere within the block, we can neither
-        // inline `else` into the block, nor move `if` outside the block. So that case is sealed.
+        // If the block was used by a `continue` prior to any optimizations, the `continue` will
+        // stay, since we only touch `break`s during this stage. We can't optimize out such blocks
+        // by removal, and it doesn't make sense to move code after the block *into* the block: even
+        // if possible, that would just inline everything after a loop into the loop's only exit,
+        // which is unnecessary and doesn't improve anything; no inlineable patterns we're trying to
+        // match rely on this.
         //
-        // If `#n` is unused after the rewrite, we can remove the block altogether; in fact, in this
-        // case, `...` is guaranteed to be empty, so it's clearly worthwhile.
-        //
-        // But what if there is no (other) `break #n`, but plenty of `continue #n`? In this case,
-        // `#n` is a loop. We know that `then;` must contain `continue #n`, or the block would be
-        // split into two. Thus `if (!cond)` is the only exit from this loop; it's likely similar to
-        // `do { ... } while (cond);`. Inlining `else;` into `break #n` would mean inlining the code
-        // after the loop into its only exit. This would complicate code without allowing any useful
-        // constructs to match, like ternaries, since the stack variable written by the ternary
-        // branches cannot be read across loop iterations, and that's what would happen here. So
-        // while we *could* inline `else;` in principle, it would not be useful in any way that
-        // matters.
-        //
-        // The solution is thus as simple as only removing unused blocks.
-        if block_info.n_break_uses == 0 && block_info.n_continue_uses == 0 {
-            out.extend(children);
-            return;
-        }
+        // Blocks without `continue`s, on the other hand, are guaranteed to be used by a `break`
+        // somewhere in the first statement initially. A `break` can only disappear if it was due to
+        // an `if`/`switch`/etc., the current block's tail was inlined into that statement, and the
+        // `break` was replaced with a fallthrough. Thus the `if`/`switch`/etc. must be the only
+        // current child.
 
-        // `switch`es are nastier. We couldn't remove `break`s equivalent to fallthrough from the
-        // `switch` from arms, as that would only fallthrough to the next arm; but there is nothing
-        // in principle forbidding us from replacing `break`s to this block with `break`s to the
-        // switch itself after inlining the tail. This could make this block unnecessary and allow
-        // us to optimize it out.
-        //
-        // We couldn't perform that rewrite immediately, since looking for such `break`s on each
-        // iteration would be quadratic, but that doesn't mean we don't want to achieve the goal in
-        // a different manner. Rather than replacing block IDs with switch IDs in each `break`, we
-        // can replace the switch ID *itself* with the block ID.
-        //
-        // We only need to do that if the block would be removable, so expect no `continue`s; and we
-        // can only do this if there are no `break`s from the `switch` itself and no code outside
-        // `switch` accesses this block.
-        //
-        // The last condition is less restrictive than it seems. `break`s from the switch prior to
-        // inlining should all be gone after inlining. `break`s to this block from before the switch
-        // denote jumps into the middle of the `switch`, which would forbid inlining anyway. There
-        // can be no statements after the `switch` on successful inlining.
-        //
-        // All in all, we only have to deal with a single `switch` statement within this block.
-        if block_info.n_continue_uses == 0
-            && let [
-                StmtMeta {
-                    stmt:
-                        Statement::Switch {
-                            id: ref mut switch_id,
-                            ..
-                        },
-                    meta:
-                        Meta {
-                            n_breaks_from_switch: ref mut n_breaks_from_switch @ 0,
-                            ..
-                        },
-                },
-            ] = children[..]
-        {
-            *switch_id = id;
-            *n_breaks_from_switch = block_info.n_break_uses;
-            out.extend(children);
-            return;
+        if block_info.n_continue_uses == 0 && children.len() == 1 {
+            // `if`s are guaranteed not to refer to this block at all. Consider:
+            //     block #n {
+            //         if (!cond) {
+            //             break #n;
+            //         }
+            //         then; // divergent
+            //     }
+            //     else;
+            // ...which we rewrite to:
+            //     block #n {
+            //         if (!cond) {
+            //             // fallthrough
+            //         } else {
+            //             then; // divergent
+            //         }
+            //     }
+            //     else;
+            // If `break #n` is present after the rewrite, we can neither inline `else` into the
+            // block, nor move `if` outside the block. So that case is sealed.
+            if block_info.n_break_uses == 0 {
+                out.extend(children);
+                return;
+            }
+
+            // `switch`es are nastier. We couldn't remove `break`s equivalent to fallthrough from
+            // the `switch` arms, as that would only fallthrough to the next arm; but there is
+            // nothing in principle forbidding us from replacing `break`s to this block with
+            // `break`s to the switch itself after inlining the tail. This could make this block
+            // unnecessary and allow us to optimize it out.
+            //
+            // We couldn't perform that rewrite immediately, since looking for such `break`s on each
+            // iteration would be quadratic, but that doesn't mean we don't want to achieve the goal
+            // in a different manner. Instead of replacing block IDs with switch IDs in each
+            // `break`, we can replace the switch ID *itself* with the block ID.
+            //
+            // We can only do this if there are no `break`s from the `switch` itself, since we can't
+            // merge two IDs into one, but such `break`s should normally all be gone after inlining.
+            if block_info.n_continue_uses == 0
+                && let [
+                    StmtMeta {
+                        stmt:
+                            Statement::Switch {
+                                id: ref mut switch_id,
+                                ..
+                            },
+                        meta:
+                            Meta {
+                                n_breaks_from_switch: ref mut n_breaks_from_switch @ 0,
+                                ..
+                            },
+                    },
+                ] = children[..]
+            {
+                *switch_id = id;
+                *n_breaks_from_switch = block_info.n_break_uses;
+                out.extend(children);
+                return;
+            }
         }
 
         out.push(StmtMeta {
