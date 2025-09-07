@@ -329,11 +329,16 @@ pub fn build_stackless_ir<'code>(
         ir_basic_blocks[bb_id].sealed_bb = machine.seal_basic_block();
     }
 
-    let unresolved_uses = machine.unresolved_uses;
+    let mut unresolved_uses = machine.unresolved_uses;
     let mut statements = machine.statements;
 
-    link_stack_across_basic_blocks(arena, &ir_basic_blocks, &unresolved_uses);
-    merge_versions_across_basic_blocks(arena, &ir_basic_blocks, &unresolved_uses, &mut statements);
+    link_stack_across_basic_blocks(arena, &ir_basic_blocks, &mut unresolved_uses);
+    merge_versions_across_basic_blocks(
+        arena,
+        &mut ir_basic_blocks,
+        &unresolved_uses,
+        &mut statements,
+    );
 
     // Fixup jump destinations
     let mut addresses_and_statements = Vec::new();

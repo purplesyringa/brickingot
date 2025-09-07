@@ -84,26 +84,29 @@ impl<'code> Optimizer<'_, 'code> {
         mut stmt: BasicStatement,
         out: &mut StmtList<'code>,
     ) {
-        // Replace never-used assignments with computations and drop no-op computations. This has to
-        // be done prior to inlining because such no-ops can break the assumption that definitions
-        // and uses are consecutive statements (the reason for this assumption is described in more
-        // detail in `inlining`).
+        // Replace dead `valueN` assignments with computations and drop no-op computations. Dead
+        // stack assignments have already been removed in `splitting`, so we don't have to focus on
+        // that. See the comments in `splitting` for why dead stores keeping other value loads alive
+        // is not an issue and we can use such a simple condition.
+        //
+        // This step has to run prior to inlining because such no-ops can break the assumption that
+        // definitions and uses are consecutive statements (the reason for this assumption is
+        // described in more detail in `inlining`).
 
         // Since versions of unused variables are never merged, all unused variables are guaranteed
         // to have a single mention (the definition itself).
         if let BasicStatement::Assign { target, value } = stmt
             && let Expression::Variable(var) = self.arena[target]
-            && var.name.namespace != VariableNamespace::Slot // slot are retained as in source
+            && var.name.namespace == VariableNamespace::Value
             && *self
                 .n_var_mentions
                 .get(&var)
                 .expect("used variable not mentioned")
                 == 1
         {
-            // This can turn the assignment into a no-op if the value has no side effects. We seldom
-            // generate dead stores (unless the original bytecode contains them; but then
-            // representing it in the decompiled code is probably a good idea), so this can only
-            // really happen under the following conditions:
+            // This can turn the assignment into a no-op if the value has no side effects. We
+            // consider arithmetic to be a side effect since we want to retain logic present in
+            // bytecode, so this can only really happen under the following circumstances:
             // - While initializing method arguments (hence `this` and arguments).
             //   FIXME: we don't handle currently this for multiple reasons, e.g. that those are
             //   assignments to slots which we ignore; it's not quite clear how to best support
@@ -116,6 +119,19 @@ impl<'code> Optimizer<'_, 'code> {
             |*/ Expression::Null
             | Expression::Variable(_) = self.arena[value]
             {
+                // It's not really useful to decrease refcount for the defined variable, since it
+                // won't ever be mentioned anyway, but it's still useful for the used variable,
+                // since it can allow it to become a single-use and thus inlineable. The specific
+                // problem we're trying to solve is
+                //     stack0 = cond ? if_true : if_false;
+                //     value0 = stack0; // unused
+                //     // stack1 = value0; <- was used by this dead store, but it was optimized out
+                //     use stack0;
+                // ...not inlining `stack0` into the use.
+                if let Expression::Variable(var) = self.arena[value] {
+                    self.arena[value] = Expression::Null;
+                    *self.n_var_mentions.get_mut(&var).expect("used variable not mentioned") -= 1;
+                }
                 return;
             }
 

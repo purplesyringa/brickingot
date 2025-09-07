@@ -160,13 +160,13 @@ impl<'a> Linker<'a> {
 pub fn link_stack_across_basic_blocks(
     arena: &mut Arena<'_>,
     basic_blocks: &[BasicBlock],
-    unresolved_uses: &FxHashMap<(usize, Variable), UnresolvedUse>,
+    unresolved_uses: &mut FxHashMap<(usize, Variable), UnresolvedUse>,
 ) {
     let mut linker = Linker::new(basic_blocks);
 
-    for &(bb_id, var) in unresolved_uses.keys() {
+    unresolved_uses.retain(|&(bb_id, var), _| {
         if var.name.namespace != VariableNamespace::Stack {
-            continue;
+            return true;
         }
 
         let DfsNodeState { source, .. } = linker.visit((bb_id, var.name.id));
@@ -198,9 +198,24 @@ pub fn link_stack_across_basic_blocks(
         // cannot be the only source of `stack1`, and so the concern is irrelevant.
 
         match source {
-            Source::Value(value_var) => arena[var.version] = Expression::Variable(value_var),
+            Source::Value(value_var) => {
+                arena[var.version] = Expression::Variable(value_var);
+                // Drop the now-unused access to make sure that the replaced `stackN` use won't keep
+                // `stackN` alive if it's otherwise unused. This is sufficient to guarantee no false
+                // positives during the DFS stage in `splitting` because all remaining stack
+                // accesses not for the purposes of stack manipulation are guaranteed to be part of
+                // computations (which we consider to be side effects) and thus keep this `stackN`
+                // use alive.
+                //
+                // Forgetting to do this this can cause subtle bugs, since the removed `stackN`
+                // acting as a GC root can cause other linked-out stack definitions to become live,
+                // preventing the algorithm for removing dead definitions in `main_opt` from
+                // converging in a single step, and eventually stopping certain expressions from
+                // getting inlined.
+                false
+            }
             Source::Missing => unreachable!(),
-            Source::Indeterminate => {}
+            Source::Indeterminate => true,
         }
-    }
+    });
 }

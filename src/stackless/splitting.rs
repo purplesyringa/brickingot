@@ -145,7 +145,7 @@ impl<'a> Merger<'a> {
         ExprId(self.dsu.resolve(expr_id.0))
     }
 
-    fn is_unique(&mut self, expr_id: ExprId) -> bool {
+    fn is_unique(&self, expr_id: ExprId) -> bool {
         self.dsu.is_unique(expr_id.0)
     }
 }
@@ -158,6 +158,8 @@ pub fn merge_versions_across_basic_blocks(
 ) {
     let mut merger = Merger::new(basic_blocks, arena.capacity());
 
+    // Merge uses and definitions of `stackN` and `slotN` variables. We don't merge `valueN` here
+    // because they all already share a version, and skipping value variables is just faster.
     for (&(bb_id, var), unresolved_use) in unresolved_uses {
         // We don't handle uses from possibly dead stores, but instead wait for the first live load
         // from the store.
@@ -166,17 +168,27 @@ pub fn merge_versions_across_basic_blocks(
         }
     }
 
-    // This iterates through possibly dead expressions, but since `resolve` is infallible, it
-    // doesn't break anything.
+    // Update all versions to the merged version. This iterates through possibly dead expressions,
+    // but since `resolve` is infallible, it doesn't break anything.
     for expr in arena.iter_mut() {
         if let Expression::Variable(Variable { version, .. }) = expr {
             *version = merger.resolve(*version);
         }
     }
 
-    // Remove dead stack stores, i.e. definitions that weren't merged with any use during DFS. This
-    // is not the same thing as removing *post-optimization* dead stack stores, since this retains
-    // used definitions even if all uses were replaced with values.
+    // Remove dead stack stores, i.e. stack definitions that weren't merged with any use during DFS.
+    // This does not remove *all* dead stores, more specifically this leaves dead value stores, but
+    // this still provides an important guarantee: all dead value stores are never used.
+    //
+    // This is because `valueN` can ever be part of `valueM = expr` if `expr` is a non-trivial
+    // computation, which we consider to be useful to retain even if it's pure. The only kinds of
+    // trivial assignments loading values are `stackN = valueM`, which is guaranteed to be live
+    // after this, and `slotN = valueM`, which is considered a side effect.
+    //
+    // This means that there can't be a chain of unused values holding each other hostage that would
+    // require a DFS run to resolve, and instead we can just check whether a given `valueN` variable
+    // is ever mentioned more than once to remove all dead stores. This allows us to localize
+    // a heavy DFS step to this single pass and run much simpler logic to remove `valueN` later.
     statements.retain(|stmt| {
         if let Statement::Basic(BasicStatement::Assign { target, value }) = stmt
             && let Expression::Variable(Variable {
