@@ -11,3 +11,6 @@ thiserror = "2.0.12"
 
 [profile.release]
 debug = true
+
+[dev-dependencies]
+proptest = "1.7.0"
