@@ -8,6 +8,7 @@ mod arena;
 mod ast;
 mod dsu;
 mod high_level;
+mod interval_tree;
 mod preparse;
 mod stackless;
 mod structured;

@@ -13,17 +13,17 @@ struct Node {
 }
 
 impl IntervalTree {
-    pub fn new(max: usize, intervals: impl Iterator<Item = (Range<usize>, usize)>) -> Self {
+    pub fn new(max: usize, ranges: impl Iterator<Item = (usize, Range<usize>)>) -> Self {
         let mut nodes = vec![
             Node {
                 by_start: Vec::new(),
                 by_end: Vec::new()
             };
-            max.next_power_of_two()
+            max.next_power_of_two() + 1
         ];
 
-        for (range, id) in intervals {
-            if range.len() <= 1 {
+        for (id, range) in ranges {
+            if range.is_empty() {
                 continue;
             }
 
@@ -36,7 +36,7 @@ impl IntervalTree {
                 if range.end <= mid {
                     v *= 2;
                     node_range = node_range.start..mid;
-                } else if range.start >= mid {
+                } else if range.start > mid {
                     v = v * 2 + 1;
                     node_range = mid..node_range.end;
                 } else {
@@ -56,9 +56,11 @@ impl IntervalTree {
         Self { max, nodes }
     }
 
-    // Returns and removes the interval from the list. May yield an interval more than once, even
-    // across invocations after being removed, but always at most O(1) times.
-    pub fn extract_containing(&mut self, point: usize) -> impl Iterator<Item = usize> {
+    // Returns and removes the range from the list. May yield a range more than once, even across
+    // invocations after being removed, but always at most O(1) times.
+    pub fn drain_containing(&mut self, point: usize) -> impl Iterator<Item = usize> {
+        assert!(point < self.max, "out of bounds");
+
         let mut v = 1;
         let mut node_range = 0..self.max;
 
@@ -67,7 +69,7 @@ impl IntervalTree {
                 let mid = node_range.start.midpoint(node_range.end);
                 if point < mid {
                     if let Some((_, id)) =
-                        self.nodes[v].by_start.pop_if(|(start, _)| *start < point)
+                        self.nodes[v].by_start.pop_if(|(start, _)| *start <= point)
                     {
                         return Some(id);
                     }

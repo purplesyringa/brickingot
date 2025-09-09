@@ -1,5 +1,4 @@
 mod gap_tracker;
-mod interval_tree;
 mod solver;
 mod structurizer;
 

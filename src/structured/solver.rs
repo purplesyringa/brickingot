@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use super::gap_tracker::GapTracker;
-use super::interval_tree::IntervalTree;
+use crate::interval_tree::IntervalTree;
 use crate::stackless;
 use alloc::collections::BTreeMap;
 use core::ops::Range;
@@ -298,7 +298,10 @@ pub fn satisfy_block_requirements(
         match req.kind {
             RequirementKind::BackwardJump => {
                 backward_jumps_to[req.range.start].push(i);
-                backward_jumps.push((req.range.clone(), i));
+                // We query for segments strictly containing the query point, so step by 1 away on
+                // both sides (explicitly on the left and implicitly with `..` instead of `..=` on
+                // the right).
+                backward_jumps.push((i, req.range.start + 1..req.range.end));
             }
             RequirementKind::ForwardJump => {
                 forward_jumps_to[req.range.end].push(i);
@@ -406,7 +409,7 @@ impl Treeificator {
         // this block.
         if let Some(forward_gap) = self.forward_or_try_req_cover.first_gap(range.clone()) {
             let mut backward_jumps = core::mem::take(&mut self.backward_jumps);
-            for req_id in backward_jumps.extract_containing(forward_gap) {
+            for req_id in backward_jumps.drain_containing(forward_gap) {
                 if self.imps[req_id].is_some() {
                     // Either extracted twice or already removed.
                     continue;

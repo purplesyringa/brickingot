@@ -3,6 +3,8 @@ pub mod insn_stack_effect;
 
 use self::insn_control_flow::{InsnControlFlow, get_insn_control_flow};
 use self::insn_stack_effect::{InsnStackEffectError, get_insn_stack_effect};
+use crate::interval_tree::IntervalTree;
+use core::cell::Cell;
 use core::ops::Range;
 use noak::{
     error::DecodeError,
@@ -43,8 +45,8 @@ pub struct BasicBlock {
     /// instruction numbers).
     pub instruction_range: Range<u32>,
     /// The size of the stack on entry to this BB, counting double-width elements (`long` and
-    /// `double`) as two.
-    pub stack_size_at_start: usize,
+    /// `double`) as two. The `Cell` is an implementation detail only.
+    pub stack_size_at_start: Cell<usize>,
     /// The IDs of BBs the last instruction in this BB can jump to. This includes fallthrough, but
     /// excludes jumps to exception handlers.
     pub successors: Vec<usize>,
@@ -110,7 +112,7 @@ pub fn extract_basic_blocks(
         .enumerate()
         .map(|(bb_id, range)| BasicBlock {
             instruction_range: range[0]..range[1],
-            stack_size_at_start: 0,
+            stack_size_at_start: Cell::new(0),
             // `successors` can only be populated after BB boundaries have been decided, so this
             // stays in a sentinel-like state where only the trivial successor is recorded. We'll
             // remove it for divergent control flow a bit later.
@@ -150,42 +152,59 @@ pub fn extract_basic_blocks(
     // could just emit the error immediately if it does, but then we would emit a false positive if
     // the last BB is actually unreachable. Delay this decision until DFS.
 
-    // Fill EH info
-    let mut eh_entry_bb_ids = Vec::new();
-    for handler in code.exception_handlers() {
-        let [start_bb_id, end_bb_id, handler_bb_id] =
-            [handler.start(), handler.end(), handler.handler()].map(|offset| {
-                basic_blocks
-                    .binary_search_by_key(&offset.as_u32(), |bb| bb.instruction_range.start)
-                    .expect("EH not aligned to BB")
-            });
+    // Let's talk about the elephant in the room: we aren't using `StackMapTable`. We want to parse
+    // pre-Java 6 classfiles (even though we might fail to handle `jsr`), and so we need to support
+    // verification by type inference. But overall, it's simply unnecessary: type inference can be
+    // performed in linear time if we don't care about object types (and we don't, at least at this
+    // moment), and calculating stack sizes is trivial given the infrastructure we have.
+    // Additionally, using `StackMapTable` would mean either trusting it, potentially causing
+    // accidental panics if it doesn't agree with the bytecode, or verifying it, which would require
+    // quite a bit of code; and we'd rather parse than validate.
+    //
+    // This is a good time to talk about reachability. Verification by type checking requires *all*
+    // code to be correctly typed, while verification by type inference only requires *reachable*
+    // code to be valid. For example, `iconst_0; astore_0` is valid in unreachable code in old
+    // classfiles, but not new ones.
+    //
+    // Since we want to parse old classfiles, we have to track reachability and only generate IR
+    // from reachable code. We could skip this check for new classfiles, but emitting unreachable
+    // code can confuse future passes, so it makes sense to do this unconditionally.
+    //
+    // A particularly interesting case is exception handlers. An exception handler is only
+    // considered reachable in old classfiles if any instruction within its range is reachable (even
+    // `nop` works). This interpretation is reasonable for future IRs, with the exception of no-op
+    // `try` blocks possibly being optimized out in later passes. But that's a problem for future
+    // us, and this pass does not need to concern itself with it.
 
-        eh_entry_bb_ids.push(handler_bb_id);
-        basic_blocks[handler_bb_id]
-            .eh_entry_for_bb_ranges
-            .push(start_bb_id..end_bb_id);
-    }
+    // Populate exception handling ranges.
+    let mut exception_handlers = IntervalTree::new(
+        basic_blocks.len(),
+        code.exception_handlers().map(|handler| {
+            let [start_bb_id, end_bb_id, handler_bb_id] =
+                [handler.start(), handler.end(), handler.handler()].map(|offset| {
+                    basic_blocks
+                        .binary_search_by_key(&offset.as_u32(), |bb| bb.instruction_range.start)
+                        .expect("EH not aligned to BB")
+                });
 
-    // Calculate reachability and stack sizes via DFS. The first BB and all exception handling BBs
-    // are entrypoints. We also validate that all instruction ranges are correct and don't stop in
-    // the middle of an instruction.
+            // Also fill EH info as a side effect.
+            basic_blocks[handler_bb_id]
+                .eh_entry_for_bb_ranges
+                .push(start_bb_id..end_bb_id);
+
+            (handler_bb_id, start_bb_id..end_bb_id)
+        }),
+    );
+
+    // Calculate reachability and stack sizes via DFS, starting with the first BB. We also validate
+    // that all instruction ranges are correct and don't stop in the middle of an instruction.
     let mut dfs_stack = vec![0];
     let mut in_stack = vec![false; basic_blocks.len()];
     in_stack[0] = true;
-    for bb_id in eh_entry_bb_ids {
-        if !in_stack[bb_id] {
-            basic_blocks[bb_id].stack_size_at_start = 1;
-            dfs_stack.push(bb_id);
-            in_stack[bb_id] = true;
-        }
-        if basic_blocks[bb_id].stack_size_at_start != 1 {
-            return Err(BytecodePreparsingError::InconsistentStackSize);
-        }
-    }
     while let Some(bb_id) = dfs_stack.pop() {
         let bb = &basic_blocks[bb_id];
 
-        let mut stack_size_at_end = bb.stack_size_at_start as isize;
+        let mut stack_size_at_end = bb.stack_size_at_start.get() as isize;
         let mut reached_end_of_stream = true;
 
         for row in code.raw_instructions_from(Index::new(bb.instruction_range.start))? {
@@ -208,21 +227,27 @@ pub fn extract_basic_blocks(
             return Err(BytecodePreparsingError::CodeFallthrough);
         }
 
-        for i in 0..basic_blocks[bb_id].successors.len() {
-            // This is stupid, but I don't want to fight borrowck here, and adding cells to the API
-            // sounds even worse.
-            let succ_bb_id = basic_blocks[bb_id].successors[i];
+        let successors = basic_blocks[bb_id]
+            .successors
+            .iter()
+            .map(|succ_bb_id| (*succ_bb_id, stack_size_at_end))
+            .chain(
+                exception_handlers
+                    .drain_containing(bb_id)
+                    .map(|handler_bb_id| (handler_bb_id, 1)),
+            );
 
+        for (succ_bb_id, stack_size) in successors {
             if succ_bb_id == basic_blocks.len() {
                 return Err(BytecodePreparsingError::CodeFallthrough);
             }
 
             if !in_stack[succ_bb_id] {
-                basic_blocks[succ_bb_id].stack_size_at_start = stack_size_at_end;
+                basic_blocks[succ_bb_id].stack_size_at_start.set(stack_size);
                 dfs_stack.push(succ_bb_id);
                 in_stack[succ_bb_id] = true;
             }
-            if basic_blocks[succ_bb_id].stack_size_at_start != stack_size_at_end {
+            if basic_blocks[succ_bb_id].stack_size_at_start.get() != stack_size {
                 return Err(BytecodePreparsingError::InconsistentStackSize);
             }
         }
@@ -235,7 +260,7 @@ pub fn extract_basic_blocks(
         if !in_stack {
             *bb = BasicBlock {
                 instruction_range: 0..0,
-                stack_size_at_start: 0,
+                stack_size_at_start: Cell::new(0),
                 successors: Vec::new(),
                 eh_entry_for_bb_ranges: Vec::new(),
             };
