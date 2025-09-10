@@ -12,6 +12,7 @@ use crate::ast::{BasicStatement, Expression, Str, Variable, VariableName, Variab
 use crate::preparse;
 use crate::preparse::insn_stack_effect::is_type_descriptor_double_width;
 use core::fmt::{self, Display};
+use core::ops::Range;
 use noak::{
     MStr,
     descriptor::MethodDescriptor,
@@ -96,8 +97,7 @@ impl<'code> DebugIr<'code> for Statement {
 
 #[derive(Clone, Debug)]
 pub struct ExceptionHandler<'code> {
-    pub start: usize,
-    pub end: usize,
+    pub active_range: Range<usize>,
     pub target: usize,
     pub class: Option<Str<'code>>,
     pub stack0_exception0_copy_versions: Option<(ExprId, ExprId)>,
@@ -107,9 +107,8 @@ impl Display for ExceptionHandler<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "try {{ {}..{} }} catch ({}) {{ goto {}; }}",
-            self.start,
-            self.end,
+            "try {{ {:?} }} catch ({}) {{ goto {}; }}",
+            self.active_range,
             self.class
                 .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
             self.target,
@@ -435,13 +434,15 @@ pub fn build_stackless_ir<'code>(
             continue;
         }
 
+        let start = addresses_and_statements[start_index].1;
+        let end = if end_index == addresses_and_statements.len() {
+            statements.len()
+        } else {
+            addresses_and_statements[end_index].1
+        };
+
         exception_handlers.push(ExceptionHandler {
-            start: addresses_and_statements[start_index].1,
-            end: if end_index == addresses_and_statements.len() {
-                statements.len()
-            } else {
-                addresses_and_statements[end_index].1
-            },
+            active_range: start..end,
             target: address_to_stmt_index(handler.handler().as_u32() as usize),
             class: match handler.catch_type() {
                 Some(catch_type) => Some(Str(pool.retrieve(catch_type)?.name)),

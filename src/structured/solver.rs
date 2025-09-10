@@ -131,8 +131,8 @@ pub fn compute_block_requirements(
         .into_iter()
         .enumerate()
     {
-        let with_backward_jump = if handler.end == handler.target {
-            // If `handler.target > handler.end`, `treeify_try_blocks` would have extended `end`.
+        let with_backward_jump = if handler.active_range.end == handler.target {
+            // If `target > end`, `treeify_try_blocks` would have extended `end`.
             None
         } else {
             // If the handler is located before or within the `try` block, we have to emit a jump.
@@ -151,7 +151,7 @@ pub fn compute_block_requirements(
             let jump_req_id = requirements.len();
             keys.push(RequirementKey::BackwardCatch { index });
             requirements.push(BlockRequirement {
-                range: handler.target..handler.end,
+                range: handler.target..handler.active_range.end,
                 kind: RequirementKind::BackwardJump,
             });
             Some(jump_req_id)
@@ -159,7 +159,7 @@ pub fn compute_block_requirements(
 
         keys.push(RequirementKey::Try { index });
         requirements.push(BlockRequirement {
-            range: handler.start..handler.end,
+            range: handler.active_range.clone(),
             kind: RequirementKind::Try { with_backward_jump },
         });
     }
@@ -181,10 +181,10 @@ fn treeify_try_blocks<'code>(
         // can fallthrough into the handler without any explicit jumps. If the range contains more
         // statements than necessary, we'll sort it out later with synthetic variables.
         //
-        // We could also emit `handler.start..handler.end` and a forward jump, but it's not yet
-        // clear if that's any better, since that might be harder to optimize.
-        let mut new_start = handler.start;
-        let mut new_end = handler.end.max(handler.target);
+        // We could also emit `start..end` and a forward jump, but it's not yet clear if that's any
+        // better, since that might be harder to optimize.
+        let mut new_start = handler.active_range.start;
+        let mut new_end = handler.active_range.end.max(handler.target);
 
         // Find the subset of ranges intersecting `new_start..new_end`. Unfortunately, this has to
         // be hacky without cursors.
@@ -202,8 +202,7 @@ fn treeify_try_blocks<'code>(
         }
 
         active_ranges.insert(new_start, new_end);
-        handler.start = new_start;
-        handler.end = new_end;
+        handler.active_range = new_start..new_end;
     }
 
     handlers

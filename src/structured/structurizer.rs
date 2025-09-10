@@ -143,7 +143,7 @@ impl<'code> Structurizer<'_, 'code> {
                         Catch {
                             class: handler.class,
                             children,
-                            active_range: handler.start..handler.end,
+                            active_range: handler.active_range.clone(),
                         }
                     })
                     .collect(),
