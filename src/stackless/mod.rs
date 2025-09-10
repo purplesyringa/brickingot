@@ -426,23 +426,28 @@ pub fn build_stackless_ir<'code>(
         // `stop_pc` don't necessarily correspond to any existing basic block boundary! Look for the
         // region of present basic blocks that fit within the range.
 
-        let start_index = addresses_and_statements
+        let start_pos = addresses_and_statements
             .partition_point(|(address, _)| *address < handler.start().as_u32());
-        let end_index = addresses_and_statements
+        let end_pos = addresses_and_statements
             .partition_point(|(address, _)| *address < handler.end().as_u32());
-        if start_index == addresses_and_statements.len() || end_index <= start_index {
+        if start_pos == addresses_and_statements.len() || end_pos <= start_pos {
             continue;
         }
 
-        let start = addresses_and_statements[start_index].1;
-        let end = if end_index == addresses_and_statements.len() {
+        // `start_index` and `end_index` may compare equal, which indicates that the `try` body is
+        // empty, but that's not a good reason to remove the handler. Although we know this means
+        // `catch` is never executed, removing the exception handler can cause more code to become
+        // *syntactically* unreachable, which violates our assumption that all code in the IR is
+        // syntactically reachable.
+        let start_index = addresses_and_statements[start_pos].1;
+        let end_index = if end_pos == addresses_and_statements.len() {
             statements.len()
         } else {
-            addresses_and_statements[end_index].1
+            addresses_and_statements[end_pos].1
         };
 
         exception_handlers.push(ExceptionHandler {
-            active_range: start..end,
+            active_range: start_index..end_index,
             target: address_to_stmt_index(handler.handler().as_u32() as usize),
             class: match handler.catch_type() {
                 Some(catch_type) => Some(Str(pool.retrieve(catch_type)?.name)),

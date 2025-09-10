@@ -48,7 +48,7 @@ pub enum Statement<'code> {
 pub struct Catch<'code> {
     pub class: Option<Str<'code>>,
     pub children: Vec<Statement<'code>>,
-    pub active_range: Range<usize>,
+    pub active_range: Range<usize>, // can be empty in degenerate cases
 }
 
 impl<'code> DebugIr<'code> for Statement<'code> {

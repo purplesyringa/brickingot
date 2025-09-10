@@ -107,6 +107,18 @@ fn decompile_method<'code>(
     // this won't affect other statements.
     let mut arena: Arena<'code> = Arena::new();
 
+    // An overarching assumption made by many passes is that all code is reachable. For example,
+    // we expect `break` and `continue` to be the last statement in a block. But "reachable" is hard
+    // to define rigorously -- is the body of `if (1 == 2)` reachable? -- yet important to define
+    // consistently to make sure passes don't make incompatible assumptions.
+    //
+    // Our definition of reachability is purely syntactic. We treat both `if` branches as reachable
+    // and assume all conditions are non-trivial. This includes even `if (1)`, as long as `1`
+    // appeared as a constant in bytecode (rather than being inserted implicitly). The `catch` body
+    // is always considered reachable, even if the `try` body contains no throwing instructions or
+    // is entirely empty. This produces good results as long as compilers don't emit control flow
+    // that didn't exist in source.
+
     // We delay IR construction for a bit to reduce the number of (usually slow) recursive rewrites.
     // Everything that can be quickly computed from the bytecode should be done beforehand. This
     // mostly covers control flow analysis and computing stack sizes at each instruction, both of
