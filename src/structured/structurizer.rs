@@ -24,7 +24,7 @@ pub fn structure_control_flow<'code>(
         key
     });
 
-    let mut try_block_to_handlers: FxHashMap<usize, Vec<usize>> = FxHashMap::default();
+    let mut try_block_to_handler: FxHashMap<usize, usize> = FxHashMap::default();
     let mut jump_implementations = FxHashMap::default();
     let mut has_dispatch = false;
     for (key, imp) in keys.into_iter().zip(implementations) {
@@ -32,10 +32,10 @@ pub fn structure_control_flow<'code>(
             let RequirementKey::Try { index } = key else {
                 panic!("unexpected key for try implementation");
             };
-            try_block_to_handlers
-                .entry(block_id)
-                .or_default()
-                .push(index);
+            assert!(
+                try_block_to_handler.insert(block_id, index).is_none(),
+                "multiple handlers per try block"
+            );
         } else {
             if let RequirementKey::Dispatch { .. } = key {
                 has_dispatch = true;
@@ -47,7 +47,7 @@ pub fn structure_control_flow<'code>(
     let mut structurizer = Structurizer {
         arena,
         stackless_ir,
-        try_block_to_handlers,
+        try_block_to_handler,
         jump_implementations,
         next_block_id,
         unique_selector_id: arena.alloc(Expression::Null), // doesn't matter, just a unique ID
@@ -73,7 +73,7 @@ pub fn structure_control_flow<'code>(
 struct Structurizer<'arena, 'code> {
     arena: &'arena Arena<'code>,
     stackless_ir: stackless::Program<'code>,
-    try_block_to_handlers: FxHashMap<usize, Vec<usize>>,
+    try_block_to_handler: FxHashMap<usize, usize>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
     next_block_id: usize,
     unique_selector_id: ExprId,
@@ -101,53 +101,52 @@ impl<'code> Structurizer<'_, 'code> {
                 children: self.emit_tree(children),
             }),
 
-            Node::Try { id, children } => out.push(Statement::Try {
-                children: self.emit_tree(children),
-                catches: self
-                    .try_block_to_handlers
+            Node::Try { id, children } => {
+                let handler = self
+                    .try_block_to_handler
                     .remove(&id)
-                    .expect("try block without catches")
-                    .into_iter()
-                    .map(|handler| {
-                        let key = RequirementKey::BackwardCatch { index: handler };
-                        let handler = self.stackless_ir.exception_handlers[handler].clone();
+                    .expect("try block without catch");
 
-                        let mut children = Vec::new();
-                        if let Some((stack0_version, exception0_version)) =
-                            handler.stack0_exception0_copy_versions
-                        {
-                            children.push(Statement::Basic {
-                                index: None,
-                                stmt: BasicStatement::Assign {
-                                    target: self.arena.alloc(Expression::Variable(Variable {
-                                        name: VariableName {
-                                            id: 0,
-                                            namespace: VariableNamespace::Stack,
-                                        },
-                                        version: stack0_version,
-                                    })),
-                                    value: self.arena.alloc(Expression::Variable(Variable {
-                                        name: VariableName {
-                                            id: 0,
-                                            namespace: VariableNamespace::Exception,
-                                        },
-                                        version: exception0_version,
-                                    })),
+                let key = RequirementKey::BackwardCatch { index: handler };
+                let handler = self.stackless_ir.exception_handlers[handler].clone();
+
+                let mut catch_children = Vec::new();
+                if let Some((stack0_version, exception0_version)) =
+                    handler.stack0_exception0_copy_versions
+                {
+                    catch_children.push(Statement::Basic {
+                        index: None,
+                        stmt: BasicStatement::Assign {
+                            target: self.arena.alloc(Expression::Variable(Variable {
+                                name: VariableName {
+                                    id: 0,
+                                    namespace: VariableNamespace::Stack,
                                 },
-                            });
-                        }
-                        if self.jump_implementations.contains_key(&key) {
-                            self.emit_jump(key, &mut children);
-                        }
+                                version: stack0_version,
+                            })),
+                            value: self.arena.alloc(Expression::Variable(Variable {
+                                name: VariableName {
+                                    id: 0,
+                                    namespace: VariableNamespace::Exception,
+                                },
+                                version: exception0_version,
+                            })),
+                        },
+                    });
+                }
+                if self.jump_implementations.contains_key(&key) {
+                    self.emit_jump(key, &mut catch_children);
+                }
 
-                        Catch {
-                            class: handler.class,
-                            children,
-                            active_range: handler.active_range.clone(),
-                        }
-                    })
-                    .collect(),
-            }),
+                out.push(Statement::Try {
+                    children: self.emit_tree(children),
+                    catches: vec![Catch {
+                        class: handler.class,
+                        children: catch_children,
+                        active_range: handler.active_range.clone(),
+                    }],
+                });
+            }
 
             Node::DispatchSwitch { dispatch_targets } => {
                 // Dispatch targets can never point to the statement after the switch, since such
