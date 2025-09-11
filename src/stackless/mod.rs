@@ -358,6 +358,19 @@ pub fn build_stackless_ir<'code>(
     let mut unresolved_uses = machine.unresolved_uses;
     let mut statements = machine.statements;
 
+    // The core of these algorithms is DFS over nodes `(bb_id, var)`, which denotes that we're
+    // interested in finding definitions of `var` visible at the entry to `bb_id`, and edges
+    // represent that information needs to be integrated from another node. This makes it the only
+    // quadratic piece of the decompiler.
+    //
+    // In practice, the performance is better than what you'd expect from such worst-case time
+    // complexity for reasons described in the comments of individual modules.
+    //
+    // Still, it begs the question: why are there non-linear algorithms at all? The answer is
+    // irreducible control flow: we want to track use-def chains in complex CFGs to produce readable
+    // output. Of course, realistic programs typically have reducible control flow, but realistic
+    // programs are also well-formed enough that the performance of these passes is quite good, so
+    // it doesn't make much sense to provide a separate quasilinear implementation.
     link_stack_across_basic_blocks(arena, &ir_basic_blocks, &mut unresolved_uses);
     merge_versions_across_basic_blocks(
         arena,

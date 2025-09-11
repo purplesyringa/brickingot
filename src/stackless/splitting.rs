@@ -1,3 +1,15 @@
+// Merge definitions with uses that see those definitions.
+//
+// In a nutshell, this is implemented via DFS over vertices of kind `(bb_id, var)`, which should be
+// read as "definitions of `var` visible at the beginning of `bb_id`" (the edges are generated to
+// follow this rule). Each connected subgraph is essentially associated with a unique `version`
+// computed with union-find.
+//
+// The worst-case time complexity is O(n_basic_blocks * n_variables), which is quadratic just like
+// linking. But since linking removes a lot of stack variables in favor of `valueN`, and this pass
+// only merges `stackN` and `slotN` use-def chains, this is closer to O(n_basic_blocks * n_locals).
+// While this can get quite large, it's reasonably fast in practice.
+
 use super::{BasicBlock, Statement, abstract_eval::UnresolvedUse};
 use crate::arena::{Arena, ExprId};
 use crate::ast::{BasicStatement, Expression, Variable, VariableName, VariableNamespace};
