@@ -128,6 +128,11 @@ pub enum StacklessIrError {
     },
 }
 
+struct Label {
+    address: u32,
+    stmt_index: usize,
+}
+
 pub fn build_stackless_ir<'code>(
     arena: &mut Arena<'code>,
     pool: &ConstantPool<'code>,
@@ -265,7 +270,7 @@ pub fn build_stackless_ir<'code>(
     );
 
     // Fixup jump destinations
-    let mut addresses_and_statements = Vec::new();
+    let mut labels = Vec::new();
     let mut transitions = Vec::new();
     let mut stmt_index = 0;
     statements.retain(|stmt| match stmt {
@@ -274,10 +279,10 @@ pub fn build_stackless_ir<'code>(
             true
         }
         Statement::Label { bb_id } => {
-            addresses_and_statements.push((
-                preparse_basic_blocks[*bb_id].instruction_range.start,
+            labels.push(Label {
+                address: preparse_basic_blocks[*bb_id].instruction_range.start,
                 stmt_index,
-            ));
+            });
             false
         }
         Statement::Jump { .. } | Statement::Switch { .. } => {
@@ -286,20 +291,25 @@ pub fn build_stackless_ir<'code>(
             true
         }
     });
-    let address_to_stmt_index = |address: usize| {
-        let index = addresses_and_statements
-            .binary_search_by_key(&address, |(other_address, _)| *other_address as usize)
+    labels.push(Label {
+        address: u32::MAX,
+        stmt_index: statements.len(),
+    });
+
+    let address_to_stmt_index = |address: u32| -> usize {
+        let index = labels
+            .binary_search_by_key(&address, |label| label.address)
             .expect("invalid jump destination");
-        addresses_and_statements[index].1
+        labels[index].stmt_index
     };
     for stmt_index in transitions {
         match &mut statements[stmt_index] {
-            Statement::Jump { target, .. } => *target = address_to_stmt_index(*target),
+            Statement::Jump { target, .. } => *target = address_to_stmt_index(*target as u32),
             Statement::Switch { arms, default, .. } => {
                 for (_, target) in arms {
-                    *target = address_to_stmt_index(*target);
+                    *target = address_to_stmt_index(*target as u32);
                 }
-                *default = address_to_stmt_index(*default);
+                *default = address_to_stmt_index(*default as u32);
             }
             _ => unreachable!(),
         }
@@ -324,11 +334,9 @@ pub fn build_stackless_ir<'code>(
         // `stop_pc` don't necessarily correspond to any existing basic block boundary! Look for the
         // region of present basic blocks that fit within the range.
 
-        let start_pos = addresses_and_statements
-            .partition_point(|(address, _)| *address < handler.start().as_u32());
-        let end_pos = addresses_and_statements
-            .partition_point(|(address, _)| *address < handler.end().as_u32());
-        if start_pos == addresses_and_statements.len() || end_pos <= start_pos {
+        let start_label = labels.partition_point(|label| label.address < handler.start().as_u32());
+        let end_label = labels.partition_point(|label| label.address < handler.end().as_u32());
+        if end_label <= start_label {
             continue;
         }
 
@@ -337,16 +345,12 @@ pub fn build_stackless_ir<'code>(
         // `catch` is never executed, removing the exception handler can cause more code to become
         // *syntactically* unreachable, which violates our assumption that all code in the IR is
         // syntactically reachable.
-        let start_index = addresses_and_statements[start_pos].1;
-        let end_index = if end_pos == addresses_and_statements.len() {
-            statements.len()
-        } else {
-            addresses_and_statements[end_pos].1
-        };
+        let start_index = labels[start_label].stmt_index;
+        let end_index = labels[end_label].stmt_index;
 
         exception_handlers.push(ExceptionHandler {
             active_range: start_index..end_index,
-            target: address_to_stmt_index(handler.handler().as_u32() as usize),
+            target: address_to_stmt_index(handler.handler().as_u32()),
             class: match handler.catch_type() {
                 Some(catch_type) => Some(Str(pool.retrieve(catch_type)?.name)),
                 None => None,

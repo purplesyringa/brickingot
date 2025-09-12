@@ -95,10 +95,11 @@ struct BasicBlock {
 }
 
 struct ExceptionHandlerBlock {
+    /// The ranges of basic blocks that can jump to the start of this BB on exception.
     eh_entry_for_bb_ranges: Vec<Range<usize>>,
-    // stack0 in implicit `stack0 = exception0`.
+    /// stack0 in implicit `stack0 = exception0`.
     stack0_def: ExprId,
-    // exception0 in implicit `stack0 = exception0`.
+    /// exception0 in implicit `stack0 = exception0`.
     exception0_use: ExprId,
     stack0_exception0_copy_is_necessary: bool,
 }
