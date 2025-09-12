@@ -124,7 +124,7 @@ pub struct BasicBlock {
 }
 
 pub struct ExceptionHandlerBlock {
-    pub throw_sites: Vec<usize>, // BBs that can enter this BB on throw
+    pub eh_entry_for_bb_ranges: Vec<Range<usize>>,
     // stack0 in implicit `stack0 = exception0`.
     pub stack0_def: ExprId,
     // exception0 in implicit `stack0 = exception0`.
@@ -148,7 +148,7 @@ pub fn build_stackless_ir<'code>(
     code: &Code<'code>,
     method_descriptor: &MethodDescriptor<'code>,
     is_static: bool,
-    preparse_basic_blocks: Vec<preparse::BasicBlock>,
+    mut preparse_basic_blocks: Vec<preparse::BasicBlock>,
 ) -> Result<Program<'code>, StacklessIrError> {
     // This IR, and more specifically the nuances of optimizations we apply to it, is a bit weird.
     //
@@ -277,7 +277,7 @@ pub fn build_stackless_ir<'code>(
 
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
     // bytecode and we'd rather not worry about that.
-    for (bb_id, bb) in preparse_basic_blocks.iter().enumerate() {
+    for (bb_id, bb) in preparse_basic_blocks.iter_mut().enumerate() {
         if bb.instruction_range.end == 0 {
             // Skip empty BBs -- don't let them emit out-of-order labels.
             continue;
@@ -289,16 +289,8 @@ pub fn build_stackless_ir<'code>(
         ir_basic_blocks[bb_id].eh = if bb.eh_entry_for_bb_ranges.is_empty() {
             None
         } else {
-            // XXX: This gets quadratic and worse -- how do we fix this?
-            let mut throw_sites = Vec::new();
-            for range in &bb.eh_entry_for_bb_ranges {
-                throw_sites.extend(range.clone());
-            }
-            throw_sites.sort();
-            throw_sites.dedup();
-
             Some(ExceptionHandlerBlock {
-                throw_sites,
+                eh_entry_for_bb_ranges: core::mem::take(&mut bb.eh_entry_for_bb_ranges),
                 stack0_def: arena.alloc_with(|version| {
                     Expression::Variable(Variable {
                         name: VariableName {

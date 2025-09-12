@@ -10,10 +10,12 @@
 // only merges `stackN` and `slotN` use-def chains, this is closer to O(n_basic_blocks * n_locals).
 // While this can get quite large, it's reasonably fast in practice.
 
-use super::{BasicBlock, Statement, abstract_eval::UnresolvedUse};
+use super::{BasicBlock, ExceptionHandlerBlock, Statement, abstract_eval::UnresolvedUse};
 use crate::arena::{Arena, ExprId};
 use crate::ast::{BasicStatement, Expression, Variable, VariableName, VariableNamespace};
 use crate::dsu::DisjointSetUnion;
+use alloc::collections::BTreeMap;
+use core::cell::Cell;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 
@@ -33,10 +35,13 @@ enum Predicate {
     Within,
 }
 
+type TryRangeMap = BTreeMap<usize, (usize, ExprId)>; // start -> (end, use_expr_id)
+
 struct Merger<'a> {
-    basic_blocks: &'a mut [BasicBlock],
+    basic_blocks: &'a [BasicBlock],
     dsu: DisjointSetUnion,
     resolved_uses: FxHashMap<(usize, VariableName), ExprId>,
+    try_ranges_per_variable: FxHashMap<VariableName, TryRangeMap>,
     tasks: Vec<UseDefTask>,
 }
 
@@ -46,6 +51,7 @@ impl<'a> Merger<'a> {
             basic_blocks,
             dsu: DisjointSetUnion::new(dsu_len),
             resolved_uses: FxHashMap::default(),
+            try_ranges_per_variable: FxHashMap::default(),
             tasks: Vec::new(),
         }
     }
@@ -60,92 +66,153 @@ impl<'a> Merger<'a> {
             predicate: Predicate::AtStart,
         });
 
-        while let Some(UseDefTask {
+        while let Some(task) = self.tasks.pop() {
+            self.handle_task(task);
+        }
+    }
+
+    fn handle_task(&mut self, task: UseDefTask) {
+        let UseDefTask {
             bb_id,
             name,
             use_expr_id,
             predicate,
-        }) = self.tasks.pop()
-        {
-            // `resolved_uses` stores *some* valid representative of the connected component.
-            match self.resolved_uses.entry((bb_id, name)) {
-                Entry::Occupied(entry) => {
-                    self.dsu.merge(use_expr_id.0, entry.get().0);
-                    continue;
-                }
-                Entry::Vacant(entry) => {
-                    // DFS will merge all reachable definitions with `use_expr_id`, so that's
-                    // a valid representative for all further iterations.
-                    entry.insert(use_expr_id);
-                }
+        } = task;
+
+        // `resolved_uses` stores *some* valid representative of the connected component.
+        match self.resolved_uses.entry((bb_id, name)) {
+            Entry::Occupied(entry) => {
+                self.dsu.merge(use_expr_id.0, entry.get().0);
+                return;
             }
-
-            if let Predicate::Within = predicate {
-                assert_eq!(
-                    name.namespace,
-                    VariableNamespace::Slot,
-                    "can only recognize slot assignments for Within predicate",
-                );
-                if let Some(defs) = self.basic_blocks[bb_id].sealed_bb.slot_defs.get(&name) {
-                    for def_expr_id in defs {
-                        self.dsu.merge(use_expr_id.0, def_expr_id.0);
-                    }
-                }
+            Entry::Vacant(entry) => {
+                // DFS will merge all reachable definitions with `use_expr_id`, so that's a valid
+                // representative for all further iterations.
+                entry.insert(use_expr_id);
             }
+        }
 
-            if let Some(eh) = &self.basic_blocks[bb_id].eh {
-                if name.namespace == VariableNamespace::Stack && name.id == 0 {
-                    self.dsu.merge(use_expr_id.0, eh.stack0_def.0);
-                } else {
-                    // Exception handlers can see `slotN` definitions from the throw site, but not
-                    // `stackN` (since stack is cleared on entry) or `valueN` (since it can only be
-                    // inlined across BBs due to stack reads).
-                    assert_eq!(
-                        name.namespace,
-                        VariableNamespace::Slot,
-                        "exception handler cannot capture {}",
-                        name
-                    );
-
-                    // This includes even definitions that are overwritten by the end of the BB,
-                    // since an exception may be thrown before the reassignment.
-                    for pred_bb_id in &eh.throw_sites {
-                        self.tasks.push(UseDefTask {
-                            bb_id: *pred_bb_id,
-                            name,
-                            use_expr_id,
-                            predicate: Predicate::Within,
-                        });
-                    }
-                }
-            }
-
-            for pred_bb_id in &self.basic_blocks[bb_id].predecessors {
-                if let Some(def) = self.basic_blocks[*pred_bb_id]
-                    .sealed_bb
-                    .active_defs_at_end
-                    .get(&name)
-                {
-                    let def_expr_id = def.def_expr_id.expect("def_expr_id not set for variable");
+        if let Predicate::Within = predicate {
+            assert_eq!(
+                name.namespace,
+                VariableNamespace::Slot,
+                "can only recognize slot assignments for Within predicate",
+            );
+            if let Some(defs) = self.basic_blocks[bb_id].sealed_bb.slot_defs.get(&name) {
+                for def_expr_id in defs {
                     self.dsu.merge(use_expr_id.0, def_expr_id.0);
-                    if let Some(var) = def.copy_stack_from_predecessor {
-                        // Now that we know the store is live, use what it loads from.
-                        self.tasks.push(UseDefTask {
-                            bb_id,
-                            name: var.name,
-                            use_expr_id: var.version,
-                            predicate: Predicate::AtStart,
-                        });
-                    }
-                } else {
+                }
+            }
+        }
+
+        if let Some(eh) = &self.basic_blocks[bb_id].eh {
+            self.handle_eh_task(name, use_expr_id, eh);
+        }
+
+        for pred_bb_id in &self.basic_blocks[bb_id].predecessors {
+            if let Some(def) = self.basic_blocks[*pred_bb_id]
+                .sealed_bb
+                .active_defs_at_end
+                .get(&name)
+            {
+                let def_expr_id = def.def_expr_id.expect("def_expr_id not set for variable");
+                self.dsu.merge(use_expr_id.0, def_expr_id.0);
+                if let Some(var) = def.copy_stack_from_predecessor {
+                    // Now that we know the store is live, use what it loads from.
                     self.tasks.push(UseDefTask {
-                        bb_id: *pred_bb_id,
-                        name,
-                        use_expr_id,
+                        bb_id,
+                        name: var.name,
+                        use_expr_id: var.version,
                         predicate: Predicate::AtStart,
                     });
                 }
+            } else {
+                self.tasks.push(UseDefTask {
+                    bb_id: *pred_bb_id,
+                    name,
+                    use_expr_id,
+                    predicate: Predicate::AtStart,
+                });
             }
+        }
+    }
+
+    fn handle_eh_task(
+        &mut self,
+        name: VariableName,
+        use_expr_id: ExprId,
+        eh: &ExceptionHandlerBlock,
+    ) {
+        if name.namespace == VariableNamespace::Stack && name.id == 0 {
+            self.dsu.merge(use_expr_id.0, eh.stack0_def.0);
+            return;
+        }
+
+        // Exception handlers can see `slotN` definitions from the throw site, but not `stackN`
+        // (since stack is cleared on entry) or `valueN` (since it can only be inlined across BBs
+        // due to stack reads).
+        assert_eq!(
+            name.namespace,
+            VariableNamespace::Slot,
+            "exception handler cannot capture {}",
+            name
+        );
+
+        // We want to merge `use_expr_id` with *all* definitions of the same variable within `try`
+        // blocks that use this BB as the handler. In other words, we want to add a task for each BB
+        // contained within any range in `eh_entry_for_bb_ranges`. But that would be superquadratic,
+        // so to maintain reasonable time complexity, we maintain a per-variable auxiliary range map
+        // that contains information about BB ranges that have already been handled.
+        let map = self.try_ranges_per_variable.entry(name).or_default();
+
+        for bb_range in &eh.eh_entry_for_bb_ranges {
+            if bb_range.is_empty() {
+                continue;
+            }
+
+            // Find and extract all ranges that intersect with `bb_range`.
+            let it_start = map
+                .range(..bb_range.start)
+                .last()
+                .map(|(start, _)| *start)
+                .unwrap_or(0);
+            let intersecting_ranges = map
+                .extract_if(it_start..bb_range.end, move |start, (end, _)| {
+                    *start < bb_range.end && *end > bb_range.start
+                });
+
+            // Merge versions with intersecting ranges and get a list of uncovered ranges.
+            let it_bb = Cell::new(bb_range.start);
+            let mut new_range = bb_range.clone();
+            let uncovered_ranges = intersecting_ranges
+                .map(|(start, (end, range_expr_id))| {
+                    new_range = new_range.start.min(start)..new_range.end.max(end);
+                    let uncovered_range = it_bb.get()..start;
+                    self.dsu.merge(use_expr_id.0, range_expr_id.0);
+                    it_bb.set(end);
+                    uncovered_range
+                })
+                .chain(core::iter::once_with(|| it_bb.get()..bb_range.end));
+
+            // Add a task for each uncovered BB.
+            for uncovered_bb_id in uncovered_ranges.flatten() {
+                self.tasks.push(UseDefTask {
+                    bb_id: uncovered_bb_id,
+                    name,
+                    use_expr_id,
+                    // We aren't merely looking for definitions live at the end of the BB, since
+                    // an exception may be thrown before the reassignment, hence the predicate is
+                    // "within".
+                    predicate: Predicate::Within,
+                });
+            }
+
+            // Mark the whole range as covered.
+            assert!(
+                map.insert(new_range.start, (new_range.end, use_expr_id))
+                    .is_none(),
+                "corrupted range map",
+            );
         }
     }
 
