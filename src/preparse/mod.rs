@@ -3,6 +3,7 @@ pub mod insn_stack_effect;
 
 use self::insn_control_flow::{InsnControlFlow, get_insn_control_flow};
 use self::insn_stack_effect::{InsnStackEffectError, get_insn_stack_effect};
+use crate::ast::Str;
 use crate::interval_tree::IntervalTree;
 use core::cell::Cell;
 use core::ops::Range;
@@ -50,14 +51,24 @@ pub struct BasicBlock {
     /// The IDs of BBs the last instruction in this BB can jump to. This includes fallthrough, but
     /// excludes jumps to exception handlers.
     pub successors: Vec<usize>,
-    /// The ranges of basic blocks that can jump to the start of this BB on exception.
-    pub eh_entry_for_bb_ranges: Vec<Range<usize>>,
 }
 
-pub fn extract_basic_blocks(
-    cpool: &ConstantPool<'_>,
-    code: &Code<'_>,
-) -> Result<Vec<BasicBlock>, BytecodePreparsingError> {
+pub struct Program<'code> {
+    pub basic_blocks: Vec<BasicBlock>,
+    pub exception_handlers: Vec<ExceptionHandler<'code>>,
+}
+
+pub struct ExceptionHandler<'code> {
+    pub active_range: Range<usize>,
+    pub target: usize,
+    pub class: Option<Str<'code>>,
+    pub is_reachable: bool,
+}
+
+pub fn extract_basic_blocks<'code>(
+    cpool: &ConstantPool<'code>,
+    code: &Code<'code>,
+) -> Result<Program<'code>, BytecodePreparsingError> {
     // Insert splits after every explicit jump, at each jump target, at each exception handler, and
     // at `try` boundaries. Also at the end and the beginning for implementation simplicity. Save
     // all non-trivial transitions to build the CFG without reparsing the instructions.
@@ -117,7 +128,6 @@ pub fn extract_basic_blocks(
             // stays in a sentinel-like state where only the trivial successor is recorded. We'll
             // remove it for divergent control flow a bit later.
             successors: vec![bb_id + 1],
-            eh_entry_for_bb_ranges: Vec::new(),
         })
         .collect();
 
@@ -152,6 +162,27 @@ pub fn extract_basic_blocks(
     // could just emit the error immediately if it does, but then we would emit a false positive if
     // the last BB is actually unreachable. Delay this decision until DFS.
 
+    // Populate exception handling ranges.
+    let mut exception_handlers = Vec::new();
+    for handler in code.exception_handlers() {
+        let [start_bb_id, end_bb_id, handler_bb_id] =
+            [handler.start(), handler.end(), handler.handler()].map(|offset| {
+                basic_blocks
+                    .binary_search_by_key(&offset.as_u32(), |bb| bb.instruction_range.start)
+                    .expect("EH not aligned to BB")
+            });
+
+        exception_handlers.push(ExceptionHandler {
+            active_range: start_bb_id..end_bb_id,
+            target: handler_bb_id,
+            class: match handler.catch_type() {
+                Some(catch_type) => Some(Str(cpool.retrieve(catch_type)?.name)),
+                None => None,
+            },
+            is_reachable: false,
+        });
+    }
+
     // Let's talk about the elephant in the room: we aren't using `StackMapTable`. We want to parse
     // pre-Java 6 classfiles (even though we might fail to handle `jsr`), and so we need to support
     // verification by type inference. But overall, it's simply unnecessary: type inference can be
@@ -176,31 +207,18 @@ pub fn extract_basic_blocks(
     // `try` blocks possibly being optimized out in later passes. But that's a problem for future
     // us, and this pass does not need to concern itself with it.
 
-    // Populate exception handling ranges.
-    let mut exception_handlers = IntervalTree::new(
-        basic_blocks.len(),
-        code.exception_handlers().map(|handler| {
-            let [start_bb_id, end_bb_id, handler_bb_id] =
-                [handler.start(), handler.end(), handler.handler()].map(|offset| {
-                    basic_blocks
-                        .binary_search_by_key(&offset.as_u32(), |bb| bb.instruction_range.start)
-                        .expect("EH not aligned to BB")
-                });
-
-            // Also fill EH info as a side effect.
-            basic_blocks[handler_bb_id]
-                .eh_entry_for_bb_ranges
-                .push(start_bb_id..end_bb_id);
-
-            (handler_bb_id, start_bb_id..end_bb_id)
-        }),
-    );
-
     // Calculate reachability and stack sizes via DFS, starting with the first BB. We also validate
     // that all instruction ranges are correct and don't stop in the middle of an instruction.
     let mut dfs_stack = vec![0];
     let mut in_stack = vec![false; basic_blocks.len()];
     in_stack[0] = true;
+    let mut remaining_eh = IntervalTree::new(
+        basic_blocks.len(),
+        exception_handlers
+            .iter()
+            .enumerate()
+            .map(|(handler_id, handler)| (handler_id, handler.active_range.clone())),
+    );
     while let Some(bb_id) = dfs_stack.pop() {
         let bb = &basic_blocks[bb_id];
 
@@ -231,11 +249,10 @@ pub fn extract_basic_blocks(
             .successors
             .iter()
             .map(|succ_bb_id| (*succ_bb_id, stack_size_at_end))
-            .chain(
-                exception_handlers
-                    .drain_containing(bb_id)
-                    .map(|handler_bb_id| (handler_bb_id, 1)),
-            );
+            .chain(remaining_eh.drain_containing(bb_id).map(|handler_id| {
+                exception_handlers[handler_id].is_reachable = true;
+                (exception_handlers[handler_id].target, 1)
+            }));
 
         for (succ_bb_id, stack_size) in successors {
             if succ_bb_id == basic_blocks.len() {
@@ -262,10 +279,14 @@ pub fn extract_basic_blocks(
                 instruction_range: 0..0,
                 stack_size_at_start: Cell::new(0),
                 successors: Vec::new(),
-                eh_entry_for_bb_ranges: Vec::new(),
             };
         }
     }
+    // Erase unused exception handlers.
+    exception_handlers.retain(|handler| handler.is_reachable);
 
-    Ok(basic_blocks)
+    Ok(Program {
+        basic_blocks,
+        exception_handlers,
+    })
 }

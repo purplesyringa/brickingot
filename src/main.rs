@@ -124,7 +124,7 @@ fn decompile_method<'code>(
     // mostly covers control flow analysis and computing stack sizes at each instruction, both of
     // which significantly affect the IR. We also obtain the CFG as a byproduct, which will become
     // useful when we get to the SSA-related stuff.
-    let basic_blocks = extract_basic_blocks(pool, &code)?;
+    let preparsed_program = extract_basic_blocks(pool, &code)?;
 
     // We could topsort the basic blocks to hopefully deobfuscate control flow, but that has
     // a chance to worsen the decompilation output on non-obfuscated code. Any attempts to reorder
@@ -143,7 +143,7 @@ fn decompile_method<'code>(
         &code,
         &descriptor,
         is_static,
-        basic_blocks,
+        preparsed_program,
     )?;
 
     // for stmt in &stackless_ir.statements {

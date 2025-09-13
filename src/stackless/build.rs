@@ -98,7 +98,7 @@ use super::linking::link_stack_across_basic_blocks;
 use super::splitting::merge_versions_across_basic_blocks;
 use super::{BasicBlock, ExceptionHandler, ExceptionHandlerBlock, Program, Statement};
 use crate::arena::Arena;
-use crate::ast::{Expression, Str, Variable, VariableName, VariableNamespace};
+use crate::ast::{Expression, Variable, VariableName, VariableNamespace};
 use crate::preparse;
 use crate::preparse::insn_stack_effect::is_type_descriptor_double_width;
 use noak::{
@@ -109,7 +109,6 @@ use noak::{
         cpool::ConstantPool,
     },
 };
-use rustc_hash::FxHashMap;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -131,6 +130,7 @@ pub enum StacklessIrError {
 struct Label {
     address: u32,
     stmt_index: usize,
+    bb_id: usize,
 }
 
 pub fn build_stackless_ir<'code>(
@@ -139,21 +139,21 @@ pub fn build_stackless_ir<'code>(
     code: &Code<'code>,
     method_descriptor: &MethodDescriptor<'code>,
     is_static: bool,
-    mut preparse_basic_blocks: Vec<preparse::BasicBlock>,
+    mut preparsed_program: preparse::Program<'code>,
 ) -> Result<Program<'code>, StacklessIrError> {
     let mut machine = Machine::new(arena);
 
     let mut ir_basic_blocks = Vec::new();
     // +1 for a fake entry BB populating method arguments. This needs to be done in a separate basic
     // block and not as part of the first real BB, as the first BB may have predecessors.
-    ir_basic_blocks.resize_with(preparse_basic_blocks.len() + 1, || BasicBlock {
+    ir_basic_blocks.resize_with(preparsed_program.basic_blocks.len() + 1, || BasicBlock {
         sealed_bb: SealedBlock::default(),
         predecessors: Vec::new(),
         eh: None,
     });
 
     // Initialize method arguments
-    let entry_bb_id = preparse_basic_blocks.len();
+    let entry_bb_id = preparsed_program.basic_blocks.len();
     machine.bb_id = entry_bb_id;
     let mut next_slot_id = 0;
     if !is_static {
@@ -172,9 +172,20 @@ pub fn build_stackless_ir<'code>(
     ir_basic_blocks[entry_bb_id].sealed_bb = machine.seal_basic_block();
     ir_basic_blocks[0].predecessors.push(entry_bb_id);
 
+    // Accumulate `try` ranges for exception handlers.
+    let mut eh_entry_for_bb_ranges = vec![Vec::new(); preparsed_program.basic_blocks.len()];
+    for handler in &preparsed_program.exception_handlers {
+        eh_entry_for_bb_ranges[handler.target].push(handler.active_range.clone());
+    }
+
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
     // bytecode and we'd rather not worry about that.
-    for (bb_id, bb) in preparse_basic_blocks.iter_mut().enumerate() {
+    for (bb_id, (bb, eh_entry_for_bb_ranges)) in preparsed_program
+        .basic_blocks
+        .iter_mut()
+        .zip(eh_entry_for_bb_ranges)
+        .enumerate()
+    {
         if bb.instruction_range.end == 0 {
             // Skip empty BBs -- don't let them emit out-of-order labels.
             continue;
@@ -183,11 +194,11 @@ pub fn build_stackless_ir<'code>(
         machine.stack_size = bb.stack_size_at_start.get();
         machine.bb_id = bb_id;
 
-        ir_basic_blocks[bb_id].eh = if bb.eh_entry_for_bb_ranges.is_empty() {
+        ir_basic_blocks[bb_id].eh = if eh_entry_for_bb_ranges.is_empty() {
             None
         } else {
             Some(ExceptionHandlerBlock {
-                eh_entry_for_bb_ranges: core::mem::take(&mut bb.eh_entry_for_bb_ranges),
+                eh_entry_for_bb_ranges,
                 stack0_def: arena.alloc_with(|version| {
                     Expression::Variable(Variable {
                         name: VariableName {
@@ -280,8 +291,11 @@ pub fn build_stackless_ir<'code>(
         }
         Statement::Label { bb_id } => {
             labels.push(Label {
-                address: preparse_basic_blocks[*bb_id].instruction_range.start,
+                address: preparsed_program.basic_blocks[*bb_id]
+                    .instruction_range
+                    .start,
                 stmt_index,
+                bb_id: *bb_id,
             });
             false
         }
@@ -294,6 +308,7 @@ pub fn build_stackless_ir<'code>(
     labels.push(Label {
         address: u32::MAX,
         stmt_index: statements.len(),
+        bb_id: preparsed_program.basic_blocks.len(),
     });
 
     let address_to_stmt_index = |address: u32| -> usize {
@@ -316,50 +331,40 @@ pub fn build_stackless_ir<'code>(
     }
 
     // Compute new exception handlers.
-    let mut handler_to_copy = FxHashMap::default();
-    for (prepare_bb, ir_bb) in preparse_basic_blocks.iter().zip(&ir_basic_blocks) {
-        if let Some(eh) = &ir_bb.eh
-            && eh.stack0_exception0_copy_is_necessary
-        {
-            handler_to_copy.insert(
-                prepare_bb.instruction_range.start,
-                (eh.stack0_def, eh.exception0_use),
-            );
-        }
-    }
-
     let mut exception_handlers = Vec::new();
-    for handler in code.exception_handlers() {
-        // Since some instructions could have been optimized out as unreachable, `start_pc` and
-        // `stop_pc` don't necessarily correspond to any existing basic block boundary! Look for the
-        // region of present basic blocks that fit within the range.
+    for handler in preparsed_program.exception_handlers {
+        let target_label = labels
+            .binary_search_by_key(&handler.target, |label| label.bb_id)
+            .expect("invalid jump destination");
 
-        let start_label = labels.partition_point(|label| label.address < handler.start().as_u32());
-        let end_label = labels.partition_point(|label| label.address < handler.end().as_u32());
-        if end_label <= start_label {
-            continue;
-        }
+        // Since some instructions could have been optimized out as unreachable, `start` and `end`
+        // don't necessarily correspond to any existing basic block boundary! Look for the region of
+        // present basic blocks that fit within the range.
+        let start_label = labels.partition_point(|label| label.bb_id < handler.active_range.start);
+        let end_label = labels.partition_point(|label| label.bb_id < handler.active_range.end);
+        // `preparse` removes unreachable `try` blocks.
+        assert!(start_label < end_label, "unreachable try block");
 
-        // `start_index` and `end_index` may compare equal, which indicates that the `try` body is
-        // empty, but that's not a good reason to remove the handler. Although we know this means
-        // `catch` is never executed, removing the exception handler can cause more code to become
-        // *syntactically* unreachable, which violates our assumption that all code in the IR is
-        // syntactically reachable.
+        // Despite that, `start_index` and `end_index` may compare equal, which indicates that the
+        // `try` body is empty. But that's not a good reason to remove the handler. Although we know
+        // this means `catch` is never executed, removing the exception handler can cause more code
+        // to become *syntactically* unreachable, which violates our assumption that all code in the
+        // IR is syntactically reachable. Retaining an empty `try` is better than breaking those
+        // assumptions.
         let start_index = labels[start_label].stmt_index;
         let end_index = labels[end_label].stmt_index;
 
+        let eh = ir_basic_blocks[handler.target].eh.as_ref().unwrap();
+
         exception_handlers.push(ExceptionHandler {
             active_range: start_index..end_index,
-            target: address_to_stmt_index(handler.handler().as_u32()),
-            class: match handler.catch_type() {
-                Some(catch_type) => Some(Str(pool.retrieve(catch_type)?.name)),
-                None => None,
-            },
+            target: labels[target_label].stmt_index,
+            class: handler.class,
             // Since multiple handlers can have the same target, these IDs are not unique and can
             // only be used as versions, not as expression IDs.
-            stack0_exception0_copy_versions: handler_to_copy
-                .get(&handler.handler().as_u32())
-                .copied(),
+            stack0_exception0_copy_versions: eh
+                .stack0_exception0_copy_is_necessary
+                .then_some((eh.stack0_def, eh.exception0_use)),
         });
     }
 
