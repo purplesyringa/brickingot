@@ -92,9 +92,9 @@ impl<'code> DebugIr<'code> for Statement<'code> {
             }
 
             Self::Block { id, children } => {
-                write!(f, "block #{id} {{\n")?;
+                writeln!(f, "block #{id} {{")?;
                 for child in children {
-                    write!(f, "{}\n", arena.debug(child))?;
+                    writeln!(f, "{}", arena.debug(child))?;
                 }
                 write!(f, "}} block #{id}")
             }
@@ -117,49 +117,49 @@ impl<'code> DebugIr<'code> for Statement<'code> {
                 if *condition_inverted {
                     write!(f, ")")?;
                 }
-                write!(f, ") {{\n")?;
+                writeln!(f, ") {{")?;
                 for child in then_children {
-                    write!(f, "{}\n", arena.debug(child))?;
+                    writeln!(f, "{}", arena.debug(child))?;
                 }
                 if !else_children.is_empty() {
-                    write!(f, "}} else {{\n")?;
+                    writeln!(f, "}} else {{")?;
                     for child in else_children {
-                        write!(f, "{}\n", arena.debug(child))?;
+                        writeln!(f, "{}", arena.debug(child))?;
                     }
                 }
                 write!(f, "}}")
             }
 
             Self::Switch { id, key, arms } => {
-                write!(f, "switch #{id} ({}) {{\n", arena.debug(key))?;
+                writeln!(f, "switch #{id} ({}) {{", arena.debug(key))?;
                 for (value, children) in arms {
                     match value {
-                        Some(value) => write!(f, "case {value}:\n")?,
-                        None => write!(f, "default:\n")?,
+                        Some(value) => writeln!(f, "case {value}:")?,
+                        None => writeln!(f, "default:")?,
                     }
                     for child in children {
-                        write!(f, "{}\n", arena.debug(child))?;
+                        writeln!(f, "{}", arena.debug(child))?;
                     }
                 }
                 write!(f, "}} switch #{id};")
             }
 
             Self::Try { children, catches } => {
-                write!(f, "try {{\n")?;
+                writeln!(f, "try {{")?;
                 for child in children {
-                    write!(f, "{}\n", arena.debug(child))?;
+                    writeln!(f, "{}", arena.debug(child))?;
                 }
                 for catch in catches {
-                    write!(
+                    writeln!(
                         f,
-                        "}} catch ({} within {:?}) {{\n",
+                        "}} catch ({} within {:?}) {{",
                         catch
                             .class
                             .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
                         catch.active_range
                     )?;
                     for child in &catch.children {
-                        write!(f, "{}\n", arena.debug(child))?;
+                        writeln!(f, "{}", arena.debug(child))?;
                     }
                 }
                 write!(f, "}}")

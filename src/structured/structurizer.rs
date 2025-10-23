@@ -12,13 +12,21 @@ pub fn structure_control_flow<'code>(
     arena: &Arena<'code>,
     stackless_ir: stackless::Program<'code>,
 ) -> Vec<Statement<'code>> {
-    let (requirements, mut keys) = compute_block_requirements(&stackless_ir);
+    // If you're confused as to what's happening here, read this first:
+    // https://purplesyringa.moe/blog/recovering-control-flow-structures-without-cfgs/. The post
+    // does not cover this implementation in its entirety, but it's pretty close.
+    // `compute_block_requirements` effectively generates the arrows, `satisfy_block_requirements`
+    // effectively builds a tree, and everything else is glue and exception handling logic.
+
+    let requirements = compute_block_requirements(&stackless_ir);
+    let (mut req_keys, req_values): (Vec<_>, _) = requirements.into_iter().unzip();
+
     let (tree, implementations, next_block_id) =
-        satisfy_block_requirements(stackless_ir.statements.len(), requirements);
+        satisfy_block_requirements(stackless_ir.statements.len(), req_values);
 
     // Add keys for dynamically created dispatch jumps.
-    let mut id = keys.len();
-    keys.resize_with(implementations.len(), || {
+    let mut id = req_keys.len();
+    req_keys.resize_with(implementations.len(), || {
         let key = RequirementKey::Dispatch { id };
         id += 1;
         key
@@ -27,7 +35,7 @@ pub fn structure_control_flow<'code>(
     let mut try_block_to_handler: FxHashMap<usize, usize> = FxHashMap::default();
     let mut jump_implementations = FxHashMap::default();
     let mut has_dispatch = false;
-    for (key, imp) in keys.into_iter().zip(implementations) {
+    for (key, imp) in req_keys.into_iter().zip(implementations) {
         if let RequirementImplementation::Try { block_id } = imp {
             let RequirementKey::Try { index } = key else {
                 panic!("unexpected key for try implementation");

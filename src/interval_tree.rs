@@ -1,3 +1,4 @@
+// Implementation documented in https://purplesyringa.moe/blog/fenwick-layout-for-interval-trees/.
 use core::ops::Range;
 
 #[derive(Default)]

@@ -75,7 +75,7 @@ pub enum RequirementImplementation {
 
 pub fn compute_block_requirements(
     stackless_ir: &stackless::Program<'_>,
-) -> (Vec<BlockRequirement>, Vec<RequirementKey>) {
+) -> Vec<(RequirementKey, BlockRequirement)> {
     let jump = |from: usize, to: usize| {
         if from < to {
             // There must be a block covering instruction `from` and ending at `to`.
@@ -93,16 +93,15 @@ pub fn compute_block_requirements(
     };
 
     let mut requirements = Vec::new();
-    let mut keys = Vec::new();
 
     // Jumps are satisfied by normal blocks.
     for (stmt_index, stmt) in stackless_ir.statements.iter().enumerate() {
         match stmt {
             stackless::Statement::Basic(_) | stackless::Statement::Label { .. } => {}
-            stackless::Statement::Jump { target, .. } => {
-                keys.push(RequirementKey::Jump { stmt_index });
-                requirements.push(jump(stmt_index, *target));
-            }
+            stackless::Statement::Jump { target, .. } => requirements.push((
+                RequirementKey::Jump { stmt_index },
+                jump(stmt_index, *target),
+            )),
             stackless::Statement::Switch { arms, default, .. } => {
                 for (key, successor) in arms
                     .iter()
@@ -110,12 +109,16 @@ pub fn compute_block_requirements(
                     .chain(core::iter::once((None, *default)))
                 {
                     // Jumps to the next statement can be lowered as a break from the switch itself
-                    // and don't require new blocks.
+                    // and don't require new blocks. This is not necessary to handle here, since
+                    // `main_opt` optimizes this anyway, but it produces a smaller and simpler IR in
+                    // the common case, effectively acting as a performance optimization.
                     if successor == stmt_index + 1 {
                         continue;
                     }
-                    keys.push(RequirementKey::Switch { stmt_index, key });
-                    requirements.push(jump(stmt_index, successor));
+                    requirements.push((
+                        RequirementKey::Switch { stmt_index, key },
+                        jump(stmt_index, successor),
+                    ));
                 }
             }
         }
@@ -149,22 +152,26 @@ pub fn compute_block_requirements(
             // become swapped. This forces us to emit a single `try` even if it produces worse
             // codegen.
             let jump_req_id = requirements.len();
-            keys.push(RequirementKey::BackwardCatch { index });
-            requirements.push(BlockRequirement {
-                range: handler.target..handler.active_range.end,
-                kind: RequirementKind::BackwardJump,
-            });
+            requirements.push((
+                RequirementKey::BackwardCatch { index },
+                BlockRequirement {
+                    range: handler.target..handler.active_range.end,
+                    kind: RequirementKind::BackwardJump,
+                },
+            ));
             Some(jump_req_id)
         };
 
-        keys.push(RequirementKey::Try { index });
-        requirements.push(BlockRequirement {
-            range: handler.active_range.clone(),
-            kind: RequirementKind::Try { with_backward_jump },
-        });
+        requirements.push((
+            RequirementKey::Try { index },
+            BlockRequirement {
+                range: handler.active_range.clone(),
+                kind: RequirementKind::Try { with_backward_jump },
+            },
+        ));
     }
 
-    (requirements, keys)
+    requirements
 }
 
 // Extends exception handler ranges such that each range #i either contains or doesn't intersect
@@ -265,7 +272,7 @@ pub fn satisfy_block_requirements(
     // jump in `continue` to be lowered before attempting to lower `try`. In addition, the order in
     // which `catch` closures match types matters since one catch a subclass of the other.
 
-    // Many data structures here are indiced by statement ID -- don't waste cache on whitespace.
+    // Many data structures here are indexed by statement ID -- don't waste cache on whitespace.
     let mut used_indices: Vec<usize> = [0, program_len]
         .into_iter()
         .chain(
@@ -439,8 +446,7 @@ impl Treeificator {
         // around, `try` with `continue` within a loop would get extended to span the whole loop,
         // creating a mess.
         //
-        // There are a few slight issues here, though. Specifically, loops at the beginning of `try`
-        // will be decoded as
+        // There is a small issue here, though. Loops at the beginning of `try` will be decoded as
         //     block #1 {
         //         try #2 {
         //             ...
@@ -471,7 +477,7 @@ impl Treeificator {
             } = self.reqs[*req_id].kind
             && self.imps[jump_req_id].is_none()
         {
-            // If there backward jump from `catch` hasn't been implemented yet, emit a block for it
+            // If the backward jump from `catch` hasn't been implemented yet, emit a block for it
             // right now, since this is the last chance to generate it outside `try`.
             let BlockRequirement {
                 range: jump_range,
@@ -486,13 +492,14 @@ impl Treeificator {
             );
             let target = jump_range.start;
 
-            self.req_cover.remove_segment(jump_range.clone());
+            self.req_cover.remove_segment(jump_range);
 
             let imp = if target == range.start {
                 // Jump directly to the beginning of the block, can be a normal backward jump.
                 RequirementImplementation::Continue { block_id }
             } else {
                 // Jump via dispatcher.
+                assert!(target > range.start);
                 self.add_dispatch(block_id, range.start, target)
             };
             self.imps[jump_req_id] = Some(imp);

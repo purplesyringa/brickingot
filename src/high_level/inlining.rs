@@ -31,6 +31,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
             inlined_exprs: Vec::new(),
         };
         let out = inliner.handle_stmt_list();
+        // All modifications are saved to `inlined_exprs` and then applied at once -- here.
         for (use_expr_id, value_expr_id) in inliner.inlined_exprs {
             // We don't care about the new value of `arena[value_expr_id]`, so might as well just do
             // this; should be somewhat cheaper than alternatives.

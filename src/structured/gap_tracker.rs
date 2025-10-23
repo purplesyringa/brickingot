@@ -1,8 +1,10 @@
+// Implementation mostly follows the "Increment modifications, queries for maximum" section from
+// https://codeforces.com/blog/entry/18051.
 use core::ops::Range;
 
 // A segment tree-based implementation.
 pub struct GapTracker {
-    // 1-indiced tree nodes.
+    // 1-indexed tree nodes.
     nodes: Vec<Node>,
 }
 
