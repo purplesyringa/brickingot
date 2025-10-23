@@ -1,7 +1,8 @@
 use super::inlining::Inliner;
 use super::{Catch, Meta, Statement, StmtList, StmtMeta};
-use crate::arena::{Arena, ExprId};
-use crate::ast::{BasicStatement, BinOp, Expression, UnaryOp, Variable, VariableNamespace};
+use crate::ast::{
+    Arena, BasicStatement, BinOp, ExprId, Expression, UnaryOp, Variable, VariableNamespace,
+};
 use crate::structured;
 use rustc_hash::FxHashMap;
 

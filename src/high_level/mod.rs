@@ -2,8 +2,7 @@ mod inlining;
 mod main_opt;
 
 use self::main_opt::optimize;
-use crate::arena::{Arena, DebugIr, ExprId};
-use crate::ast::{BasicStatement, Str};
+use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
 use crate::structured;
 use alloc::fmt;
 use core::ops::Range;

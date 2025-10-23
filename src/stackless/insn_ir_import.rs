@@ -2,8 +2,9 @@ use super::{
     Statement,
     abstract_eval::{Machine, StackUnderflowError},
 };
-use crate::arena::{Arena, ExprId};
-use crate::ast::{BasicStatement, BinOp, CallKind, Expression, PrimitiveType, Str, Type, UnaryOp};
+use crate::ast::{
+    Arena, BasicStatement, BinOp, CallKind, ExprId, Expression, PrimitiveType, Str, Type, UnaryOp,
+};
 use noak::{
     descriptor::MethodDescriptor,
     error::DecodeError,

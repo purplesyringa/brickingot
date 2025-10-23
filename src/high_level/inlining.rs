@@ -2,8 +2,7 @@
 // definitions, like `?:`. That's the responsibility of `Optimizer`.
 
 use super::{Statement, StmtList, StmtMeta};
-use crate::arena::{Arena, ExprId};
-use crate::ast::{BasicStatement, Expression, Variable, VariableNamespace};
+use crate::ast::{Arena, BasicStatement, ExprId, Expression, Variable, VariableNamespace};
 use rustc_hash::FxHashMap;
 
 pub struct Inliner<'a, 'code> {

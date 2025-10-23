@@ -3,8 +3,9 @@ use super::solver::{
     satisfy_block_requirements,
 };
 use super::{Catch, Statement};
-use crate::arena::{Arena, ExprId};
-use crate::ast::{BasicStatement, Expression, Variable, VariableName, VariableNamespace};
+use crate::ast::{
+    Arena, BasicStatement, ExprId, Expression, Variable, VariableName, VariableNamespace,
+};
 use crate::stackless;
 use rustc_hash::FxHashMap;
 

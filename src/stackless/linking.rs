@@ -22,8 +22,7 @@
 // SCC.
 
 use super::{BasicBlock, abstract_eval::UnresolvedUse};
-use crate::arena::Arena;
-use crate::ast::{Expression, Variable, VariableName, VariableNamespace};
+use crate::ast::{Arena, Expression, Variable, VariableName, VariableNamespace};
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 

@@ -109,8 +109,7 @@ use super::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use super::linking::link_stack_across_basic_blocks;
 use super::splitting::merge_versions_across_basic_blocks;
 use super::{BasicBlock, ExceptionHandler, ExceptionHandlerBlock, Program, Statement};
-use crate::arena::Arena;
-use crate::ast::{Expression, Variable, VariableName, VariableNamespace};
+use crate::ast::{Arena, Expression, Variable, VariableName, VariableNamespace};
 use crate::preparse;
 use crate::preparse::insn_stack_effect::is_type_descriptor_double_width;
 use noak::{

@@ -3,7 +3,6 @@
 
 extern crate alloc;
 
-mod arena;
 mod ast;
 mod high_level;
 mod preparse;
@@ -11,7 +10,7 @@ mod stackless;
 mod structured;
 mod utils;
 
-use crate::arena::Arena;
+use crate::ast::Arena;
 use crate::high_level::decompile_cf_constructs;
 use crate::preparse::{BytecodePreparsingError, extract_basic_blocks};
 use crate::stackless::{StacklessIrError, build_stackless_ir};

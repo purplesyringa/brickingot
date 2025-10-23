@@ -6,8 +6,7 @@ mod splitting;
 
 use self::abstract_eval::SealedBlock;
 pub use self::build::{StacklessIrError, build_stackless_ir};
-use crate::arena::{Arena, DebugIr, ExprId};
-use crate::ast::{BasicStatement, Str};
+use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
 use core::fmt::{self, Display};
 use core::ops::Range;
 use noak::MStr;

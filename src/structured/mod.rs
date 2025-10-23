@@ -3,8 +3,7 @@ mod solver;
 mod structurizer;
 
 pub use self::structurizer::structure_control_flow;
-use crate::arena::{Arena, DebugIr, ExprId};
-use crate::ast::{BasicStatement, Str};
+use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
 use alloc::fmt;
 use core::ops::Range;
 use noak::MStr;

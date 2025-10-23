@@ -11,8 +11,9 @@
 // While this can get quite large, it's reasonably fast in practice.
 
 use super::{BasicBlock, ExceptionHandlerBlock, Statement, abstract_eval::UnresolvedUse};
-use crate::arena::{Arena, ExprId};
-use crate::ast::{BasicStatement, Expression, Variable, VariableName, VariableNamespace};
+use crate::ast::{
+    Arena, BasicStatement, ExprId, Expression, Variable, VariableName, VariableNamespace,
+};
 use crate::utils::UnionFind;
 use alloc::collections::BTreeMap;
 use core::cell::Cell;

@@ -1,5 +1,4 @@
-use super::BasicStatement;
-use crate::ast::{CallKind, ExprId, Expression};
+use super::{BasicStatement, CallKind, ExprId, Expression};
 
 // This iterates only over direct subexpressions, not recursively. The subexpressions are yielded in
 // evaluation order.
