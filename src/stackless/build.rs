@@ -191,7 +191,7 @@ pub fn build_stackless_ir<'code>(
             continue;
         }
 
-        machine.stack_size = bb.stack_size_at_start.get();
+        machine.stack_size = bb.stack_size_at_start;
         machine.bb_id = bb_id;
 
         ir_basic_blocks[bb_id].eh = if eh_entry_for_bb_ranges.is_empty() {

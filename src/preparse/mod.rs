@@ -5,7 +5,6 @@ use self::insn_control_flow::{InsnControlFlow, get_insn_control_flow};
 use self::insn_stack_effect::{InsnStackEffectError, get_insn_stack_effect};
 use crate::ast::Str;
 use crate::interval_tree::IntervalTree;
-use core::cell::Cell;
 use core::ops::Range;
 use noak::{
     error::DecodeError,
@@ -46,8 +45,8 @@ pub struct BasicBlock {
     /// instruction numbers).
     pub instruction_range: Range<u32>,
     /// The size of the stack on entry to this BB, counting double-width elements (`long` and
-    /// `double`) as two. The `Cell` is an implementation detail only.
-    pub stack_size_at_start: Cell<usize>,
+    /// `double`) as two.
+    pub stack_size_at_start: usize,
     /// The IDs of BBs the last instruction in this BB can jump to. This includes fallthrough, but
     /// excludes jumps to exception handlers.
     pub successors: Vec<usize>,
@@ -59,8 +58,8 @@ pub struct Program<'code> {
 }
 
 pub struct ExceptionHandler<'code> {
-    pub active_range: Range<usize>,
-    pub target: usize,
+    pub active_range: Range<usize>, // BB IDs
+    pub target: usize,              // BB ID
     pub class: Option<Str<'code>>,
     pub is_reachable: bool,
 }
@@ -123,7 +122,7 @@ pub fn extract_basic_blocks<'code>(
         .enumerate()
         .map(|(bb_id, range)| BasicBlock {
             instruction_range: range[0]..range[1],
-            stack_size_at_start: Cell::new(0),
+            stack_size_at_start: 0, // will be populated in a bit
             // `successors` can only be populated after BB boundaries have been decided, so this
             // stays in a sentinel-like state where only the trivial successor is recorded. We'll
             // remove it for divergent control flow a bit later.
@@ -141,6 +140,11 @@ pub fn extract_basic_blocks<'code>(
         if !control_flow.can_fallthrough {
             // There can be at most one jump origin per BB, so this BB is in a pristine state, and
             // this `clear` call only removes the jump to the next BB.
+            //
+            // It's a bit unusual that we unconditionally add a fallthrough successor and then
+            // conditionally remove it, instead of just conditionally adding it. That's because
+            // there isn't necessarily a transition after each BB, if that BB was split in the
+            // middle by e.g. a `try` boundary.
             basic_blocks[bb_id].successors.clear();
         }
 
@@ -220,9 +224,9 @@ pub fn extract_basic_blocks<'code>(
             .map(|(handler_id, handler)| (handler_id, handler.active_range.clone())),
     );
     while let Some(bb_id) = dfs_stack.pop() {
-        let bb = &basic_blocks[bb_id];
+        let bb = &mut basic_blocks[bb_id];
 
-        let mut stack_size_at_end = bb.stack_size_at_start.get() as isize;
+        let mut stack_size_at_end = bb.stack_size_at_start as isize;
         let mut reached_end_of_stream = true;
 
         for row in code.raw_instructions_from(Index::new(bb.instruction_range.start))? {
@@ -245,29 +249,33 @@ pub fn extract_basic_blocks<'code>(
             return Err(BytecodePreparsingError::CodeFallthrough);
         }
 
-        let successors = basic_blocks[bb_id]
-            .successors
-            .iter()
-            .map(|succ_bb_id| (*succ_bb_id, stack_size_at_end))
-            .chain(remaining_eh.drain_containing(bb_id).map(|handler_id| {
-                exception_handlers[handler_id].is_reachable = true;
-                (exception_handlers[handler_id].target, 1)
-            }));
+        // Help borrowck. Don't forget to restore `bb.successors` afterwards.
+        let tmp_successors = core::mem::take(&mut bb.successors);
+        {
+            let successors = tmp_successors
+                .iter()
+                .map(|succ_bb_id| (*succ_bb_id, stack_size_at_end))
+                .chain(remaining_eh.drain_containing(bb_id).map(|handler_id| {
+                    exception_handlers[handler_id].is_reachable = true;
+                    (exception_handlers[handler_id].target, 1)
+                }));
 
-        for (succ_bb_id, stack_size) in successors {
-            if succ_bb_id == basic_blocks.len() {
-                return Err(BytecodePreparsingError::CodeFallthrough);
-            }
+            for (succ_bb_id, stack_size) in successors {
+                if succ_bb_id == basic_blocks.len() {
+                    return Err(BytecodePreparsingError::CodeFallthrough);
+                }
 
-            if !in_stack[succ_bb_id] {
-                basic_blocks[succ_bb_id].stack_size_at_start.set(stack_size);
-                dfs_stack.push(succ_bb_id);
-                in_stack[succ_bb_id] = true;
-            }
-            if basic_blocks[succ_bb_id].stack_size_at_start.get() != stack_size {
-                return Err(BytecodePreparsingError::InconsistentStackSize);
+                if !in_stack[succ_bb_id] {
+                    basic_blocks[succ_bb_id].stack_size_at_start = stack_size;
+                    dfs_stack.push(succ_bb_id);
+                    in_stack[succ_bb_id] = true;
+                }
+                if basic_blocks[succ_bb_id].stack_size_at_start != stack_size {
+                    return Err(BytecodePreparsingError::InconsistentStackSize);
+                }
             }
         }
+        basic_blocks[bb_id].successors = tmp_successors;
     }
 
     // Erase unreachable BBs. We don't really remove them from this list, since that would affect BB
@@ -277,7 +285,7 @@ pub fn extract_basic_blocks<'code>(
         if !in_stack {
             *bb = BasicBlock {
                 instruction_range: 0..0,
-                stack_size_at_start: Cell::new(0),
+                stack_size_at_start: 0,
                 successors: Vec::new(),
             };
         }
