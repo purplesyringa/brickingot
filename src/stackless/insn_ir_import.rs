@@ -2,11 +2,11 @@ use super::{
     Statement,
     abstract_eval::{Machine, StackUnderflowError},
 };
+use crate::ClassInfo;
 use crate::ast::{
     Arena, BasicStatement, BinOp, CallKind, ExprId, Expression, PrimitiveType, Str, Type, UnaryOp,
 };
 use noak::{
-    descriptor::MethodDescriptor,
     error::DecodeError,
     reader::{
         attributes::{
@@ -52,6 +52,7 @@ fn field<'code>(arena: &Arena<'code>, object: Option<ExprId>, field: &FieldRef<'
 }
 
 fn invoke<'arena, 'code>(
+    class_info: &mut ClassInfo<'code>,
     pool: &ConstantPool<'code>,
     machine: &mut Machine<'arena, 'code>,
     index: Index<Item<'code>>,
@@ -70,10 +71,10 @@ fn invoke<'arena, 'code>(
         _ => unreachable!("pre-parsing should have checked the types"),
     };
 
+    let method_descriptor = class_info.get_method_descriptor(*name_and_type)?;
     let name_and_type = pool.retrieve(*name_and_type)?;
     let class_or_interface = Str(pool.retrieve(*class)?.name);
-    let method_descriptor = MethodDescriptor::parse(name_and_type.descriptor)?;
-    let arguments = machine.pop_method_arguments(&method_descriptor)?;
+    let arguments = machine.pop_method_arguments(&method_descriptor.descriptor)?;
 
     let kind = if has_receiver {
         CallKind::Method {
@@ -86,7 +87,7 @@ fn invoke<'arena, 'code>(
     };
 
     machine.push_return_type(
-        &method_descriptor.return_type(),
+        &method_descriptor.descriptor.return_type(),
         machine.arena.alloc(Expression::Call {
             method_name: Str(name_and_type.name),
             kind,
@@ -98,6 +99,7 @@ fn invoke<'arena, 'code>(
 }
 
 pub fn import_insn_to_ir<'arena, 'code>(
+    class_info: &mut ClassInfo<'code>,
     machine: &mut Machine<'arena, 'code>,
     pool: &ConstantPool<'code>,
     address: u32,
@@ -764,18 +766,21 @@ pub fn import_insn_to_ir<'arena, 'code>(
 
         // Function calls
         InvokeDynamic { index } => {
-            let indy = pool.retrieve(*index)?;
-            let method_descriptor = MethodDescriptor::parse(indy.name_and_type.descriptor)?;
-            let arguments = machine.pop_method_arguments(&method_descriptor)?;
+            let indy = pool.get(*index)?;
+            let method_descriptor = &class_info
+                .get_method_descriptor(indy.name_and_type)?
+                .descriptor;
+            let name_and_type = pool.retrieve(indy.name_and_type)?;
+            let arguments = machine.pop_method_arguments(method_descriptor)?;
             machine.push_return_type(
                 &method_descriptor.return_type(),
                 arena.alloc(Expression::Call {
-                    method_name: Str(indy.name_and_type.name),
+                    method_name: Str(name_and_type.name),
                     kind: CallKind::Dynamic {
                         bootstrap_method_attr: indy.bootstrap_method_attr,
                     },
                     arguments,
-                    descriptor: Str(indy.name_and_type.descriptor),
+                    descriptor: Str(name_and_type.descriptor),
                 }),
             );
         }
@@ -789,6 +794,7 @@ pub fn import_insn_to_ir<'arena, 'code>(
             // a call to a super constructor (via `super(...)`), so we can't even perform that
             // rewrite.
             invoke(
+                class_info,
                 pool,
                 machine,
                 Index::new(index.as_u16()).unwrap(),
@@ -796,8 +802,9 @@ pub fn import_insn_to_ir<'arena, 'code>(
                 true,
             )?;
         }
-        InvokeStatic { index } => invoke(pool, machine, *index, false, false)?,
+        InvokeStatic { index } => invoke(class_info, pool, machine, *index, false, false)?,
         InvokeInterface { index, .. } => invoke(
+            class_info,
             pool,
             machine,
             Index::new(index.as_u16()).unwrap(),
@@ -805,6 +812,7 @@ pub fn import_insn_to_ir<'arena, 'code>(
             false,
         )?,
         InvokeVirtual { index } => invoke(
+            class_info,
             pool,
             machine,
             Index::new(index.as_u16()).unwrap(),

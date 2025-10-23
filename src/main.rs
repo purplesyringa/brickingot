@@ -4,6 +4,7 @@
 extern crate alloc;
 
 mod ast;
+mod class;
 mod high_level;
 mod preparse;
 mod stackless;
@@ -11,6 +12,7 @@ mod structured;
 mod utils;
 
 use crate::ast::Arena;
+use crate::class::ClassInfo;
 use crate::high_level::decompile_cf_constructs;
 use crate::preparse::{BytecodePreparsingError, extract_basic_blocks};
 use crate::stackless::{StacklessIrError, build_stackless_ir};
@@ -62,15 +64,19 @@ fn decompile_class_file(raw_bytes: &[u8]) -> Result<(), ClassDecompileError> {
 
     // TODO: issue a diagnostic if ACC_SUPER is unset
 
+    let mut class_info = ClassInfo::new(&class);
+
     for method in class.methods() {
         let method = method?;
-        decompile_method(pool, &method).map_err(|error| ClassDecompileError::Method {
-            name: pool
-                .retrieve(method.name())
-                .unwrap_or(MStr::from_mutf8(b"??").unwrap())
-                .display()
-                .to_string(),
-            error,
+        decompile_method(pool, &method, &mut class_info).map_err(|error| {
+            ClassDecompileError::Method {
+                name: pool
+                    .retrieve(method.name())
+                    .unwrap_or(MStr::from_mutf8(b"??").unwrap())
+                    .display()
+                    .to_string(),
+                error,
+            }
         })?;
     }
 
@@ -80,6 +86,7 @@ fn decompile_class_file(raw_bytes: &[u8]) -> Result<(), ClassDecompileError> {
 fn decompile_method<'code>(
     pool: &ConstantPool<'code>,
     method: &Method<'code>,
+    class_info: &mut ClassInfo<'code>,
 ) -> Result<(), MethodDecompileError> {
     let Some(code): Option<Code> = method.attributes().find_attribute(pool)? else {
         // No Code attribute, valid e.g. for abstract methods
@@ -121,7 +128,7 @@ fn decompile_method<'code>(
     // mostly covers control flow analysis and computing stack sizes at each instruction, both of
     // which significantly affect the IR. We also obtain the CFG as a byproduct, which will become
     // useful when we get to the SSA-related stuff.
-    let preparsed_program = extract_basic_blocks(pool, &code)?;
+    let preparsed_program = extract_basic_blocks(pool, &code, class_info)?;
 
     // We could topsort the basic blocks to hopefully deobfuscate control flow, but that has
     // a chance to worsen the decompilation output on non-obfuscated code. Any attempts to reorder
@@ -135,6 +142,7 @@ fn decompile_method<'code>(
     // flow is unstructured. The number of distinct statement types is greatly reduced because most
     // instructions are translated as `var := expr`.
     let stackless_ir = build_stackless_ir(
+        class_info,
         &mut arena,
         pool,
         &code,

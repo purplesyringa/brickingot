@@ -109,9 +109,9 @@ use super::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use super::linking::link_stack_across_basic_blocks;
 use super::splitting::merge_versions_across_basic_blocks;
 use super::{BasicBlock, ExceptionHandler, ExceptionHandlerBlock, Program, Statement};
+use crate::ClassInfo;
 use crate::ast::{Arena, Expression, Variable, VariableName, VariableNamespace};
-use crate::preparse;
-use crate::preparse::insn_stack_effect::is_type_descriptor_double_width;
+use crate::preparse::{self, insn_stack_effect::type_descriptor_width};
 use noak::{
     descriptor::MethodDescriptor,
     error::DecodeError,
@@ -145,6 +145,7 @@ struct Label {
 }
 
 pub fn build_stackless_ir<'code>(
+    class_info: &mut ClassInfo<'code>,
     arena: &mut Arena<'code>,
     pool: &ConstantPool<'code>,
     code: &Code<'code>,
@@ -174,11 +175,7 @@ pub fn build_stackless_ir<'code>(
     for (index, ty) in method_descriptor.parameters().enumerate() {
         let value = arena.alloc(Expression::Argument { index });
         machine.set_slot(next_slot_id, value);
-        next_slot_id += if is_type_descriptor_double_width(&ty) {
-            2
-        } else {
-            1
-        };
+        next_slot_id += type_descriptor_width(ty);
     }
     ir_basic_blocks[entry_bb_id].sealed_bb = machine.seal_basic_block();
     ir_basic_blocks[0].predecessors.push(entry_bb_id);
@@ -254,7 +251,7 @@ pub fn build_stackless_ir<'code>(
             // indices after all instructions have been converted. BB-local variable accesses are
             // immediately linked and resolved for splitting, only cross-BB accesses will need to be
             // handled explicitly.
-            import_insn_to_ir(&mut machine, pool, address, &insn).map_err(|error| {
+            import_insn_to_ir(class_info, &mut machine, pool, address, &insn).map_err(|error| {
                 StacklessIrError::InsnIrImport {
                     address,
                     insn: format!("{insn:?}"),

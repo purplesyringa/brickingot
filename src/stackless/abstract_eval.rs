@@ -3,9 +3,7 @@ use crate::ast::{
     Arena, BasicStatement, BinOp, ExprId, Expression, PrimitiveType, Variable, VariableName,
     VariableNamespace,
 };
-use crate::preparse::insn_stack_effect::{
-    is_name_and_type_double_width, is_type_descriptor_double_width,
-};
+use crate::preparse::insn_stack_effect::{nat_width, type_descriptor_width};
 use noak::{
     descriptor::{MethodDescriptor, TypeDescriptor},
     reader::cpool::value::NameAndType,
@@ -95,13 +93,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
     ) -> Result<Vec<ExprId>, StackUnderflowError> {
         let parameter_sizes: Vec<usize> = method_descriptor
             .parameters()
-            .map(|ty| {
-                if is_type_descriptor_double_width(&ty) {
-                    2
-                } else {
-                    1
-                }
-            })
+            .map(type_descriptor_width)
             .collect();
         let mut arguments = parameter_sizes
             .iter()
@@ -116,11 +108,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         &mut self,
         name_and_type: &NameAndType<'code>,
     ) -> Result<ExprId, StackUnderflowError> {
-        if is_name_and_type_double_width(name_and_type) {
-            self.pop2()
-        } else {
-            self.pop()
-        }
+        self.pop_sized(nat_width(name_and_type))
     }
 
     fn push_sized(&mut self, size: usize, value: ExprId) {
@@ -145,22 +133,14 @@ impl<'arena, 'code> Machine<'arena, 'code> {
 
     pub fn push_return_type(&mut self, return_type: &Option<TypeDescriptor<'code>>, value: ExprId) {
         if let Some(ret) = return_type {
-            if is_type_descriptor_double_width(ret) {
-                self.push2(value);
-            } else {
-                self.push(value);
-            }
+            self.push_sized(type_descriptor_width(ret.clone()), value);
         } else {
             self.add(Statement::Basic(BasicStatement::Calculate(value)));
         }
     }
 
     pub fn push_nat(&mut self, name_and_type: &NameAndType<'code>, value: ExprId) {
-        if is_name_and_type_double_width(name_and_type) {
-            self.push2(value);
-        } else {
-            self.push(value);
-        }
+        self.push_sized(nat_width(name_and_type), value)
     }
 
     pub fn cast_primitive(

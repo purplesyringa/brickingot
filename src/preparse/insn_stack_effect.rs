@@ -1,9 +1,10 @@
+use crate::ClassInfo;
 use noak::{
-    descriptor::{BaseType, MethodDescriptor, TypeDescriptor},
+    descriptor::{BaseType, TypeDescriptor},
     error::DecodeError,
     reader::{
         attributes::RawInstruction::{self, *},
-        cpool::{ConstantPool, InterfaceMethodRef, Item, MethodRef, value::NameAndType},
+        cpool::{ConstantPool, FieldRef, Index, InterfaceMethodRef, Item, MethodRef, NameAndType},
     },
 };
 use thiserror::Error;
@@ -22,10 +23,18 @@ pub enum InsnStackEffectError {
     NotAMethodRef,
 }
 
-pub fn get_insn_stack_effect(
-    pool: &ConstantPool<'_>,
-    insn: &RawInstruction<'_>,
+pub fn get_insn_stack_effect<'code>(
+    pool: &ConstantPool<'code>,
+    insn: &RawInstruction<'code>,
+    class_info: &mut ClassInfo<'code>,
 ) -> Result<isize, InsnStackEffectError> {
+    let field = |index: Index<FieldRef<'code>>| -> Result<isize, InsnStackEffectError> {
+        Ok(nat_width(&pool.retrieve(index)?.name_and_type) as isize)
+    };
+    let mut invoke = |index: Index<NameAndType<'code>>| -> Result<isize, InsnStackEffectError> {
+        Ok(class_info.get_method_descriptor(index)?.stack_effect)
+    };
+
     // This could resolve via a table in most cases. LLVM compiles this as a jump table instead,
     // which is not ideal, but fine. No need to optimize this, at least for now.
     Ok(match insn {
@@ -163,17 +172,15 @@ pub fn get_insn_stack_effect(
         | TableSwitch(_) => -1,
 
         // Function calls
-        InvokeDynamic { index } => get_method_stack_effect(&pool.retrieve(*index)?.name_and_type)?,
-        InvokeInterface { index, .. } => {
-            get_method_stack_effect(&pool.retrieve(*index)?.name_and_type)? - 1
-        }
+        InvokeDynamic { index } => invoke(pool.get(*index)?.name_and_type)?,
+        InvokeInterface { index, .. } => invoke(pool.get(*index)?.name_and_type)? - 1,
         InvokeSpecial { index } => {
             let name_and_type = match pool.get(*index)? {
                 Item::MethodRef(MethodRef { name_and_type, .. }) => name_and_type,
                 Item::InterfaceMethodRef(InterfaceMethodRef { name_and_type, .. }) => name_and_type,
                 _ => return Err(InsnStackEffectError::NotAMethodRef),
             };
-            get_method_stack_effect(&pool.retrieve(*name_and_type)?)? - 1
+            invoke(*name_and_type)? - 1
         }
         InvokeStatic { index } => {
             let name_and_type = match pool.get(*index)? {
@@ -181,41 +188,15 @@ pub fn get_insn_stack_effect(
                 Item::InterfaceMethodRef(InterfaceMethodRef { name_and_type, .. }) => name_and_type,
                 _ => return Err(InsnStackEffectError::NotAMethodRef),
             };
-            get_method_stack_effect(&pool.retrieve(*name_and_type)?)?
+            invoke(*name_and_type)?
         }
-        InvokeVirtual { index } => {
-            get_method_stack_effect(&pool.retrieve(*index)?.name_and_type)? - 1
-        }
+        InvokeVirtual { index } => invoke(pool.get(*index)?.name_and_type)? - 1,
 
         // Field operations
-        GetField { index } => {
-            if is_name_and_type_double_width(&pool.retrieve(*index)?.name_and_type) {
-                1
-            } else {
-                0
-            }
-        }
-        GetStatic { index } => {
-            if is_name_and_type_double_width(&pool.retrieve(*index)?.name_and_type) {
-                2
-            } else {
-                1
-            }
-        }
-        PutField { index } => {
-            if is_name_and_type_double_width(&pool.retrieve(*index)?.name_and_type) {
-                -3
-            } else {
-                -2
-            }
-        }
-        PutStatic { index } => {
-            if is_name_and_type_double_width(&pool.retrieve(*index)?.name_and_type) {
-                -2
-            } else {
-                -1
-            }
-        }
+        GetField { index } => field(*index)? - 1,
+        GetStatic { index } => field(*index)?,
+        PutField { index } => -1 - field(*index)?,
+        PutStatic { index } => -field(*index)?,
 
         // Miscellaneous
         ANewArray { .. } | ArrayLength => 0,
@@ -232,43 +213,20 @@ pub fn get_insn_stack_effect(
     })
 }
 
-fn get_method_stack_effect(name_and_type: &NameAndType<'_>) -> Result<isize, InsnStackEffectError> {
-    // For the return type in particular, we could check whether the method descriptor ends
-    // with `)V`, `)D`, `)J`, or anything else. But we also have to check argument
-    // categories, which cannot be computed that easily without parsing, so let's bite the bullet.
-    // XXX: This is quite slow. Can we improve performance here?
-    let method_descriptor = MethodDescriptor::parse(name_and_type.descriptor)?;
-
-    let arguments_size: isize = method_descriptor
-        .parameters()
-        .map(|param| {
-            if is_type_descriptor_double_width(&param) {
-                2
-            } else {
-                1
-            }
-        })
-        .sum();
-
-    let return_size = if let Some(ret) = method_descriptor.return_type() {
-        if is_type_descriptor_double_width(&ret) {
-            2
-        } else {
-            1
-        }
-    } else {
-        0
-    };
-
-    Ok(return_size - arguments_size)
-}
-
-// Checks if a field descriptor is of type `double` or `long`.
-pub fn is_name_and_type_double_width(name_and_type: &NameAndType<'_>) -> bool {
+// Computes the category of a field descriptor.
+pub fn nat_width(name_and_type: &noak::reader::cpool::value::NameAndType<'_>) -> usize {
     // D is double, J is long
-    name_and_type.descriptor == "D" || name_and_type.descriptor == "J"
+    if name_and_type.descriptor == "D" || name_and_type.descriptor == "J" {
+        2
+    } else {
+        1
+    }
 }
 
-pub fn is_type_descriptor_double_width(descriptor: &TypeDescriptor<'_>) -> bool {
-    descriptor.dimensions == 0 && matches!(descriptor.base, BaseType::Double | BaseType::Long)
+pub fn type_descriptor_width(descriptor: TypeDescriptor<'_>) -> usize {
+    if descriptor.dimensions == 0 && matches!(descriptor.base, BaseType::Double | BaseType::Long) {
+        2
+    } else {
+        1
+    }
 }

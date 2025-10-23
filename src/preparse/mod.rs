@@ -3,6 +3,7 @@ pub mod insn_stack_effect;
 
 use self::insn_control_flow::{InsnControlFlow, can_insn_throw, get_insn_control_flow};
 use self::insn_stack_effect::{InsnStackEffectError, get_insn_stack_effect};
+use crate::ClassInfo;
 use crate::ast::Str;
 use crate::utils::IntervalTree;
 use core::ops::Range;
@@ -70,6 +71,7 @@ pub struct ExceptionHandler<'code> {
 pub fn extract_basic_blocks<'code>(
     cpool: &ConstantPool<'code>,
     code: &Code<'code>,
+    class_info: &mut ClassInfo<'code>,
 ) -> Result<Program<'code>, BytecodePreparsingError> {
     // Insert splits after every explicit jump, at each jump target, at each exception handler, and
     // at `try` boundaries. Also at the end and the beginning for implementation simplicity. Save
@@ -276,7 +278,7 @@ pub fn extract_basic_blocks<'code>(
             } else if address.as_u32() > bb.instruction_range.end {
                 return Err(BytecodePreparsingError::SplitInstruction);
             }
-            stack_size_at_end += get_insn_stack_effect(cpool, &insn)?;
+            stack_size_at_end += get_insn_stack_effect(cpool, &insn, class_info)?;
             bb.throws |= can_insn_throw(&insn);
         }
         let stack_size_at_end: usize = stack_size_at_end
