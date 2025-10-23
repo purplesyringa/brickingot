@@ -3,22 +3,23 @@
 //
 // This can lead to suboptimal codegen in cases where the value is produced by a ternary operator
 // and then explicitly moved around the stack across multiple basic blocks before being consumed,
-// but javac never emits such bytecode. This can theoretically be fixed at some performance cost,
-// but is probably unnecessary.
+// since the value would be ambiguous and thus not linked. This can theoretically be fixed at some
+// performance cost if we use a SSA-style approach, but is probably unnecessary, since javac never
+// emits such bytecode.
 //
 // The core of the algorithm is DFS over nodes `(bb_id, N)`, which denotes that we're interested in
 // what value `stackN` might be equal to at the entry to `bb_id`. Edges represent that information
 // needs to be integrated from another node.
 //
-// Such graph has a worst-case size of O(n_basic_blocks * n_variables), making this one of the only
-// quadratic pieces of the decompiler. This complexity is only reached when a significant number of
-// stack elements are held over a significant amount of basic blocks, which basically only happens
-// when a ton of ternaries are stuck together. This is so rare that the graph is, in practice, tiny.
+// Such a graph has a worst-case size of O(n_basic_blocks * n_variables). This complexity is only
+// reached when a significant number of stack elements are held over a significant amount of basic
+// blocks, which basically only happens when a ton of ternaries are stuck together. This is so rare
+// that the graph is, in practice, tiny.
 //
-// There's a small problem with using DFS on cyclic graphs: not all vertices in an SCCs will contain
-// information about the entire SCC, since we don't visit nodes recursively multiple times. This is
-// fixed by locating SCCs with Tarjan's algorithm and propagating the up-to-date information from
-// the entry vertex to the whole SCC.
+// Note that the graph is cyclic, and so a small problem arises with DFS, since not all nodes of
+// an SCC will contain information about the entire SCC. This can be fixed by locating SCCs with
+// Tarjan's algorithm and propagating the up-to-date information from the entry node to the whole
+// SCC.
 
 use super::{BasicBlock, abstract_eval::UnresolvedUse};
 use crate::arena::Arena;
@@ -137,9 +138,8 @@ impl<'a> Linker<'a> {
             if let Source::Missing = state.source {
                 // This should be unreachable. We only run this pass on reachable code, so there's
                 // an execution that reaches this statement. By retroactively tracking the source of
-                // the value in `stackN`, we'll either stumble upon `valueM`, upon an exception
-                // handler, or upon an uninitialized read from stack; but everything on the stack is
-                // always a valid value.
+                // the value in `stackN`, we'll either stumble on an exception handler or
+                // a `valueM`, since everything on the stack is always initialized.
                 panic!("stack variable without value initializer");
             }
 
@@ -172,9 +172,9 @@ pub fn link_stack_across_basic_blocks(
         let DfsNodeState { source, .. } = linker.visit((bb_id, var.name.id));
         assert!(linker.tarjan_stack.is_empty());
 
-        // Suppose that `stack1` could only be populated from a single `value0`. That doesn't,
-        // however, clearly imply that `stack1` equals the contents of `value0` *at time of use*,
-        // i.e. that another store to `value0` hasn't occured.
+        // Suppose that `stack1` can only be populated from a single `value0`. The hiccup is that it
+        // doesn't clearly imply that `stack1` equals the contents of `value0` *at time of use*,
+        // since another store to `value0` could've theoretically occured.
         //
         // Specifically, the concern is that a program execution with the following subsequence of
         // statements could exist:
@@ -200,18 +200,18 @@ pub fn link_stack_across_basic_blocks(
         match source {
             Source::Value(value_var) => {
                 arena[var.version] = Expression::Variable(value_var);
-                // Drop the now-unused access to make sure that the replaced `stackN` use won't keep
-                // `stackN` alive if it's otherwise unused. This is sufficient to guarantee no false
-                // positives during the DFS stage in `splitting` because all remaining stack
-                // accesses not for the purposes of stack manipulation are guaranteed to be part of
-                // computations (which we consider to be side effects) and thus keep this `stackN`
-                // use alive.
+                // Uses in `unresolved_uses` are treated as GC roots. Drop the now-unused access to
+                // make sure that the replaced `stackN` use won't keep `stackN` alive if it's
+                // otherwise unused. This is sufficient to guarantee no false positives during the
+                // DFS stage in `splitting` because all remaining stack accesses not for the
+                // purposes of stack manipulation are guaranteed to be part of computations, which
+                // we consider to be side effects.
                 //
                 // Forgetting to do this this can cause subtle bugs, since the removed `stackN`
                 // acting as a GC root can cause other linked-out stack definitions to become live,
                 // preventing the algorithm for removing dead definitions in `main_opt` from
                 // converging in a single step, and eventually stopping certain expressions from
-                // getting inlined.
+                // getting inlined. See the comments in `main_opt` for more information.
                 false
             }
             Source::Missing => unreachable!(),

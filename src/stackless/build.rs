@@ -1,5 +1,13 @@
 // This IR, and more specifically the nuances of optimizations we apply to it, is a bit weird.
 //
+// Disclaimer: this is not an SSA form, but it's close to it in motivation, and some algorithms
+// should remind you of the ones you might see in SSA construction. While SSA is easy to *use* in
+// compilers, building and then compiling it back into imperative code is non-trivial and would be
+// more complex than the passes we'd want to run on the SSA itself. We can achieve basically
+// everything we need with more control and better performance if we skip SSA. The only benefit of
+// using SSA would be familiarity, and I have to admit I'm not sufficiently familiar with efficient
+// SSA construction to take this risk. Disclaimer over.
+//
 // We obviously have variables for locals, named `slotN`. We also need to simulate stack and be able
 // to deduce what value each stack element contains across BBs -- so we have variables named
 // `stackN`, denoting the N-th element from the bottom of the stack (category two types occupy two
@@ -10,7 +18,7 @@
 // normally only emits them on user request, and not optimizing them gets us closer to source.
 // Operations on stack, however, should obviously be inlineable:
 // `stack0 = <expr>; stack1 = stack0 + 1` should eventually be rewritten to `stack1 = <expr> + 1` if
-// this particular assignment of `stack0` is not seen by any other use.
+// this particular assignment to `stack0` is not seen by any other use.
 //
 // This gets a bit trickier when you realize that we need to "see through" *moves* between stack
 // elements, which commonly arise due to `dup` or `swap` variants, even as the origins of the values
@@ -20,34 +28,36 @@
 //     stack0 = null
 // ...we want to understand that `stack1` now contains `<expr>`, even though neither
 // `stack1 = stack0` nor `stack0 = <expr>` hold anymore. That requires giving expressions unique
-// IDs, but retrofitting this onto an imperative IR gets ugly because there's now two different
-// kinds of names: expression names and variable names, where variables are also split into two
-// groups -- synthetics, like `stackN`, and locals, like `slotN`, only one of which is subject to
-// inlining.
+// IDs, but retrofitting this onto an imperative IR gets ugly, since there's be two kinds of IDs:
+// expression IDs and variable names.
 //
-// We use a slightly different, unified approach. Each non-trivial expression is assigned to
-// a unique `valueN` variable, which is then copied into a stack variable:
+// We use a unified approach instead. Each non-trivial expression is first assigned to a unique
+// `valueN` variable, which effectively acts as an expression ID. This variable is then copied to
+// a synthetic stack variable:
 //     value0 = <expr>
 //     stack0 = value0
-// We can then optimize all uses of `stack0` to `value0`, at least as long as `value0` is not
-// reassigned between the definition of `stack0` and the use, and all visible definitions of
-// `stack0` are equivalent to `stack0 = value0`. For lack of a better word, we call this process
-// "linking". Linking can see through chains of moves and replaces most `stackN` uses with `valueM`.
+// This means that all we need to track is which stack variables were assigned from which value
+// variables (transitively). In this example, we can optimize all uses of `stack0` to `value0` as
+// long as `value0` is not reassigned between the definition of `stack0` and the use, and all
+// visible definitions of `stack0` are equivalent to `stack0 = value0`. For lack of a better word,
+// we call this process "linking". Linking can see through chains of moves and replaces most
+// `stackN` uses with `valueM`.
 //
 // For the purposes of linking, most expressions are considered non-trivial, including literals. The
 // only exception is statements like `stackN = stackM`: in this case, an explicit `valueK` variable
-// will not be created to save `stackM` to if `stackM` already has a known value.
+// will not be created to save `stackM` to if `stackM` is already linked to a known value variable.
 //
-// Note that linking is only superficially similar to inlining:
-// - Inlining optimizes `x = <expr>; ... x` to `<expr>` when `...` has no side effects; linking
-//   optimizes `x = <var>; ... x` to `<var>` regardless of side effects, because `<var>` is
+// Note that linking (stack variables to values) is only superficially similar to inlining
+// (expressions into other expressions):
+// - Inlining optimizes `x = <expr>; ... x` to `<expr>` when `...` has no side effects, whereas
+//   linking optimizes `x = <var>; ... x` to `<var>` regardless of side effects, because `<var>` is
 //   guaranteed not to have side effects.
 // - Inlining acts on structurized control flow and can handle ternaries and short-circuiting logic
 //   operators; linking applies on the unstructured CFG level and can only link to a single
 //   definition.
 // They achieve different goals with different methods, and so are both necessary. Additionally,
 // linking is more performance-critical, as the unoptimized IR has many synthetic `stackN = stackM`
-// copies.
+// copies. We won't cover inlining here.
 //
 // The uses of `stackN` that linking cannot optimize out are precisely the places where SSA would
 // place `phi` functions. Such variables are retained. This can happen in a ternary expression or in
@@ -58,9 +68,10 @@
 // in `stack0`. The exception is assumed to be stored in the synthetic variable `exception0`; but we
 // cannot really insert the statement `stack0 = exception0` anywhere in the IR, because EH BBs can
 // be also entered by fallthrough. We thus simulate this statement by storing it in the per-handler
-// `struct` and tuning passes to assume it's part of the CFG. This allows many accesses to `stack0`
-// (as well as copies in other stack elements) to be optimized to use `exception0`, but still allows
-// for sound handling of situations like:
+// `struct` and tuning passes to assume it's part of the CFG, as if it runs on the *edge* rather
+// than inside nodes. This allows many accesses to `stack0` (as well as copies in other stack
+// elements) to be optimized to use `exception0`, but still allows for sound handling of situations
+// like:
 //     value0 = 1
 //     stack0 = value0
 //     // exception handler starts here
@@ -69,18 +80,19 @@
 // The assignment will be inserted into the IR when we generate structured IR in this case.
 //
 // On a higher level, linking can be seen as merging certain variables together. However, it's also
-// important to split identical variables apart when they have non-intersecting uses. This includes
-// not just `stackN` variables, but also `slotN` variables, as locals in non-intersecting scopes can
-// be allocated to the same slot. We call this process "splitting".
+// important to split identically named variables apart when they have non-intersecting uses. This
+// includes not just `stackN` variables, but also `slotN` variables, as locals in non-intersecting
+// scopes can be allocated to the same slot. We call this process "splitting".
 //
 // Splitting is implemented by adding unique "versions" to each `slotN`/`stackN` variable mention
 // and merging together versions in use-def chains. This ensures that all definitions that a given
 // use sees, as well as the use itself, access the same variable.
 //
 // In this sense, splitting is actually merging; but don't let that confuse you. Versioning does not
-// create *new* variables from the semantic point of view: different versions of a variable still
-// use the same storage on the IR level, and only reads of the latest version are allowed. This is
-// sound to *implement* by having multiple variables, but passes cannot assume that is the case.
+// create *new* variables from the semantic point of view: different versions of a variable are
+// still allowed to use the same storage in the abstract machine, i.e. only reads from the latest
+// version are allowed. This is sound to *implement* by having multiple variables, but passes cannot
+// assume that is the case.
 //
 // Uses from dead stack stores are ignored: `stack0 = value0` does not count as a use of `value0`
 // unless `stack0` is transitively used by something other than a dead stack store.
@@ -262,7 +274,7 @@ pub fn build_stackless_ir<'code>(
     // The core of these algorithms is DFS over nodes `(bb_id, var)`, which denotes that we're
     // interested in finding definitions of `var` visible at the entry to `bb_id`, and edges
     // represent that information needs to be integrated from another node. This makes it the only
-    // quadratic piece of the decompiler.
+    // quadratic part of the decompiler.
     //
     // In practice, the performance is better than what you'd expect from such worst-case time
     // complexity for reasons described in the comments of individual modules.
