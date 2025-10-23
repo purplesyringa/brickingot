@@ -1,7 +1,7 @@
 pub mod insn_control_flow;
 pub mod insn_stack_effect;
 
-use self::insn_control_flow::{InsnControlFlow, get_insn_control_flow};
+use self::insn_control_flow::{InsnControlFlow, can_insn_throw, get_insn_control_flow};
 use self::insn_stack_effect::{InsnStackEffectError, get_insn_stack_effect};
 use crate::ast::Str;
 use crate::interval_tree::IntervalTree;
@@ -50,6 +50,8 @@ pub struct BasicBlock {
     /// The IDs of BBs the last instruction in this BB can jump to. This includes fallthrough, but
     /// excludes jumps to exception handlers.
     pub successors: Vec<usize>,
+    /// Whether any instruction within the basic block can throw.
+    pub throws: bool,
 }
 
 pub struct Program<'code> {
@@ -61,7 +63,8 @@ pub struct ExceptionHandler<'code> {
     pub active_range: Range<usize>, // BB IDs
     pub target: usize,              // BB ID
     pub class: Option<Str<'code>>,
-    pub is_reachable: bool,
+    is_reachable: bool,
+    tail_is_reachable: bool, // whether there is a throwing reachable BB in the `target..end` range
 }
 
 pub fn extract_basic_blocks<'code>(
@@ -127,6 +130,7 @@ pub fn extract_basic_blocks<'code>(
             // stays in a sentinel-like state where only the trivial successor is recorded. We'll
             // remove it for divergent control flow a bit later.
             successors: vec![bb_id + 1],
+            throws: false,
         })
         .collect();
 
@@ -184,6 +188,7 @@ pub fn extract_basic_blocks<'code>(
                 None => None,
             },
             is_reachable: false,
+            tail_is_reachable: false,
         });
     }
 
@@ -216,13 +221,47 @@ pub fn extract_basic_blocks<'code>(
     let mut dfs_stack = vec![0];
     let mut in_stack = vec![false; basic_blocks.len()];
     in_stack[0] = true;
-    let mut remaining_eh = IntervalTree::new(
-        basic_blocks.len(),
-        exception_handlers
-            .iter()
-            .enumerate()
-            .map(|(handler_id, handler)| (handler_id, handler.active_range.clone())),
-    );
+
+    // I know this looks ridiculous.
+    //
+    // The accidental complexity comes, as always, from others' code. The problem we're dealing with
+    // here is that javac is bollocks and occasionally generates longer `try` ranges than
+    // reasonable. Specifically, `try..catch..finally` generates, among other ranges, a range
+    // covering `catch` blocks and the *first instruction* of the `finally` handler. This means that
+    // `target` ends up being inside `start..end`, resulting in a mess in the decompiled output.
+    //
+    // We fix this by moving `end` backward to `target` if all BBs in range `[target; end)` don't
+    // contain throwing instructions. This is specific enough that it shouldn't break anything else,
+    // including other codegen backends, and it's wide enough to reliably fix this particular
+    // problem.
+    //
+    // Unfortunately, this can affect reachability. The concern is that if the only reachable BBs
+    // are in range `[target; end)`, and none of them throw, we shouldn't recurse into the `catch`
+    // handler. To integrate this logic into DFS, we have to differentiate between throwing BBs,
+    // which make the `catch` reachable within the whole range, and non-throwing BBs, which only
+    // make it reachable in range `[start; target)`. This guarantees that the reachability graph is
+    // completely consistent with the exception ranges.
+
+    let [mut remaining_eh, mut remaining_eh_throwing] = [
+        // Applies to all BBs.
+        |handler: &ExceptionHandler<'_>| {
+            handler.active_range.start..handler.active_range.end.min(handler.target)
+        },
+        // Applies only to throwing BBs.
+        |handler: &ExceptionHandler<'_>| {
+            handler.active_range.start.max(handler.target)..handler.active_range.end
+        },
+    ]
+    .map(|range_fn| {
+        IntervalTree::new(
+            basic_blocks.len(),
+            exception_handlers
+                .iter()
+                .enumerate()
+                .map(|(handler_id, handler)| (handler_id, range_fn(handler))),
+        )
+    });
+
     while let Some(bb_id) = dfs_stack.pop() {
         let bb = &mut basic_blocks[bb_id];
 
@@ -238,6 +277,7 @@ pub fn extract_basic_blocks<'code>(
                 return Err(BytecodePreparsingError::SplitInstruction);
             }
             stack_size_at_end += get_insn_stack_effect(cpool, &insn)?;
+            bb.throws |= can_insn_throw(&insn);
         }
         let stack_size_at_end: usize = stack_size_at_end
             .try_into()
@@ -252,15 +292,33 @@ pub fn extract_basic_blocks<'code>(
         // Help borrowck. Don't forget to restore `bb.successors` afterwards.
         let tmp_successors = core::mem::take(&mut bb.successors);
         {
-            let successors = tmp_successors
+            let explicit_successors = tmp_successors
                 .iter()
-                .map(|succ_bb_id| (*succ_bb_id, stack_size_at_end))
-                .chain(remaining_eh.drain_containing(bb_id).map(|handler_id| {
-                    exception_handlers[handler_id].is_reachable = true;
-                    (exception_handlers[handler_id].target, 1)
-                }));
+                .map(|succ_bb_id| (*succ_bb_id, stack_size_at_end));
 
-            for (succ_bb_id, stack_size) in successors {
+            let eh_successors = remaining_eh
+                .drain_containing(bb_id)
+                .map(|handler_id| (handler_id, false))
+                .chain(
+                    bb.throws
+                        .then(|| {
+                            remaining_eh_throwing
+                                .drain_containing(bb_id)
+                                .map(|handler_id| (handler_id, true))
+                        })
+                        .into_iter()
+                        .flatten(),
+                )
+                .map(|(handler_id, is_tail)| {
+                    let handler = &mut exception_handlers[handler_id];
+                    handler.is_reachable = true;
+                    if is_tail {
+                        handler.tail_is_reachable = true;
+                    }
+                    (handler.target, 1)
+                });
+
+            for (succ_bb_id, stack_size) in explicit_successors.chain(eh_successors) {
                 if succ_bb_id == basic_blocks.len() {
                     return Err(BytecodePreparsingError::CodeFallthrough);
                 }
@@ -287,11 +345,18 @@ pub fn extract_basic_blocks<'code>(
                 instruction_range: 0..0,
                 stack_size_at_start: 0,
                 successors: Vec::new(),
+                throws: false,
             };
         }
     }
     // Erase unused exception handlers.
     exception_handlers.retain(|handler| handler.is_reachable);
+    // Truncate the exception handler.
+    for handler in &mut exception_handlers {
+        if !handler.tail_is_reachable && handler.target < handler.active_range.end {
+            handler.active_range.end = handler.target;
+        }
+    }
 
     Ok(Program {
         basic_blocks,

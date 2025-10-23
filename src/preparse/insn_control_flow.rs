@@ -76,3 +76,55 @@ pub fn get_insn_control_flow(
         },
     })
 }
+
+pub fn can_insn_throw(insn: &RawInstruction<'_>) -> bool {
+    // This is a rabbit hole. As per the JVM spec [1], *any* instruction can throw
+    // `VirtualMachineError` if the JVM implementation wishes so, the most commonly encountered
+    // subclasses of which are `OutOfMemoryError` and `StackOverflowError`. Figures. But
+    // unconditionally returning `true` from this function goes against the intent, which is to
+    // remove `try` around non-throwing instructions to correctly decompile `try..catch..finally`.
+    //
+    // So we're doing what seems reasonable rather than correct, and I'm not at all happy about
+    // this. We essentially try to guess how a JVM might be implemented, and while these assumptions
+    // are realistic, they aren't really supported by anything. It'd be great to find some experts
+    // on this, but I wasn't lucky.
+    //
+    // In this spirit, this mostly acts as a whitelist of non-throwing instructions rather than the
+    // other way round.
+    //
+    // [1]: https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-6.html#jvms-6.3
+    match insn {
+        // Out-of-bounds array indexes or NPE.
+        AALoad | AAStore | BALoad | BAStore | CALoad | CAStore | DALoad | DAStore | FALoad
+        | FAStore | IALoad | IAStore | LALoad | LAStore | SALoad | SAStore => true,
+        // Negative array sizes, invalid type, or OOM.
+        ANewArray { .. } | MultiANewArray { .. } | NewArray { .. } => true,
+        // Mismatched `monitorenter`/`monitorexit`.
+        AReturn | DReturn | FReturn | IReturn | LReturn | Return => true,
+        // NPE (and a couple other things for `monitorexit`).
+        ArrayLength | MonitorEnter | MonitorExit => true,
+        // NPE, invalid type, or a static field.
+        GetField { .. } | PutField { .. } => true,
+        // By design.
+        AThrow => true,
+        // Mismatched or invalid type.
+        CheckCast { .. } => true,
+        // Error during lazy class initialization or invalid type.
+        GetStatic { .. } | PutStatic { .. } => true,
+        // Invalid type or OOM.
+        New { .. } => true,
+        // Integer division by zero.
+        IDiv | IRem | LDiv | LRem => true,
+        // Propagated from the invoked method, plus stack overflow, among other reasons.
+        InvokeDynamic { .. }
+        | InvokeInterface { .. }
+        | InvokeSpecial { .. }
+        | InvokeStatic { .. }
+        | InvokeVirtual { .. } => true,
+        // Invalid type.
+        InstanceOf { .. } | LdC { .. } | LdCW { .. } | LdC2W { .. } => true,
+        // Covers constants, loads/stores to slots, stack manipulation, primitive type conversion,
+        // arithmetic, comparisons, and jumps. Too long to actually list here, sorry.
+        _ => false,
+    }
+}
