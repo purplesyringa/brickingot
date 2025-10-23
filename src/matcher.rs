@@ -307,9 +307,6 @@ fn simplify_continues_in_list(
 }
 
 pub fn rewrite_control_flow(stmts: &mut Vec<Statement<'_>>) {
-    for stmt in &mut *stmts {
-        rewrite_conditionals_in_stmt(stmt);
-    }
     make_loops_in_list(stmts, None);
     simplify_continues_in_list(stmts, None, &mut HashMap::new());
 
