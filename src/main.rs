@@ -1,5 +1,4 @@
 #![cfg_attr(false, no_std)]
-#![feature(btree_extract_if)] // on the road to stabilization
 #![feature(substr_range)]
 
 extern crate alloc;
