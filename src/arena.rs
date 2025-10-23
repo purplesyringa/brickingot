@@ -51,8 +51,15 @@ impl<'code> Arena<'code> {
             }
         }
         let cb = ManuallyDrop::into_inner(cb);
+        let value = cb(ExprId(id));
+        // If `cb` calls `alloc_with` recursively, this would overwrite an already existing value
+        // without invalidating references to it, which can cause UAF. (Note that the fact that we
+        // don't run the destructor in this case is irrelevant, since this can e.g. change the
+        // active `enum` variant.) Assert that no new element has appeared. For simple enough `cb`s,
+        // this should be optimized out.
+        assert!(self.last_id.get() == last_id, "alloc_with is not reentrant");
         unsafe {
-            self.get_raw_unchecked(ExprId(id)).write(cb(ExprId(id)));
+            self.get_raw_unchecked(ExprId(id)).write(value);
         }
         self.last_id.set(id);
         ExprId(id)
