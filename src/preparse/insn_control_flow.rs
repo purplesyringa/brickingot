@@ -84,15 +84,14 @@ pub fn can_insn_throw(insn: &RawInstruction<'_>) -> bool {
     // unconditionally returning `true` from this function goes against the intent, which is to
     // remove `try` around non-throwing instructions to correctly decompile `try..catch..finally`.
     //
-    // So we're doing what seems reasonable rather than correct, and I'm not at all happy about
-    // this. We essentially try to guess how a JVM might be implemented, and while these assumptions
-    // are realistic, they aren't really supported by anything. It'd be great to find some experts
-    // on this, but I wasn't lucky.
-    //
-    // In this spirit, this mostly acts as a whitelist of non-throwing instructions rather than the
-    // other way round.
+    // So we're doing what seems reasonable rather than correct, i.e. following the behavior of
+    // HotSpot. HotSpot only throws `StackOverflowError` on method invocations, and
+    // `OutOfMemoryError` is only considered recoverable when occurring directly due to
+    // memory-allocating instructions. [2] This is not guaranteed to apply to other JVMs, but these
+    // assumptions seem realistic enough.
     //
     // [1]: https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-6.html#jvms-6.3
+    // [2]: https://t.me/c/2002502458/4129 (for the sake of history)
     match insn {
         // Out-of-bounds array indexes or NPE.
         AALoad | AAStore | BALoad | BAStore | CALoad | CAStore | DALoad | DAStore | FALoad
