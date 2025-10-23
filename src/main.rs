@@ -51,7 +51,7 @@ pub enum MethodDecompileError {
 }
 
 fn decompile_class_file(raw_bytes: &[u8]) -> Result<(), ClassDecompileError> {
-    let class = Class::new(&raw_bytes)?;
+    let class = Class::new(raw_bytes)?;
     let pool = class.pool();
 
     // let bootstrap_methods: Vec<BootstrapMethod> = match class

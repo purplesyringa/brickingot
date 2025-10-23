@@ -21,10 +21,10 @@ pub struct Program<'code> {
 impl<'code> DebugIr<'code> for Program<'code> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         for (i, stmt) in self.statements.iter().enumerate() {
-            write!(f, "{i}: {}\n", arena.debug(stmt))?;
+            writeln!(f, "{i}: {}", arena.debug(stmt))?;
         }
         for handler in &self.exception_handlers {
-            write!(f, "{handler}\n")?;
+            writeln!(f, "{handler}")?;
         }
         Ok(())
     }

@@ -216,7 +216,7 @@ impl<'code> DebugIr<'code> for Expression<'code> {
                     } => write!(f, "indy #{bootstrap_method_attr} ")?,
                 }
                 write!(f, "{}[{}](", method_name, descriptor)?;
-                if let Some(first_arg) = arguments.get(0) {
+                if let Some(first_arg) = arguments.first() {
                     write!(f, "{}", arena.debug(first_arg))?;
                     for arg in &arguments[1..] {
                         write!(f, ", {}", arena.debug(arg))?;
