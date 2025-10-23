@@ -13,7 +13,7 @@
 use super::{BasicBlock, ExceptionHandlerBlock, Statement, abstract_eval::UnresolvedUse};
 use crate::arena::{Arena, ExprId};
 use crate::ast::{BasicStatement, Expression, Variable, VariableName, VariableNamespace};
-use crate::dsu::DisjointSetUnion;
+use crate::union_find::UnionFind;
 use alloc::collections::BTreeMap;
 use core::cell::Cell;
 use rustc_hash::FxHashMap;
@@ -39,17 +39,17 @@ type TryRangeMap = BTreeMap<usize, (usize, ExprId)>; // start -> (end, use_expr_
 
 struct Merger<'a> {
     basic_blocks: &'a [BasicBlock],
-    dsu: DisjointSetUnion,
+    versions: UnionFind,
     resolved_uses: FxHashMap<(usize, VariableName), ExprId>,
     try_ranges_per_variable: FxHashMap<VariableName, TryRangeMap>,
     tasks: Vec<UseDefTask>,
 }
 
 impl<'a> Merger<'a> {
-    fn new(basic_blocks: &'a mut [BasicBlock], dsu_len: u32) -> Self {
+    fn new(basic_blocks: &'a mut [BasicBlock], n_versions: u32) -> Self {
         Self {
             basic_blocks,
-            dsu: DisjointSetUnion::new(dsu_len),
+            versions: UnionFind::new(n_versions),
             resolved_uses: FxHashMap::default(),
             try_ranges_per_variable: FxHashMap::default(),
             tasks: Vec::new(),
@@ -82,7 +82,7 @@ impl<'a> Merger<'a> {
         // `resolved_uses` stores *some* valid representative of the connected component.
         match self.resolved_uses.entry((bb_id, name)) {
             Entry::Occupied(entry) => {
-                self.dsu.merge(use_expr_id.0, entry.get().0);
+                self.versions.merge(use_expr_id.0, entry.get().0);
                 return;
             }
             Entry::Vacant(entry) => {
@@ -100,7 +100,7 @@ impl<'a> Merger<'a> {
             );
             if let Some(defs) = self.basic_blocks[bb_id].sealed_bb.slot_defs.get(&name) {
                 for def_expr_id in defs {
-                    self.dsu.merge(use_expr_id.0, def_expr_id.0);
+                    self.versions.merge(use_expr_id.0, def_expr_id.0);
                 }
             }
         }
@@ -116,7 +116,7 @@ impl<'a> Merger<'a> {
                 .get(&name)
             {
                 let def_expr_id = def.def_expr_id.expect("def_expr_id not set for variable");
-                self.dsu.merge(use_expr_id.0, def_expr_id.0);
+                self.versions.merge(use_expr_id.0, def_expr_id.0);
                 if let Some(var) = def.copy_stack_from_predecessor {
                     // Now that we know the store is live, use what it loads from.
                     self.tasks.push(UseDefTask {
@@ -144,7 +144,7 @@ impl<'a> Merger<'a> {
         eh: &ExceptionHandlerBlock,
     ) {
         if name.namespace == VariableNamespace::Stack && name.id == 0 {
-            self.dsu.merge(use_expr_id.0, eh.stack0_def.0);
+            self.versions.merge(use_expr_id.0, eh.stack0_def.0);
             return;
         }
 
@@ -188,7 +188,7 @@ impl<'a> Merger<'a> {
                 .map(|(start, (end, range_expr_id))| {
                     new_range = new_range.start.min(start)..new_range.end.max(end);
                     let uncovered_range = it_bb.get()..start;
-                    self.dsu.merge(use_expr_id.0, range_expr_id.0);
+                    self.versions.merge(use_expr_id.0, range_expr_id.0);
                     it_bb.set(end);
                     uncovered_range
                 })
@@ -217,21 +217,23 @@ impl<'a> Merger<'a> {
     }
 
     fn finish(self) -> MergedVariables {
-        MergedVariables { dsu: self.dsu }
+        MergedVariables {
+            versions: self.versions,
+        }
     }
 }
 
 struct MergedVariables {
-    dsu: DisjointSetUnion,
+    versions: UnionFind,
 }
 
 impl MergedVariables {
     fn resolve(&mut self, expr_id: ExprId) -> ExprId {
-        ExprId(self.dsu.resolve(expr_id.0))
+        ExprId(self.versions.resolve(expr_id.0))
     }
 
     fn is_unique(&self, expr_id: ExprId) -> bool {
-        self.dsu.is_unique(expr_id.0)
+        self.versions.is_unique(expr_id.0)
     }
 }
 

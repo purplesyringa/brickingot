@@ -1,9 +1,9 @@
-pub struct DisjointSetUnion {
+pub struct UnionFind {
     // If `x >= 0`, it's the parent ID. If `x < 0`, it's `-rank`.
     parents_or_ranks: Vec<i32>,
 }
 
-impl DisjointSetUnion {
+impl UnionFind {
     pub fn new(len: u32) -> Self {
         Self {
             parents_or_ranks: vec![-1; len as usize],
