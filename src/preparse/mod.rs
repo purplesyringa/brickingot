@@ -51,7 +51,7 @@ pub struct BasicBlock {
     /// excludes jumps to exception handlers.
     pub successors: Vec<usize>,
     /// Whether any instruction within the basic block can throw.
-    pub throws: bool,
+    throws: bool,
 }
 
 pub struct Program<'code> {
