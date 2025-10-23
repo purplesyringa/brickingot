@@ -6,11 +6,10 @@ extern crate alloc;
 mod arena;
 mod ast;
 mod high_level;
-mod interval_tree;
 mod preparse;
 mod stackless;
 mod structured;
-mod union_find;
+mod utils;
 
 use crate::arena::Arena;
 use crate::high_level::decompile_cf_constructs;

@@ -4,7 +4,7 @@ pub mod insn_stack_effect;
 use self::insn_control_flow::{InsnControlFlow, can_insn_throw, get_insn_control_flow};
 use self::insn_stack_effect::{InsnStackEffectError, get_insn_stack_effect};
 use crate::ast::Str;
-use crate::interval_tree::IntervalTree;
+use crate::utils::IntervalTree;
 use core::ops::Range;
 use noak::{
     error::DecodeError,

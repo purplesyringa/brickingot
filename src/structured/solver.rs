@@ -1,8 +1,8 @@
 use rustc_hash::FxHashMap;
 
 use super::gap_tracker::GapTracker;
-use crate::interval_tree::IntervalTree;
 use crate::stackless;
+use crate::utils::IntervalTree;
 use alloc::collections::BTreeMap;
 use core::ops::Range;
 

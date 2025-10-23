@@ -13,7 +13,7 @@
 use super::{BasicBlock, ExceptionHandlerBlock, Statement, abstract_eval::UnresolvedUse};
 use crate::arena::{Arena, ExprId};
 use crate::ast::{BasicStatement, Expression, Variable, VariableName, VariableNamespace};
-use crate::union_find::UnionFind;
+use crate::utils::UnionFind;
 use alloc::collections::BTreeMap;
 use core::cell::Cell;
 use rustc_hash::FxHashMap;
