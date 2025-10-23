@@ -40,7 +40,7 @@ type TryRangeMap = BTreeMap<usize, (usize, ExprId)>; // start -> (end, use_expr_
 struct Merger<'a> {
     basic_blocks: &'a [BasicBlock],
     versions: UnionFind,
-    resolved_uses: FxHashMap<(usize, VariableName), ExprId>,
+    resolved_uses: FxHashMap<(usize, VariableName), ExprId>, // (bb_id, name) -> version
     try_ranges_per_variable: FxHashMap<VariableName, TryRangeMap>,
     tasks: Vec<UseDefTask>,
 }
@@ -159,10 +159,11 @@ impl<'a> Merger<'a> {
         );
 
         // We want to merge `use_expr_id` with *all* definitions of the same variable within `try`
-        // blocks that use this BB as the handler. In other words, we want to add a task for each BB
-        // contained within any range in `eh_entry_for_bb_ranges`. But that would be superquadratic,
-        // so to maintain reasonable time complexity, we maintain a per-variable auxiliary range map
-        // that contains information about BB ranges that have already been handled.
+        // blocks that use this BB as the handler, since code may throw e.g. `VirtualMachineError`
+        // at any point. In other words, we want to add a task for each BB contained within any
+        // range in `eh_entry_for_bb_ranges`. But that would be superquadratic, so to maintain
+        // reasonable time complexity, we maintain a per-variable auxiliary range map that contains
+        // information about BB ranges that have already been handled.
         let map = self.try_ranges_per_variable.entry(name).or_default();
 
         for bb_range in &eh.eh_entry_for_bb_ranges {
@@ -176,10 +177,8 @@ impl<'a> Merger<'a> {
                 .last()
                 .map(|(start, _)| *start)
                 .unwrap_or(0);
-            let intersecting_ranges = map
-                .extract_if(it_start..bb_range.end, move |start, (end, _)| {
-                    *start < bb_range.end && *end > bb_range.start
-                });
+            let intersecting_ranges =
+                map.extract_if(it_start..bb_range.end, |_, (end, _)| *end > bb_range.start);
 
             // Merge versions with intersecting ranges and get a list of uncovered ranges.
             let it_bb = Cell::new(bb_range.start);
@@ -305,6 +304,8 @@ pub fn merge_versions_across_basic_blocks(
 
     for bb in basic_blocks {
         if let Some(eh) = &mut bb.eh {
+            // If the `stack0 = exception0` definition is directly used by anything and wasn't
+            // optimized out during linking, it needs to be present in the resulting IR.
             eh.stack0_exception0_copy_is_necessary = !merged.is_unique(eh.stack0_def);
         }
     }

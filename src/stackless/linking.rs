@@ -211,7 +211,7 @@ pub fn link_stack_across_basic_blocks(
                 // acting as a GC root can cause other linked-out stack definitions to become live,
                 // preventing the algorithm for removing dead definitions in `main_opt` from
                 // converging in a single step, and eventually stopping certain expressions from
-                // getting inlined. See the comments in `main_opt` for more information.
+                // getting inlined. See the comments in `splitting` for more information.
                 false
             }
             Source::Missing => unreachable!(),
