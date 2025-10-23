@@ -121,7 +121,7 @@ pub enum Expression<'code> {
         //     static void f(Object o) {}
         //     static void f(String s) {}
         //     static void g(String s) { f((Object)o); }
-        // ...where the explicit cast to `Object` does not emit `checkcast` becuase it's an upcast,
+        // ...where the explicit cast to `Object` does not emit `checkcast` because it's an upcast,
         // and the only piece of information that specifies the correct overload is the method
         // signature.
         descriptor: Str<'code>,

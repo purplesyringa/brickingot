@@ -174,7 +174,7 @@ pub fn link_stack_across_basic_blocks(
 
         // Suppose that `stack1` can only be populated from a single `value0`. The hiccup is that it
         // doesn't clearly imply that `stack1` equals the contents of `value0` *at time of use*,
-        // since another store to `value0` could've theoretically occured.
+        // since another store to `value0` could've theoretically occurred.
         //
         // Specifically, the concern is that a program execution with the following subsequence of
         // statements could exist:

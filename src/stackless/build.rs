@@ -64,7 +64,7 @@
 // a loop, but javac never accesses stack elements populated by the previous loop iteration, so this
 // doesn't need explicit handling in practice.
 //
-// A minor complication arises in exception handlers, which are populated with the expection object
+// A minor complication arises in exception handlers, which are populated with the exception object
 // in `stack0`. The exception is assumed to be stored in the synthetic variable `exception0`; but we
 // cannot really insert the statement `stack0 = exception0` anywhere in the IR, because EH BBs can
 // be also entered by fallthrough. We thus simulate this statement by storing it in the per-handler
