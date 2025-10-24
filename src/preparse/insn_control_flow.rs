@@ -85,13 +85,15 @@ pub fn can_insn_throw(insn: &RawInstruction<'_>) -> bool {
     // remove `try` around non-throwing instructions to correctly decompile `try..catch..finally`.
     //
     // So we're doing what seems reasonable rather than correct, i.e. following the behavior of
-    // HotSpot. HotSpot only throws `StackOverflowError` on method invocations, and
-    // `OutOfMemoryError` is only considered recoverable when occurring directly due to
-    // memory-allocating instructions. [2] This is not guaranteed to apply to other JVMs, but these
-    // assumptions seem realistic enough.
+    // HotSpot. HotSpot only throws `StackOverflowError` in the prologue of a method (i.e. after
+    // `invoke`, but before any bytecode instruction) [2], and `OutOfMemoryError` is only considered
+    // recoverable
+    // when occurring directly due to memory-allocating instructions. [3] This is not guaranteed to
+    // apply to other JVMs, but these assumptions seem realistic enough.
     //
     // [1]: https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-6.html#jvms-6.3
-    // [2]: https://t.me/c/2002502458/4129 (for the sake of history)
+    // [2]: https://pangin.pro/posts/stack-overflow-handling
+    // [3]: https://t.me/c/2002502458/4129 (for the sake of posterity)
     match insn {
         // Out-of-bounds array indexes or NPE.
         AALoad | AAStore | BALoad | BAStore | CALoad | CAStore | DALoad | DAStore | FALoad
