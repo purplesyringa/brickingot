@@ -225,7 +225,10 @@ pub fn satisfy_block_requirements(
     // jump in `continue` to be lowered before attempting to lower `try`. In addition, the order in
     // which `catch` closures match types matters since one catch a subclass of the other.
 
-    // Many data structures here are indexed by statement ID -- don't waste cache on whitespace.
+    // Many data structures here are indexed by statement ID, and we don't want to waste cache on
+    // whitespace. Unfortunately, even though we have access to basic blocks at this point, we can't
+    // use BB IDs here, since we might want to make blocks that cover the terminators of a basic
+    // block, but not the basic block in its entirety, and operating on BBs does not allow that.
     let mut used_indices: Vec<usize> = [0, program_len]
         .into_iter()
         .chain(
