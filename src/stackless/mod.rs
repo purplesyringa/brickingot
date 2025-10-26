@@ -1,11 +1,13 @@
 mod abstract_eval;
 mod build;
+mod exceptions;
 mod insn_ir_import;
 mod linking;
 mod splitting;
 
 use self::abstract_eval::SealedBlock;
 pub use self::build::{StacklessIrError, build_stackless_ir};
+pub use self::exceptions::legalize_exception_handling;
 use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
 use core::fmt::{self, Display};
 use core::ops::Range;
@@ -13,15 +15,17 @@ use noak::MStr;
 
 #[derive(Debug)]
 pub struct Program<'code> {
-    pub statements: Vec<Statement>,
     pub basic_blocks: Vec<BasicBlock>,
     pub exception_handlers: Vec<ExceptionHandler<'code>>,
 }
 
 impl<'code> DebugIr<'code> for Program<'code> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
-        for (i, stmt) in self.statements.iter().enumerate() {
-            writeln!(f, "{i}: {}", arena.debug(stmt))?;
+        for (bb_id, bb) in self.basic_blocks.iter().enumerate() {
+            writeln!(f, "bb{bb_id}:")?;
+            for stmt in &bb.statements {
+                writeln!(f, "{}", arena.debug(stmt))?;
+            }
         }
         for handler in &self.exception_handlers {
             writeln!(f, "{handler}")?;
@@ -33,7 +37,6 @@ impl<'code> DebugIr<'code> for Program<'code> {
 #[derive(Debug)]
 pub enum Statement {
     Basic(BasicStatement),
-    Label,
     Jump {
         condition: ExprId,
         target: usize,
@@ -49,16 +52,15 @@ impl<'code> DebugIr<'code> for Statement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         match self {
             Self::Basic(stmt) => write!(f, "{}", arena.debug(stmt)),
-            Self::Label => write!(f, "label;"),
             Self::Jump { condition, target } => {
-                write!(f, "if ({}) jump {target};", arena.debug(condition))
+                write!(f, "if ({}) goto {target};", arena.debug(condition))
             }
             Self::Switch { key, arms, default } => {
                 write!(f, "switch ({}) ", arena.debug(key))?;
                 for (value, target) in arms {
-                    write!(f, "{value} => jump {target}; ")?;
+                    write!(f, "{value} => goto {target}; ")?;
                 }
-                write!(f, "default => jump {default};")
+                write!(f, "default => goto {default};")
             }
         }
     }
@@ -66,16 +68,15 @@ impl<'code> DebugIr<'code> for Statement {
 
 #[derive(Debug)]
 pub struct BasicBlock {
-    pub stmt_range: Range<usize>,
+    pub statements: Vec<Statement>,
     /// Excludes throwing locations that call into this BB for exception handling.
     pub predecessors: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ExceptionHandler<'code> {
-    pub stmt_range: Range<usize>,
-    pub bb_range: Range<usize>,
-    pub target_stmt: usize,
+    pub active_range: Range<usize>,
+    pub target: usize,
     pub class: Option<Str<'code>>,
     pub stack0_exception0_copy_versions: Option<(ExprId, ExprId)>,
 }
@@ -84,17 +85,17 @@ impl Display for ExceptionHandler<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "try {{ stmt {:?} / bb {:?} }} catch ({}) {{ goto {}; }}",
-            self.stmt_range,
-            self.bb_range,
+            "try {{ {:?} }} catch ({}) {{ goto {}; }}",
+            self.active_range,
             self.class
                 .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
-            self.target_stmt,
+            self.target,
         )
     }
 }
 
 struct InternalBasicBlock {
+    statements: Vec<Statement>,
     sealed_bb: SealedBlock,
     /// Excludes throwing locations that call into this BB for exception handling.
     predecessors: Vec<usize>,

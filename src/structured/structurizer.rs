@@ -1,6 +1,5 @@
 use super::{
     Catch, Statement,
-    exceptions::legalize_exception_handling,
     solver::{
         Node, RequirementImplementation, RequirementKey, compute_block_requirements,
         satisfy_block_requirements,
@@ -9,29 +8,23 @@ use super::{
 use crate::ast::{
     Arena, BasicStatement, ExprId, Expression, Variable, VariableName, VariableNamespace,
 };
-use crate::stackless;
+use crate::linear;
 use rustc_hash::FxHashMap;
 
 pub fn structure_control_flow<'code>(
     arena: &Arena<'code>,
-    mut stackless_ir: stackless::Program<'code>,
+    linear_ir: linear::Program<'code>,
 ) -> Vec<Statement<'code>> {
     // If you're confused as to what's happening here, read this first:
     // https://purplesyringa.moe/blog/recovering-control-flow-structures-without-cfgs/. The post
     // does not cover this implementation in its entirety, but it's pretty close.
     // `compute_block_requirements` effectively generates the arrows, `satisfy_block_requirements`
     // effectively builds a tree, and everything else is glue and exception handling logic.
-
-    // `try` blocks are weird. They are not guaranteed to be nested correctly, which causes all
-    // sorts of problems. Fixing this also requires modifying statements, so it's the first thing we
-    // do, before we have a chance to run any analysis pass.
-    legalize_exception_handling(&mut stackless_ir);
-
-    let requirements = compute_block_requirements(&stackless_ir);
+    let requirements = compute_block_requirements(&linear_ir);
     let (mut req_keys, req_values): (Vec<_>, _) = requirements.into_iter().unzip();
 
     let (tree, implementations, next_block_id) =
-        satisfy_block_requirements(stackless_ir.statements.len(), req_values);
+        satisfy_block_requirements(linear_ir.statements.len(), req_values);
 
     // Add keys for dynamically created dispatch jumps.
     let mut id = req_keys.len();
@@ -65,7 +58,7 @@ pub fn structure_control_flow<'code>(
 
     let mut structurizer = Structurizer {
         arena,
-        stackless_ir,
+        linear_ir,
         try_block_to_handler,
         jump_implementations,
         next_block_id,
@@ -88,7 +81,7 @@ pub fn structure_control_flow<'code>(
 
 struct Structurizer<'arena, 'code> {
     arena: &'arena Arena<'code>,
-    stackless_ir: stackless::Program<'code>,
+    linear_ir: linear::Program<'code>,
     try_block_to_handler: FxHashMap<usize, usize>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
     next_block_id: usize,
@@ -122,7 +115,7 @@ impl<'code> Structurizer<'_, 'code> {
                     .try_block_to_handler
                     .remove(&id)
                     .expect("try block without catch");
-                let handler = self.stackless_ir.exception_handlers[handler_index].clone();
+                let handler = self.linear_ir.exception_handlers[handler_index].clone();
 
                 let mut catch_children = Vec::new();
                 if let Some((stack0_version, exception0_version)) =
@@ -192,18 +185,14 @@ impl<'code> Structurizer<'_, 'code> {
     fn emit_stmt(&mut self, stmt_index: usize, out: &mut Vec<Statement<'code>>) {
         // Need to replace with *something*, `return;` works fine.
         let stmt = core::mem::replace(
-            &mut self.stackless_ir.statements[stmt_index],
-            stackless::Statement::Basic(BasicStatement::ReturnVoid),
+            &mut self.linear_ir.statements[stmt_index],
+            linear::Statement::Basic(BasicStatement::ReturnVoid),
         );
 
         match stmt {
-            stackless::Statement::Basic(stmt) => out.push(Statement::Basic(stmt)),
+            linear::Statement::Basic(stmt) => out.push(Statement::Basic(stmt)),
 
-            stackless::Statement::Label => {
-                unreachable!("labels should've been removed on the previous pass")
-            }
-
-            stackless::Statement::Jump { condition, .. } => {
+            linear::Statement::Jump { condition, .. } => {
                 let out = if let Expression::ConstInt(1) = self.arena[condition] {
                     out
                 } else {
@@ -219,7 +208,7 @@ impl<'code> Structurizer<'_, 'code> {
                 self.emit_jump(RequirementKey::Jump { stmt_index }, out);
             }
 
-            stackless::Statement::Switch { key, arms, default } => {
+            linear::Statement::Switch { key, arms, default } => {
                 // Switches are only guaranteed to have a quality lowering if the arms are sorted by
                 // target.
                 let mut arms: Vec<(Option<i32>, usize)> = core::iter::once((None, default))

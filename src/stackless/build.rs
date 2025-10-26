@@ -108,9 +108,7 @@ use super::abstract_eval::{Machine, SealedBlock};
 use super::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use super::linking::link_stack_across_basic_blocks;
 use super::splitting::merge_versions_across_basic_blocks;
-use super::{
-    BasicBlock, ExceptionHandler, ExceptionHandlerBlock, InternalBasicBlock, Program, Statement,
-};
+use super::{BasicBlock, ExceptionHandler, ExceptionHandlerBlock, InternalBasicBlock, Program};
 use crate::ClassInfo;
 use crate::ast::{Arena, Expression, Variable, VariableName, VariableNamespace};
 use crate::preparse::{self, insn_stack_effect::type_descriptor_width};
@@ -151,20 +149,47 @@ pub fn build_stackless_ir<'code>(
 ) -> Result<Program<'code>, StacklessIrError> {
     let mut machine = Machine::new(arena);
 
-    let mut ir_basic_blocks = Vec::new();
-    // +1 for a fake entry BB populating method arguments. This needs to be done in a separate basic
-    // block and not as part of the first real BB, as the first BB may have predecessors.
-    ir_basic_blocks.resize_with(preparsed_program.basic_blocks.len() + 1, || {
-        InternalBasicBlock {
+    // Add a synthetic BB at the very beginning to populate method arguments and synthetics. This
+    // needs to be done in a separate basic block and not as part of the first real BB, as the first
+    // BB may have predecessors, which makes everything confusing. Since our BBs are sorted by
+    // program order, this shifts all BB IDs by one.
+    for bb in &mut preparsed_program.basic_blocks {
+        for succ_bb_id in &mut bb.successors {
+            *succ_bb_id += 1;
+        }
+    }
+    for handler in &mut preparsed_program.exception_handlers {
+        handler.active_range = handler.active_range.start + 1..handler.active_range.end + 1;
+        handler.target += 1;
+    }
+    preparsed_program.basic_blocks.insert(
+        0,
+        preparse::BasicBlock {
+            instruction_range: 0..0,
+            stack_size_at_start: 0,
+            successors: vec![1],
+            throws: false,
+        },
+    );
+
+    machine.address_to_bb_id = preparsed_program
+        .basic_blocks
+        .iter()
+        .enumerate()
+        .map(|(bb_id, bb)| (bb.instruction_range.start, bb_id))
+        .collect();
+
+    let mut ir_basic_blocks: Vec<InternalBasicBlock> = (0..preparsed_program.basic_blocks.len())
+        .map(|_| InternalBasicBlock {
+            statements: Vec::new(),
             sealed_bb: SealedBlock::default(),
             predecessors: Vec::new(),
             eh: None,
-        }
-    });
+        })
+        .collect();
 
     // Initialize method arguments
-    let entry_bb_id = preparsed_program.basic_blocks.len();
-    machine.bb_id = entry_bb_id;
+    machine.bb_id = 0;
     let mut next_slot_id = 0;
     if !is_static {
         machine.set_slot(next_slot_id, arena.alloc(Expression::This));
@@ -175,8 +200,8 @@ pub fn build_stackless_ir<'code>(
         machine.set_slot(next_slot_id, value);
         next_slot_id += type_descriptor_width(ty);
     }
-    ir_basic_blocks[entry_bb_id].sealed_bb = machine.seal_basic_block();
-    ir_basic_blocks[0].predecessors.push(entry_bb_id);
+    ir_basic_blocks[0].sealed_bb = machine.seal_basic_block();
+    ir_basic_blocks[1].predecessors.push(0);
 
     // Accumulate `try` ranges for exception handlers.
     let mut eh_entry_for_bb_ranges = vec![Vec::new(); preparsed_program.basic_blocks.len()];
@@ -186,13 +211,15 @@ pub fn build_stackless_ir<'code>(
 
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
     // bytecode and we'd rather not worry about that.
-    for (bb_id, (bb, eh_entry_for_bb_ranges)) in preparsed_program
+    for (bb_id, (preparsed_bb, eh_entry_for_bb_ranges)) in preparsed_program
         .basic_blocks
         .iter_mut()
         .zip(eh_entry_for_bb_ranges)
         .enumerate()
+        // skip entry BB
+        .skip(1)
     {
-        machine.stack_size = bb.stack_size_at_start;
+        machine.stack_size = preparsed_bb.stack_size_at_start;
         machine.bb_id = bb_id;
 
         ir_basic_blocks[bb_id].eh = if eh_entry_for_bb_ranges.is_empty() {
@@ -222,29 +249,21 @@ pub fn build_stackless_ir<'code>(
             })
         };
 
-        for succ_bb_id in &bb.successors {
+        for succ_bb_id in &preparsed_bb.successors {
             ir_basic_blocks[*succ_bb_id].predecessors.push(bb_id);
         }
 
-        // Place a label at the beginning of each BB, since we need to resolve addresses in jump
-        // targets or `try` blocks to statement indices. We can't read `statements.len()` and
-        // populate a map directly here, as statements will be rearranged in a bit by
-        // `merge_versions_across_basic_blocks`.
-        machine.add(Statement::Label);
-
-        for row in code.raw_instructions_from(Index::new(bb.instruction_range.start))? {
+        for row in code.raw_instructions_from(Index::new(preparsed_bb.instruction_range.start))? {
             let (address, insn) = row?;
             let address = address.as_u32();
-            if address >= bb.instruction_range.end {
-                assert_eq!(address, bb.instruction_range.end);
+            if address >= preparsed_bb.instruction_range.end {
+                assert_eq!(address, preparsed_bb.instruction_range.end);
                 break;
             }
 
             let stack_size_before_insn = machine.stack_size;
-            // Jump targets are initialized to instruction addresses. We'll remap them to statement
-            // indices after all instructions have been converted. BB-local variable accesses are
-            // immediately linked and resolved for splitting, only cross-BB accesses will need to be
-            // handled explicitly.
+            // BB-local variable accesses are immediately linked and resolved for splitting, only
+            // cross-BB accesses will need to be handled explicitly.
             import_insn_to_ir(class_info, &mut machine, pool, address, &insn).map_err(|error| {
                 StacklessIrError::InsnIrImport {
                     address,
@@ -255,11 +274,11 @@ pub fn build_stackless_ir<'code>(
             })?;
         }
 
+        ir_basic_blocks[bb_id].statements = core::mem::take(&mut machine.statements);
         ir_basic_blocks[bb_id].sealed_bb = machine.seal_basic_block();
     }
 
     let mut unresolved_uses = machine.unresolved_uses;
-    let mut statements = machine.statements;
 
     // The core of these algorithms is DFS over nodes `(bb_id, var)`, which denotes that we're
     // interested in finding definitions of `var` visible at the entry to `bb_id`, and edges
@@ -275,97 +294,37 @@ pub fn build_stackless_ir<'code>(
     // programs are also well-formed enough that the performance of these passes is quite good, so
     // it doesn't make much sense to provide a separate quasilinear implementation.
     link_stack_across_basic_blocks(arena, &ir_basic_blocks, &mut unresolved_uses);
-    merge_versions_across_basic_blocks(
-        arena,
-        &mut ir_basic_blocks,
-        &unresolved_uses,
-        &mut statements,
-    );
+    merge_versions_across_basic_blocks(arena, &mut ir_basic_blocks, &unresolved_uses);
 
-    // Fixup jump destinations
-    let mut bb_stmt_starts = Vec::new();
-    let mut transitions = Vec::new();
-    let mut stmt_index = 0;
-    statements.retain(|stmt| match stmt {
-        Statement::Basic(_) => {
-            stmt_index += 1;
-            true
-        }
-        Statement::Label => {
-            bb_stmt_starts.push(stmt_index);
-            false
-        }
-        Statement::Jump { .. } | Statement::Switch { .. } => {
-            transitions.push(stmt_index);
-            stmt_index += 1;
-            true
-        }
-    });
-    bb_stmt_starts.push(statements.len());
-
-    let address_to_stmt_index = |address: u32| -> usize {
-        let bb_id = preparsed_program
-            .basic_blocks
-            .binary_search_by_key(&address, |bb| bb.instruction_range.start)
-            .expect("invalid jump destination");
-        bb_stmt_starts[bb_id]
-    };
-    for stmt_index in transitions {
-        match &mut statements[stmt_index] {
-            Statement::Jump { target, .. } => *target = address_to_stmt_index(*target as u32),
-            Statement::Switch { arms, default, .. } => {
-                for (_, target) in arms {
-                    *target = address_to_stmt_index(*target as u32);
-                }
-                *default = address_to_stmt_index(*default as u32);
+    // Compute exception handlers.
+    let exception_handlers = preparsed_program
+        .exception_handlers
+        .into_iter()
+        .map(|handler| {
+            let eh = ir_basic_blocks[handler.target].eh.as_ref().unwrap();
+            ExceptionHandler {
+                active_range: handler.active_range,
+                target: handler.target,
+                class: handler.class,
+                // Since multiple handlers can have the same target, these IDs are not unique and
+                // can only be used as versions, not as expression IDs.
+                stack0_exception0_copy_versions: eh
+                    .stack0_exception0_copy_is_necessary
+                    .then_some((eh.stack0_def, eh.exception0_use)),
             }
-            _ => unreachable!(),
-        }
-    }
+        })
+        .collect();
 
-    // Compute new exception handlers.
-    let mut exception_handlers = Vec::new();
-    for handler in preparsed_program.exception_handlers {
-        // `start` and `end` may compare equal if all basic blocks covered by the `try` block are
-        // e.g. `nop`s. But that's not a good reason to remove the handler. Although we know this
-        // means `catch` is never executed, removing the exception handler can cause more code to
-        // become *syntactically* unreachable, which violates our assumption that all code in the IR
-        // is syntactically reachable. Retaining an empty `try` is better than breaking those
-        // assumptions.
-        let start = bb_stmt_starts[handler.active_range.start];
-        let end = bb_stmt_starts[handler.active_range.end];
-
-        let target = bb_stmt_starts[handler.target];
-        let eh = ir_basic_blocks[handler.target].eh.as_ref().unwrap();
-
-        exception_handlers.push(ExceptionHandler {
-            stmt_range: start..end,
-            bb_range: handler.active_range,
-            target_stmt: target,
-            class: handler.class,
-            // Since multiple handlers can have the same target, these IDs are not unique and can
-            // only be used as versions, not as expression IDs.
-            stack0_exception0_copy_versions: eh
-                .stack0_exception0_copy_is_necessary
-                .then_some((eh.stack0_def, eh.exception0_use)),
-        });
-    }
-
-    // Collect simple BB info for basic stages. We're not interested in the fake entry BB, so remove
-    // it.
-    ir_basic_blocks.pop();
-    ir_basic_blocks[0].predecessors.remove(0);
+    // Extract BB into a public API for the upcoming stages.
     let basic_blocks = ir_basic_blocks
         .into_iter()
-        .enumerate()
-        .map(|(bb_id, bb)| BasicBlock {
-            stmt_range: bb_stmt_starts[bb_id]..bb_stmt_starts[bb_id + 1],
+        .map(|bb| BasicBlock {
+            statements: bb.statements,
             predecessors: bb.predecessors,
         })
         .collect();
 
     Ok(Program {
-        statements,
         basic_blocks,
         exception_handlers,
     })

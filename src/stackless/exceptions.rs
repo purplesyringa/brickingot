@@ -15,7 +15,8 @@
 // reached in practice, so a single variable will hopefully be simpler not just for us, but for the
 // end user as well.
 
-use crate::stackless;
+use super::{ExceptionHandler, Program, Statement};
+use crate::ast::{Arena, BasicStatement, Expression, Variable, VariableName, VariableNamespace};
 use alloc::collections::BTreeMap;
 use core::cmp::Reverse;
 use core::ops::Range;
@@ -23,30 +24,74 @@ use core::ops::Range;
 #[derive(Clone)]
 struct ExtendedHandler {
     handler_id: usize,
-    bb_range: Range<usize>,
+    active_range: Range<usize>,
 }
 
-pub fn legalize_exception_handling(stackless_ir: &mut stackless::Program<'_>) {
-    let extended_handlers = treeify_try_blocks(&mut stackless_ir.exception_handlers);
+pub fn legalize_exception_handling<'code>(arena: &mut Arena<'code>, program: &mut Program<'code>) {
+    let extended_handlers = treeify_try_blocks(&mut program.exception_handlers);
     if extended_handlers.is_empty() {
         return;
     }
 
     let context_ids = compute_contexts(
-        stackless_ir.basic_blocks.len(),
+        program.basic_blocks.len(),
         &extended_handlers
             .iter()
-            .map(|handler| handler.bb_range.clone())
+            .map(|handler| handler.active_range.clone())
             .collect::<Vec<_>>(),
     );
 
-    // TODO: insert synthetic assignments
+    let context_version = arena.alloc(Expression::Null); // just a unique ID
+
+    // // Add context checks to exception handlers.
+    // for handler in extended_handlers {
+    //     program.exception_handlers[handler.handler_id].target
+    // }
+
+    // Assign contexts.
+    //
+    // The invariant here is that, on entry to each basic block, the correct context ID is stored in
+    // the synthetic. This allows us to remove assignments in basic blocks whose predecessors all
+    // have the same context ID. This does not result in the *minimal* number of assignments, but
+    // that's not our goal -- we mostly want code to stay readable, and this seems more intuitive
+    // than solving a problem that is likely NP-hard.
+    for (bb_id, (bb, context_id)) in program
+        .basic_blocks
+        .iter_mut()
+        .zip(&context_ids)
+        .enumerate()
+    {
+        // Always assign at the entry to the function. This kind of acts as the base case of
+        // recursion.
+        if bb_id != 0
+            && bb
+                .predecessors
+                .iter()
+                .all(|pred_bb_id| context_ids[*pred_bb_id] == *context_id)
+        {
+            continue;
+        }
+
+        bb.statements.insert(
+            0,
+            Statement::Basic(BasicStatement::Assign {
+                target: arena.alloc(Expression::Variable(Variable {
+                    name: VariableName {
+                        id: 0,
+                        namespace: VariableNamespace::Context,
+                    },
+                    version: context_version,
+                })),
+                value: arena.int(*context_id as i32),
+            }),
+        )
+    }
 }
 
 // Extends exception handler ranges such that each range #i either contains or doesn't intersect
 // range #j for all i > j. Does not reorder handlers. Returns information about the extended
 // handlers.
-fn treeify_try_blocks(handlers: &mut [stackless::ExceptionHandler<'_>]) -> Vec<ExtendedHandler> {
+fn treeify_try_blocks(handlers: &mut [ExceptionHandler<'_>]) -> Vec<ExtendedHandler> {
     let mut active_ranges = BTreeMap::new(); // start -> end
     let mut extended_handlers = Vec::new();
 
@@ -58,8 +103,8 @@ fn treeify_try_blocks(handlers: &mut [stackless::ExceptionHandler<'_>]) -> Vec<E
         //
         // We could also emit `start..end` and a forward jump, but it's not yet clear if that's any
         // better, since that might be harder to optimize.
-        let mut new_start = handler.stmt_range.start;
-        let mut new_end = handler.stmt_range.end.max(handler.target_stmt);
+        let mut new_start = handler.active_range.start;
+        let mut new_end = handler.active_range.end.max(handler.target);
 
         // Find the subset of ranges intersecting `new_start..new_end`. Unfortunately, this has to
         // be hacky without cursors.
@@ -79,12 +124,12 @@ fn treeify_try_blocks(handlers: &mut [stackless::ExceptionHandler<'_>]) -> Vec<E
         active_ranges.insert(new_start, new_end);
 
         let new_range = new_start..new_end;
-        if handler.stmt_range != new_range {
+        if handler.active_range != new_range {
             extended_handlers.push(ExtendedHandler {
                 handler_id,
-                bb_range: handler.bb_range.clone(),
+                active_range: handler.active_range.clone(),
             });
-            handler.stmt_range = new_range;
+            handler.active_range = new_range;
         }
     }
 
@@ -93,7 +138,7 @@ fn treeify_try_blocks(handlers: &mut [stackless::ExceptionHandler<'_>]) -> Vec<E
 
 // For each point in `0..n_points`, compute a context ID that uniquely represents the set of ranges
 // containing that point.
-fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> Vec<u32> {
+fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> Vec<usize> {
     // If I had more time, I would have written a shorter letter, or something like that. Not sure
     // how to simplify this further without hashing.
 
@@ -123,7 +168,7 @@ fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> Vec<u32> {
     // Saved indices of prefixes: `(len, id)` means that the set `range_stack[..len]` is
     // associated with context ID `id`. Lack of `len` in the stack means that the set has not been
     // assigned any ID yet.
-    let mut id_stack: Vec<(usize, u32)> = Vec::new();
+    let mut id_stack: Vec<(usize, usize)> = Vec::new();
     let mut next_id = 0;
 
     let mut result = Vec::with_capacity(n_points);
@@ -200,8 +245,8 @@ mod tests {
                 }
             }
             let mut cached_ids = FxHashMap::default();
-            let expected_contexts: Vec<u32> = sets.into_iter().map(|set| {
-                let next_context_id = cached_ids.len() as u32;
+            let expected_contexts: Vec<usize> = sets.into_iter().map(|set| {
+                let next_context_id = cached_ids.len();
                 *cached_ids.entry(set).or_insert(next_context_id)
             }).collect();
 

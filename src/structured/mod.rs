@@ -1,4 +1,3 @@
-mod exceptions;
 mod gap_tracker;
 mod solver;
 mod structurizer;

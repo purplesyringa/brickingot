@@ -341,6 +341,8 @@ pub enum VariableNamespace {
     Exception,
     /// selector
     Selector,
+    /// context
+    Context,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -107,17 +107,18 @@ pub fn import_insn_to_ir<'arena, 'code>(
 ) -> Result<(), InsnIrImportError> {
     let arena = machine.arena;
 
-    let offset_to_address = |offset: i32| -> u32 { (address as i32 + offset) as u32 };
+    let offset_to_bb_id = |machine: &mut Machine<'arena, 'code>, offset: i32| -> usize {
+        let address = (address as i32 + offset) as u32;
+        *machine
+            .address_to_bb_id
+            .get(&address)
+            .expect("invalid jump target")
+    };
 
     let jump = |machine: &mut Machine<'arena, 'code>, condition: ExprId, offset: i32| {
+        let target = offset_to_bb_id(machine, offset);
         machine.flush_stack_writes();
-        machine.add(Statement::Jump {
-            condition,
-            // The preparsing steps ensures all goto destinations are valid instruction addresses.
-            // This will be replaced by the instruction index on a later pass, after all
-            // instructions are emitted.
-            target: offset_to_address(offset) as usize,
-        });
+        machine.add(Statement::Jump { condition, target });
     };
 
     match insn {
@@ -741,27 +742,23 @@ pub fn import_insn_to_ir<'arena, 'code>(
         }
         LookupSwitch(switch) => {
             let key = machine.pop()?;
+            let arms = switch
+                .pairs()
+                .map(|pair| (pair.key(), offset_to_bb_id(machine, pair.offset())))
+                .collect();
+            let default = offset_to_bb_id(machine, switch.default_offset());
             machine.flush_stack_writes();
-            machine.add(Statement::Switch {
-                key,
-                arms: switch
-                    .pairs()
-                    .map(|pair| (pair.key(), offset_to_address(pair.offset()) as usize))
-                    .collect(),
-                default: offset_to_address(switch.default_offset()) as usize,
-            });
+            machine.add(Statement::Switch { key, arms, default });
         }
         TableSwitch(switch) => {
             let key = machine.pop()?;
+            let arms = switch
+                .pairs()
+                .map(|pair| (pair.key(), offset_to_bb_id(machine, pair.offset())))
+                .collect();
+            let default = offset_to_bb_id(machine, switch.default_offset());
             machine.flush_stack_writes();
-            machine.add(Statement::Switch {
-                key,
-                arms: switch
-                    .pairs()
-                    .map(|pair| (pair.key(), offset_to_address(pair.offset()) as usize))
-                    .collect(),
-                default: offset_to_address(switch.default_offset()) as usize,
-            });
+            machine.add(Statement::Switch { key, arms, default });
         }
 
         // Function calls

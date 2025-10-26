@@ -49,6 +49,7 @@ pub struct Machine<'arena, 'code> {
     pub statements: Vec<Statement>,
     next_value_id: usize,
     next_order_id: usize,
+    pub address_to_bb_id: FxHashMap<u32, usize>,
 }
 
 #[derive(Debug, Error)]
@@ -68,6 +69,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
             statements: Vec::new(),
             next_value_id: 0,
             next_order_id: 0,
+            address_to_bb_id: FxHashMap::default(),
         }
     }
 

@@ -6,6 +6,7 @@ extern crate alloc;
 mod ast;
 mod class;
 mod high_level;
+mod linear;
 mod preparse;
 mod stackless;
 mod structured;
@@ -14,8 +15,9 @@ mod utils;
 use crate::ast::Arena;
 use crate::class::ClassInfo;
 use crate::high_level::decompile_cf_constructs;
+use crate::linear::linearize_ir;
 use crate::preparse::{BytecodePreparsingError, extract_basic_blocks};
-use crate::stackless::{StacklessIrError, build_stackless_ir};
+use crate::stackless::{StacklessIrError, build_stackless_ir, legalize_exception_handling};
 use crate::structured::structure_control_flow;
 use noak::{
     AccessFlags, MStr,
@@ -139,9 +141,9 @@ fn decompile_method<'code>(
     let is_static = method.access_flags().contains(AccessFlags::STATIC);
 
     // The first IR we build is imperative and uses variables instead of JVM's stack. The control
-    // flow is unstructured. The number of distinct statement types is greatly reduced because most
-    // instructions are translated as `var := expr`.
-    let stackless_ir = build_stackless_ir(
+    // flow is unstructured and basic block-based. The number of distinct statement types is greatly
+    // reduced because most instructions are translated as `var := expr`.
+    let mut stackless_ir = build_stackless_ir(
         class_info,
         &mut arena,
         pool,
@@ -151,16 +153,25 @@ fn decompile_method<'code>(
         preparsed_program,
     )?;
 
-    // for stmt in &stackless_ir.statements {
-    //     println!("{}", arena.debug(&stmt));
-    // }
+    // While we're here, run passes that operate on basic blocks.
 
-    // The second IR has structured control flow represented via *blocks* -- not to be confused with
+    // `try` blocks are weird. They are not guaranteed to be nested correctly, which causes all
+    // sorts of problems. Fixing this also requires modifying statements, so it's the first thing we
+    // do, before we have a chance to run any analysis pass.
+    legalize_exception_handling(&mut arena, &mut stackless_ir);
+
+    // Linearize statements by merging statements in basic blocks and dropping BB information --
+    // it's already done its job and won't help us further.
+    let linear_ir = linearize_ir(stackless_ir);
+
+    // println!("{}", arena.debug(&linear_ir));
+
+    // The third IR has structured control flow represented via *blocks* -- not to be confused with
     // basic blocks from the CFG world. A block is a syntactic construct that supports jumps to its
     // beginning and end via `continue` and `break`, much like with loops. This IR also has
     // `try`..`catch` blocks for exception handling. In all other ways, this IR is as low-level as
     // the stackless one.
-    let structured_ir = structure_control_flow(&arena, stackless_ir);
+    let structured_ir = structure_control_flow(&arena, linear_ir);
 
     // for stmt in &structured_ir {
     //     println!("{}", arena.debug(&stmt));

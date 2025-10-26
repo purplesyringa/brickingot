@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use super::gap_tracker::GapTracker;
-use crate::stackless;
+use crate::linear;
 use crate::utils::IntervalTree;
 use core::ops::Range;
 
@@ -73,7 +73,7 @@ pub enum RequirementImplementation {
 }
 
 pub fn compute_block_requirements(
-    stackless_ir: &stackless::Program<'_>,
+    linear_ir: &linear::Program<'_>,
 ) -> Vec<(RequirementKey, BlockRequirement)> {
     let jump = |from: usize, to: usize| {
         if from < to {
@@ -94,14 +94,14 @@ pub fn compute_block_requirements(
     let mut requirements = Vec::new();
 
     // Jumps are satisfied by normal blocks.
-    for (stmt_index, stmt) in stackless_ir.statements.iter().enumerate() {
+    for (stmt_index, stmt) in linear_ir.statements.iter().enumerate() {
         match stmt {
-            stackless::Statement::Basic(_) | stackless::Statement::Label => {}
-            stackless::Statement::Jump { target, .. } => requirements.push((
+            linear::Statement::Basic(_) => {}
+            linear::Statement::Jump { target, .. } => requirements.push((
                 RequirementKey::Jump { stmt_index },
                 jump(stmt_index, *target),
             )),
-            stackless::Statement::Switch { arms, default, .. } => {
+            linear::Statement::Switch { arms, default, .. } => {
                 for (key, successor) in arms
                     .iter()
                     .map(|(key, successor)| (Some(*key), *successor))
@@ -125,11 +125,11 @@ pub fn compute_block_requirements(
 
     // `try` blocks are guaranteed to be nested correctly by the call to
     // `legalize_exception_handling` in `structure_control_flow`.
-    for (handler_index, handler) in stackless_ir.exception_handlers.iter().enumerate() {
+    for (handler_index, handler) in linear_ir.exception_handlers.iter().enumerate() {
         // If `target > end`, `treeify_try_blocks` would have extended `end`.
-        assert!(handler.target_stmt <= handler.stmt_range.end);
+        assert!(handler.target <= handler.active_range.end);
 
-        let with_backward_jump = if handler.stmt_range.end == handler.target_stmt {
+        let with_backward_jump = if handler.active_range.end == handler.target {
             None
         } else {
             // If the handler is located before or within the `try` block, we have to emit a jump.
@@ -149,7 +149,7 @@ pub fn compute_block_requirements(
             requirements.push((
                 RequirementKey::BackwardCatch { handler_index },
                 BlockRequirement {
-                    range: handler.target_stmt..handler.stmt_range.end,
+                    range: handler.target..handler.active_range.end,
                     kind: RequirementKind::BackwardJump,
                 },
             ));
@@ -159,7 +159,7 @@ pub fn compute_block_requirements(
         requirements.push((
             RequirementKey::Try { handler_index },
             BlockRequirement {
-                range: handler.stmt_range.clone(),
+                range: handler.active_range.clone(),
                 kind: RequirementKind::Try { with_backward_jump },
             },
         ));
@@ -226,9 +226,9 @@ pub fn satisfy_block_requirements(
     // which `catch` closures match types matters since one catch a subclass of the other.
 
     // Many data structures here are indexed by statement ID, and we don't want to waste cache on
-    // whitespace. Unfortunately, even though we have access to basic blocks at this point, we can't
-    // use BB IDs here, since we might want to make blocks that cover the terminators of a basic
-    // block, but not the basic block in its entirety, and operating on BBs does not allow that.
+    // whitespace. Unfortunately, we can't utilize basic blocks for this at this point, since we
+    // might want to make blocks that cover the terminators of a basic block, but not the basic
+    // block in its entirety, and operating on BBs does not allow that.
     let mut used_indices: Vec<usize> = [0, program_len]
         .into_iter()
         .chain(
