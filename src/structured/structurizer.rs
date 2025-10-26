@@ -58,7 +58,8 @@ pub fn structure_control_flow<'code>(
 
     let mut structurizer = Structurizer {
         arena,
-        linear_ir,
+        statements: linear_ir.statements,
+        exception_handlers: linear_ir.exception_handlers.into_iter().map(Some).collect(),
         try_block_to_handler,
         jump_implementations,
         next_block_id,
@@ -81,7 +82,8 @@ pub fn structure_control_flow<'code>(
 
 struct Structurizer<'arena, 'code> {
     arena: &'arena Arena<'code>,
-    linear_ir: linear::Program<'code>,
+    statements: Vec<linear::Statement>,
+    exception_handlers: Vec<Option<linear::ExceptionHandler<'code>>>,
     try_block_to_handler: FxHashMap<usize, usize>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
     next_block_id: usize,
@@ -115,7 +117,9 @@ impl<'code> Structurizer<'_, 'code> {
                     .try_block_to_handler
                     .remove(&id)
                     .expect("try block without catch");
-                let handler = self.linear_ir.exception_handlers[handler_index].clone();
+                let handler = self.exception_handlers[handler_index]
+                    .take()
+                    .expect("missing exception handler");
 
                 let mut catch_children = Vec::new();
                 if let Some((stack0_version, exception0_version)) =
@@ -183,9 +187,10 @@ impl<'code> Structurizer<'_, 'code> {
     }
 
     fn emit_stmt(&mut self, stmt_index: usize, out: &mut Vec<Statement<'code>>) {
-        // Need to replace with *something*, `return;` works fine.
+        // Need to replace with *something*, `return;` works fine. We could wrap all statements in
+        // `Option`, but that's probably a bit too slow.
         let stmt = core::mem::replace(
-            &mut self.linear_ir.statements[stmt_index],
+            &mut self.statements[stmt_index],
             linear::Statement::Basic(BasicStatement::ReturnVoid),
         );
 
