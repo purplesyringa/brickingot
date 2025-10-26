@@ -76,11 +76,11 @@ impl<'a, 'code> Inliner<'a, 'code> {
     fn handle_expr(&mut self, expr_id: ExprId) {
         let expr = &self.arena[expr_id];
 
-        if let Expression::Ternary { condition, .. } = expr {
-            // Don't recurse into ternary's branches: it'd be a) unsound because we'd inline across
-            // control flow, b) slow because the branches were populated from an `if`, which we've
-            // already invoked `inline_expressions` on, and this would be the second time.
-            self.handle_expr(*condition);
+        if let Expression::Ternary { .. } | Expression::LogicalOp { .. } = expr {
+            // Don't recurse into ternaries: it'd be a) unsound because we'd inline across control
+            // flow, b) slow because both the branches and the condition were populated from
+            // an `if`, which we've already invoked `inline_expressions` on, and this would be the
+            // second time. Same reasoning applies for logical operations.
             return;
         }
 

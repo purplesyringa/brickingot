@@ -92,6 +92,11 @@ pub enum Expression<'code> {
         // have 3.
         branches: [ExprId; 2], // [if_true, if_false]
     },
+    LogicalOp {
+        op: LogicalOp,
+        lhs: ExprId,
+        rhs: ExprId,
+    },
 }
 
 impl<'code> DebugIr<'code> for Expression<'code> {
@@ -193,6 +198,9 @@ impl<'code> DebugIr<'code> for Expression<'code> {
                 arena.debug(if_then),
                 arena.debug(if_else)
             ),
+            Self::LogicalOp { op, lhs, rhs } => {
+                write!(f, "({}) {op} ({})", arena.debug(lhs), arena.debug(rhs))
+            }
         }
     }
 }
@@ -308,6 +316,14 @@ pub enum UnaryOp {
     Neg,
     /// !
     Not,
+}
+
+#[derive(Debug, Display)]
+pub enum LogicalOp {
+    /// &&
+    And,
+    /// ||
+    Or,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

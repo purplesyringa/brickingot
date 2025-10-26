@@ -44,9 +44,9 @@ impl Expression<'_> {
             | Self::CastPrimitive { value: expr, .. }
             | Self::UnaryOp { argument: expr, .. } => (Some(*expr), &[]),
 
-            Self::ArrayElement { array: a, index: b } | Self::BinOp { lhs: a, rhs: b, .. } => {
-                (Some(*a), core::slice::from_ref(b))
-            }
+            Self::ArrayElement { array: a, index: b }
+            | Self::BinOp { lhs: a, rhs: b, .. }
+            | Self::LogicalOp { lhs: a, rhs: b, .. } => (Some(*a), core::slice::from_ref(b)),
 
             Self::NewArray { lengths, .. } => (None, lengths),
 
