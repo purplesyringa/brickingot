@@ -127,13 +127,8 @@ fn treeify_try_blocks(handlers: &mut [ExceptionHandler<'_>]) -> Vec<ExtendedHand
     let mut extended_handlers = Vec::new();
 
     for (handler_id, handler) in handlers.iter_mut().enumerate() {
-        // Typically, the `try` block range ends before the handler; in this case, we emit
-        // a slightly larger `try` block so that the handler directly follows its end and `catch`
-        // can fallthrough into the handler without any explicit jumps. If the range contains more
-        // statements than necessary, we'll sort it out later with synthetic variables.
-        //
-        // We could also emit `start..end` and a forward jump, but it's not yet clear if that's any
-        // better, since that might be harder to optimize.
+        // If `end < jump_target`, we'd have to either emit a forward jump or extend the `try` block
+        // to `jump_target`. The latter looks easier and probably more readable.
         let mut new_start = handler.active_range.start;
         let mut new_end = handler.active_range.end.max(handler.body.jump_target);
 

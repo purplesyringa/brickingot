@@ -65,7 +65,9 @@ pub struct ExceptionHandler<'code> {
     pub target: usize,              // BB ID
     pub class: Option<Str<'code>>,
     is_reachable: bool,
-    tail_is_reachable: bool, // whether there is a throwing reachable BB in the `target..end` range
+    /// whether there is a throwing reachable BB either in `target..end` or `end..target`, depending
+    /// on the order.
+    has_throwing_reachable_bb_in_tail: bool,
 }
 
 pub fn extract_basic_blocks<'code>(
@@ -190,7 +192,7 @@ pub fn extract_basic_blocks<'code>(
                 None => None,
             },
             is_reachable: false,
-            tail_is_reachable: false,
+            has_throwing_reachable_bb_in_tail: false,
         });
     }
 
@@ -243,6 +245,19 @@ pub fn extract_basic_blocks<'code>(
     // which make the `catch` reachable within the whole range, and non-throwing BBs, which only
     // make it reachable in range `[start; target)`. This guarantees that the reachability graph is
     // completely consistent with the exception ranges.
+    //
+    // A somewhat similar problem arises in the other direction when `end < target`. Since lowering
+    // `try` blocks basically requires `end` and `target` to be located at the same space, i.e. at
+    // `} catch {`, this would require blocks in `end..target` to be explicitly excluded from
+    // exception handling, which requires synthetic logic. Since javac compiles `try` blocks roughly
+    // as:
+    //     try body;     <- covered by `try` block
+    //     goto exit;
+    //     catch body;   <- `catch` entrypoint
+    //     exit:
+    // ...leaving the `goto` sandwiched between `end` and `target`, this would apply to all `try`
+    // blocks. So we move `end` forward to `target` if all BBs in range `[end; target)` don't
+    // contain throwing instructions.
 
     let [mut remaining_eh, mut remaining_eh_throwing] = [
         // Applies to all BBs.
@@ -251,7 +266,11 @@ pub fn extract_basic_blocks<'code>(
         },
         // Applies only to throwing BBs.
         |handler: &ExceptionHandler<'_>| {
-            handler.active_range.start.max(handler.target)..handler.active_range.end
+            if handler.target < handler.active_range.end {
+                handler.active_range.start.max(handler.target)..handler.active_range.end
+            } else {
+                handler.active_range.end..handler.target
+            }
         },
     ]
     .map(|range_fn| {
@@ -315,7 +334,7 @@ pub fn extract_basic_blocks<'code>(
                     let handler = &mut exception_handlers[handler_id];
                     handler.is_reachable = true;
                     if is_tail {
-                        handler.tail_is_reachable = true;
+                        handler.has_throwing_reachable_bb_in_tail = true;
                     }
                     (handler.target, 1)
                 });
@@ -340,9 +359,11 @@ pub fn extract_basic_blocks<'code>(
 
     // Remove unreachable exception handlers.
     exception_handlers.retain(|handler| handler.is_reachable);
-    // Truncate exception handlers associated with malformed `finally`.
+    // Either truncate exception handlers associated with malformed `finally`, or extend exception
+    // handlers over `goto` between `try` and `catch`, depending on the relationship between
+    // `target` and `end`.
     for handler in &mut exception_handlers {
-        if !handler.tail_is_reachable && handler.target < handler.active_range.end {
+        if !handler.has_throwing_reachable_bb_in_tail {
             handler.active_range.end = handler.target;
         }
     }
