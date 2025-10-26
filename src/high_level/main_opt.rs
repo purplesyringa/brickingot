@@ -407,7 +407,6 @@ impl<'code> Optimizer<'_, 'code> {
                 Catch {
                     class: catch.class,
                     children,
-                    active_range: catch.active_range,
                 }
             })
             .collect();

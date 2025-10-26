@@ -127,9 +127,9 @@ pub fn compute_block_requirements(
     // `legalize_exception_handling` in `structure_control_flow`.
     for (handler_index, handler) in stackless_ir.exception_handlers.iter().enumerate() {
         // If `target > end`, `treeify_try_blocks` would have extended `end`.
-        assert!(handler.target <= handler.active_range.end);
+        assert!(handler.target_stmt <= handler.stmt_range.end);
 
-        let with_backward_jump = if handler.active_range.end == handler.target {
+        let with_backward_jump = if handler.stmt_range.end == handler.target_stmt {
             None
         } else {
             // If the handler is located before or within the `try` block, we have to emit a jump.
@@ -141,7 +141,7 @@ pub fn compute_block_requirements(
             //
             // A special variation of this problem arises if the handler is inside `try`: if we
             // split `try` into two parts and handled them separately, and a smaller nested `try`
-            // block crosses `handler.target`, we would have an invalid tree; moreover, since each
+            // block crosses `target`, we would have an invalid tree; moreover, since each
             // individual part can be smaller than the nested `try` block, the `try` order may
             // become swapped. This forces us to emit a single `try` even if it produces worse
             // codegen.
@@ -149,7 +149,7 @@ pub fn compute_block_requirements(
             requirements.push((
                 RequirementKey::BackwardCatch { handler_index },
                 BlockRequirement {
-                    range: handler.target..handler.active_range.end,
+                    range: handler.target_stmt..handler.stmt_range.end,
                     kind: RequirementKind::BackwardJump,
                 },
             ));
@@ -159,7 +159,7 @@ pub fn compute_block_requirements(
         requirements.push((
             RequirementKey::Try { handler_index },
             BlockRequirement {
-                range: handler.active_range.clone(),
+                range: handler.stmt_range.clone(),
                 kind: RequirementKind::Try { with_backward_jump },
             },
         ));

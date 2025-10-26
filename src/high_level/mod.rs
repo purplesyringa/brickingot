@@ -5,7 +5,6 @@ use self::main_opt::optimize;
 use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
 use crate::structured;
 use alloc::fmt;
-use core::ops::Range;
 use noak::MStr;
 
 #[derive(Debug)]
@@ -44,7 +43,6 @@ enum Statement<'code> {
 struct Catch<'code> {
     class: Option<Str<'code>>,
     children: StmtList<'code>,
-    active_range: Range<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -143,11 +141,10 @@ impl<'code> DebugIr<'code> for Statement<'code> {
                 for catch in catches {
                     writeln!(
                         f,
-                        "}} catch ({} within {:?}) {{",
+                        "}} catch ({}) {{",
                         catch
                             .class
                             .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
-                        catch.active_range
                     )?;
                     for child in &catch.children {
                         writeln!(f, "{}", arena.debug(child))?;

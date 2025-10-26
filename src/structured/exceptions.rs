@@ -23,19 +23,20 @@ use core::ops::Range;
 #[derive(Clone)]
 struct ExtendedHandler {
     handler_id: usize,
-    semantic_range: Range<usize>,
-    syntactic_range: Range<usize>,
+    bb_range: Range<usize>,
 }
 
 pub fn legalize_exception_handling(stackless_ir: &mut stackless::Program<'_>) {
     let extended_handlers = treeify_try_blocks(&mut stackless_ir.exception_handlers);
+    if extended_handlers.is_empty() {
+        return;
+    }
 
-    // FIXME: assign contexts to basic blocks rather than individual statements
     let context_ids = compute_contexts(
-        stackless_ir.statements.len(),
+        stackless_ir.basic_blocks.len(),
         &extended_handlers
             .iter()
-            .map(|handler| handler.semantic_range.clone())
+            .map(|handler| handler.bb_range.clone())
             .collect::<Vec<_>>(),
     );
 
@@ -57,8 +58,8 @@ fn treeify_try_blocks(handlers: &mut [stackless::ExceptionHandler<'_>]) -> Vec<E
         //
         // We could also emit `start..end` and a forward jump, but it's not yet clear if that's any
         // better, since that might be harder to optimize.
-        let mut new_start = handler.active_range.start;
-        let mut new_end = handler.active_range.end.max(handler.target);
+        let mut new_start = handler.stmt_range.start;
+        let mut new_end = handler.stmt_range.end.max(handler.target_stmt);
 
         // Find the subset of ranges intersecting `new_start..new_end`. Unfortunately, this has to
         // be hacky without cursors.
@@ -78,13 +79,12 @@ fn treeify_try_blocks(handlers: &mut [stackless::ExceptionHandler<'_>]) -> Vec<E
         active_ranges.insert(new_start, new_end);
 
         let new_range = new_start..new_end;
-        if handler.active_range != new_range {
+        if handler.stmt_range != new_range {
             extended_handlers.push(ExtendedHandler {
                 handler_id,
-                semantic_range: handler.active_range.clone(),
-                syntactic_range: new_range.clone(),
+                bb_range: handler.bb_range.clone(),
             });
-            handler.active_range = new_range;
+            handler.stmt_range = new_range;
         }
     }
 

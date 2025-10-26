@@ -73,8 +73,9 @@ pub struct BasicBlock {
 
 #[derive(Clone, Debug)]
 pub struct ExceptionHandler<'code> {
-    pub active_range: Range<usize>,
-    pub target: usize,
+    pub stmt_range: Range<usize>,
+    pub bb_range: Range<usize>,
+    pub target_stmt: usize,
     pub class: Option<Str<'code>>,
     pub stack0_exception0_copy_versions: Option<(ExprId, ExprId)>,
 }
@@ -83,11 +84,12 @@ impl Display for ExceptionHandler<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "try {{ {:?} }} catch ({}) {{ goto {}; }}",
-            self.active_range,
+            "try {{ stmt {:?} / bb {:?} }} catch ({}) {{ goto {}; }}",
+            self.stmt_range,
+            self.bb_range,
             self.class
                 .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
-            self.target,
+            self.target_stmt,
         )
     }
 }

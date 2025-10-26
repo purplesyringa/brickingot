@@ -156,7 +156,6 @@ impl<'code> Structurizer<'_, 'code> {
                     catches: vec![Catch {
                         class: handler.class,
                         children: catch_children,
-                        active_range: handler.active_range.clone(),
                     }],
                 });
             }

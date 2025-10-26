@@ -339,8 +339,9 @@ pub fn build_stackless_ir<'code>(
         let eh = ir_basic_blocks[handler.target].eh.as_ref().unwrap();
 
         exception_handlers.push(ExceptionHandler {
-            active_range: start..end,
-            target,
+            stmt_range: start..end,
+            bb_range: handler.active_range,
+            target_stmt: target,
             class: handler.class,
             // Since multiple handlers can have the same target, these IDs are not unique and can
             // only be used as versions, not as expression IDs.
