@@ -227,24 +227,11 @@ pub fn build_stackless_ir<'code>(
         } else {
             Some(ExceptionHandlerBlock {
                 eh_entry_for_bb_ranges,
-                stack0_def: arena.alloc_with(|version| {
-                    Expression::Variable(Variable {
-                        name: VariableName {
-                            namespace: VariableNamespace::Stack,
-                            id: 0,
-                        },
-                        version,
-                    })
-                }),
-                exception0_use: arena.alloc_with(|version| {
-                    Expression::Variable(Variable {
-                        name: VariableName {
-                            namespace: VariableNamespace::Exception,
-                            id: 0,
-                        },
-                        version,
-                    })
-                }),
+                // It doesn't make sense to allocate variables here, since a single handler may be
+                // used by multiple `try` blocks and we'd have to create new allocations. Using
+                // `null` here ensures we don't affect variable refcounts.
+                stack0_def: arena.alloc(Expression::Null),
+                exception0_use: arena.alloc(Expression::Null),
                 stack0_exception0_copy_is_necessary: true, // populated by `splitting`
             })
         };
