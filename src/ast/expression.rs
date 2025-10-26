@@ -150,7 +150,7 @@ impl<'code> DebugIr<'code> for Expression<'code> {
             Self::BinOp { op, lhs, rhs } => {
                 write!(f, "({}) {op} ({})", arena.debug(lhs), arena.debug(rhs))
             }
-            Self::UnaryOp { op, argument } => write!(f, "({op})({})", arena.debug(argument)),
+            Self::UnaryOp { op, argument } => write!(f, "{op}({})", arena.debug(argument)),
             Self::Call {
                 method_name,
                 kind,
