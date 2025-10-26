@@ -108,8 +108,11 @@ use super::abstract_eval::{Machine, SealedBlock};
 use super::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use super::linking::link_stack_across_basic_blocks;
 use super::splitting::merge_versions_across_basic_blocks;
-use super::{BasicBlock, ExceptionHandler, ExceptionHandlerBlock, InternalBasicBlock, Program};
+use super::{
+    BasicBlock, EhBody, ExceptionHandler, ExceptionHandlerBlock, InternalBasicBlock, Program,
+};
 use crate::ClassInfo;
+use crate::ast::BasicStatement;
 use crate::ast::{Arena, Expression, Variable, VariableName, VariableNamespace};
 use crate::preparse::{self, insn_stack_effect::type_descriptor_width};
 use noak::{
@@ -289,15 +292,37 @@ pub fn build_stackless_ir<'code>(
         .into_iter()
         .map(|handler| {
             let eh = ir_basic_blocks[handler.target].eh.as_ref().unwrap();
+
+            let stack0_exception0_copy = eh.stack0_exception0_copy_is_necessary.then(|| {
+                BasicStatement::Assign {
+                    target: arena.alloc(Expression::Variable(Variable {
+                        name: VariableName {
+                            id: 0,
+                            namespace: VariableNamespace::Stack,
+                        },
+                        // Since multiple handlers can have the same target, these IDs are not
+                        // unique and can only be used as versions, not as expression IDs.
+                        version: eh.stack0_def,
+                    })),
+                    value: arena.alloc(Expression::Variable(Variable {
+                        name: VariableName {
+                            id: 0,
+                            namespace: VariableNamespace::Exception,
+                        },
+                        version: eh.exception0_use,
+                    })),
+                }
+            });
+
             ExceptionHandler {
                 active_range: handler.active_range,
-                target: handler.target,
                 class: handler.class,
-                // Since multiple handlers can have the same target, these IDs are not unique and
-                // can only be used as versions, not as expression IDs.
-                stack0_exception0_copy_versions: eh
-                    .stack0_exception0_copy_is_necessary
-                    .then_some((eh.stack0_def, eh.exception0_use)),
+                body: EhBody {
+                    condition: None, // will be populated later by `legalize_exception_handling`
+                    exception0_use: eh.exception0_use,
+                    stack0_exception0_copy,
+                    jump_target: handler.target,
+                },
             }
         })
         .collect();

@@ -16,7 +16,9 @@
 // end user as well.
 
 use super::{ExceptionHandler, Program, Statement};
-use crate::ast::{Arena, BasicStatement, Expression, Variable, VariableName, VariableNamespace};
+use crate::ast::{
+    Arena, BasicStatement, BinOp, Expression, LogicalOp, Variable, VariableName, VariableNamespace,
+};
 use alloc::collections::BTreeMap;
 use core::cmp::Reverse;
 use core::ops::Range;
@@ -33,7 +35,7 @@ pub fn legalize_exception_handling<'code>(arena: &mut Arena<'code>, program: &mu
         return;
     }
 
-    let context_ids = compute_contexts(
+    let (context_ids, handler_context_ids) = compute_contexts(
         program.basic_blocks.len(),
         &extended_handlers
             .iter()
@@ -41,12 +43,47 @@ pub fn legalize_exception_handling<'code>(arena: &mut Arena<'code>, program: &mu
             .collect::<Vec<_>>(),
     );
 
-    let context_version = arena.alloc(Expression::Null); // just a unique ID
+    // This allocates a single version for the context variables, which is not exactly optimal, but
+    // more than fine for readability.
+    let context_version = arena.alloc(Expression::Null);
+    let context_var = || {
+        arena.alloc(Expression::Variable(Variable {
+            name: VariableName {
+                id: 0,
+                namespace: VariableNamespace::Context,
+            },
+            version: context_version,
+        }))
+    };
 
-    // // Add context checks to exception handlers.
-    // for handler in extended_handlers {
-    //     program.exception_handlers[handler.handler_id].target
-    // }
+    // Add context checks to exception handlers.
+    for (handler, context_id_range) in extended_handlers.into_iter().zip(handler_context_ids) {
+        let condition = if context_id_range.len() == 1 {
+            arena.alloc(Expression::BinOp {
+                op: BinOp::Eq,
+                lhs: context_var(),
+                rhs: arena.int(context_id_range.start as i32),
+            })
+        } else {
+            arena.alloc(Expression::LogicalOp {
+                op: LogicalOp::And,
+                lhs: arena.alloc(Expression::BinOp {
+                    op: BinOp::Ge,
+                    lhs: context_var(),
+                    rhs: arena.int(context_id_range.start as i32),
+                }),
+                rhs: arena.alloc(Expression::BinOp {
+                    op: BinOp::Le,
+                    lhs: context_var(),
+                    rhs: arena.int(context_id_range.end as i32 - 1),
+                }),
+            })
+        };
+
+        program.exception_handlers[handler.handler_id]
+            .body
+            .condition = Some(condition);
+    }
 
     // Assign contexts.
     //
@@ -75,13 +112,7 @@ pub fn legalize_exception_handling<'code>(arena: &mut Arena<'code>, program: &mu
         bb.statements.insert(
             0,
             Statement::Basic(BasicStatement::Assign {
-                target: arena.alloc(Expression::Variable(Variable {
-                    name: VariableName {
-                        id: 0,
-                        namespace: VariableNamespace::Context,
-                    },
-                    version: context_version,
-                })),
+                target: context_var(),
                 value: arena.int(*context_id as i32),
             }),
         )
@@ -104,7 +135,7 @@ fn treeify_try_blocks(handlers: &mut [ExceptionHandler<'_>]) -> Vec<ExtendedHand
         // We could also emit `start..end` and a forward jump, but it's not yet clear if that's any
         // better, since that might be harder to optimize.
         let mut new_start = handler.active_range.start;
-        let mut new_end = handler.active_range.end.max(handler.target);
+        let mut new_end = handler.active_range.end.max(handler.body.jump_target);
 
         // Find the subset of ranges intersecting `new_start..new_end`. Unfortunately, this has to
         // be hacky without cursors.
@@ -137,8 +168,9 @@ fn treeify_try_blocks(handlers: &mut [ExceptionHandler<'_>]) -> Vec<ExtendedHand
 }
 
 // For each point in `0..n_points`, compute a context ID that uniquely represents the set of ranges
-// containing that point.
-fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> Vec<usize> {
+// containing that point. Additionally, for each range, compute the interval of context IDs on that
+// range.
+fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> (Vec<usize>, Vec<Range<usize>>) {
     // If I had more time, I would have written a shorter letter, or something like that. Not sure
     // how to simplify this further without hashing.
 
@@ -171,7 +203,9 @@ fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> Vec<usize> {
     let mut id_stack: Vec<(usize, usize)> = Vec::new();
     let mut next_id = 0;
 
-    let mut result = Vec::with_capacity(n_points);
+    let mut point_context_ids = Vec::with_capacity(n_points);
+    let mut range_context_ranges = vec![0..0; ranges.len()];
+
     for point in 0..n_points {
         while let Some(event) = events.next_if(|event| {
             let range = &ranges[event.range_id];
@@ -186,6 +220,9 @@ fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> Vec<usize> {
                 // contexts thus far. We'll create a new one in a bit.
                 pos_in_stack[event.range_id] = range_stack.len();
                 range_stack.push(event.range_id);
+                // Since all context IDs within this range are distinct from everything we've seen
+                // so far, the minimum boundary is `next_id`.
+                range_context_ranges[event.range_id].start = next_id;
             } else {
                 // A range has just closed -- drop it from the stack.
                 let pos = pos_in_stack[event.range_id];
@@ -205,6 +242,10 @@ fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> Vec<usize> {
                 // because the order of ranges that have opened in a now-closed range is
                 // indistinguishable.
                 while id_stack.pop_if(|(len, _)| pos < *len).is_some() {}
+                // Every context ID in this range has been below `next_id`, and everything after
+                // this range is guaranteed not to match any of the context IDs we've created while
+                // the range was active.
+                range_context_ranges[event.range_id].end = next_id;
             }
         }
 
@@ -215,9 +256,10 @@ fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> Vec<usize> {
             id_stack.push((range_stack.len(), next_id));
             next_id += 1;
         }
-        result.push(id_stack.last().unwrap().1);
+        point_context_ids.push(id_stack.last().unwrap().1);
     }
-    result
+
+    (point_context_ids, range_context_ranges)
 }
 
 #[cfg(test)]
@@ -236,7 +278,7 @@ mod tests {
     proptest! {
         #[test]
         fn correct_context_ids(n_points in Just(11), ranges in vec(range(10), 5)) {
-            let alg_contexts = compute_contexts(n_points, &ranges);
+            let alg_contexts = compute_contexts(n_points, &ranges).0;
 
             let mut sets = vec![Vec::new(); n_points];
             for (range_id, range) in ranges.iter().enumerate() {
@@ -251,6 +293,21 @@ mod tests {
             }).collect();
 
             prop_assert_eq!(alg_contexts, expected_contexts);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn range_maps_to_interval_of_ranges(n_points in Just(11), ranges in vec(range(10), 5)) {
+            let (context_ids, range_context_ranges) = compute_contexts(n_points, &ranges);
+
+            for (range, range_context_ids) in ranges.iter().cloned().zip(range_context_ranges) {
+                for (point, context_id) in context_ids.iter().enumerate() {
+                    let is_in_point_range = range.contains(&point);
+                    let is_in_context_range = range_context_ids.contains(&context_id);
+                    prop_assert_eq!(is_in_point_range, is_in_context_range);
+                }
+            }
         }
     }
 }

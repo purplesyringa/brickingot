@@ -6,7 +6,7 @@ use super::{
     },
 };
 use crate::ast::{
-    Arena, BasicStatement, ExprId, Expression, Variable, VariableName, VariableNamespace,
+    Arena, BasicStatement, ExprId, Expression, UnaryOp, Variable, VariableName, VariableNamespace,
 };
 use crate::linear;
 use rustc_hash::FxHashMap;
@@ -122,27 +122,27 @@ impl<'code> Structurizer<'_, 'code> {
                     .expect("missing exception handler");
 
                 let mut catch_children = Vec::new();
-                if let Some((stack0_version, exception0_version)) =
-                    handler.stack0_exception0_copy_versions
-                {
-                    catch_children.push(Statement::Basic(BasicStatement::Assign {
-                        target: self.arena.alloc(Expression::Variable(Variable {
-                            name: VariableName {
-                                id: 0,
-                                namespace: VariableNamespace::Stack,
-                            },
-                            version: stack0_version,
-                        })),
-                        value: self.arena.alloc(Expression::Variable(Variable {
-                            name: VariableName {
-                                id: 0,
-                                namespace: VariableNamespace::Exception,
-                            },
-                            version: exception0_version,
-                        })),
-                    }));
+                if let Some(condition) = handler.body.condition {
+                    // Rethrow if the condition is not satisfied.
+                    catch_children.push(Statement::If {
+                        condition: self.arena.alloc(Expression::UnaryOp {
+                            op: UnaryOp::Not,
+                            argument: condition,
+                        }),
+                        then_children: vec![Statement::Basic(BasicStatement::Throw {
+                            exception: self.arena.alloc(Expression::Variable(Variable {
+                                name: VariableName {
+                                    id: 0,
+                                    namespace: VariableNamespace::Exception,
+                                },
+                                version: handler.body.exception0_use,
+                            })),
+                        })],
+                    });
                 }
-
+                if let Some(stmt) = handler.body.stack0_exception0_copy {
+                    catch_children.push(Statement::Basic(stmt));
+                }
                 let key = RequirementKey::BackwardCatch { handler_index };
                 if self.jump_implementations.contains_key(&key) {
                     self.emit_jump(key, &mut catch_children);

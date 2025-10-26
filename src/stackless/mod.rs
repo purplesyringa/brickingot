@@ -9,7 +9,7 @@ use self::abstract_eval::SealedBlock;
 pub use self::build::{StacklessIrError, build_stackless_ir};
 pub use self::exceptions::legalize_exception_handling;
 use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
-use core::fmt::{self, Display};
+use core::fmt;
 use core::ops::Range;
 use noak::MStr;
 
@@ -28,7 +28,7 @@ impl<'code> DebugIr<'code> for Program<'code> {
             }
         }
         for handler in &self.exception_handlers {
-            writeln!(f, "{handler}")?;
+            writeln!(f, "{}", arena.debug(handler))?;
         }
         Ok(())
     }
@@ -73,24 +73,48 @@ pub struct BasicBlock {
     pub predecessors: Vec<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ExceptionHandler<'code> {
     pub active_range: Range<usize>,
-    pub target: usize,
     pub class: Option<Str<'code>>,
-    pub stack0_exception0_copy_versions: Option<(ExprId, ExprId)>,
+    pub body: EhBody,
 }
 
-impl Display for ExceptionHandler<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+/// What to do on exception. Basically just the body of `catch`, but very limited structurally,
+// since we still  don't have structured control flow, but also don't want to create auxiliary BBs
+// just for the `catch` body, so we can't create the logic we want. It'll be rewritten to normal
+// code eventually.
+#[derive(Debug)]
+pub struct EhBody {
+    /// The condition under which this catch should be performed.
+    pub condition: Option<ExprId>,
+    /// The version of `exception0` available within this body. Note that it's not the `exception0`
+    /// expression itself, just the version that can be used to create it.
+    pub exception0_use: ExprId,
+    /// If present, the `stack0 = exception0` assignment in this body.
+    pub stack0_exception0_copy: Option<BasicStatement>,
+    /// Where to jump to.
+    pub jump_target: usize,
+}
+
+impl<'code> DebugIr<'code> for ExceptionHandler<'code> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         write!(
             f,
-            "try {{ {:?} }} catch ({}) {{ goto {}; }}",
+            "try {{ {:?} }} catch ({}",
             self.active_range,
             self.class
                 .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
-            self.target,
-        )
+        )?;
+        if let Some(condition) = &self.body.condition {
+            write!(f, " if {condition:?}")?;
+        }
+        writeln!(f, ") {{")?;
+        if let Some(stmt) = &self.body.stack0_exception0_copy {
+            writeln!(f, "{}", arena.debug(stmt))?;
+        }
+        writeln!(f, "goto {}", self.body.jump_target)?;
+        write!(f, "}}")
     }
 }
 

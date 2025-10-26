@@ -127,9 +127,9 @@ pub fn compute_block_requirements(
     // `legalize_exception_handling` in `structure_control_flow`.
     for (handler_index, handler) in linear_ir.exception_handlers.iter().enumerate() {
         // If `target > end`, `treeify_try_blocks` would have extended `end`.
-        assert!(handler.target <= handler.active_range.end);
+        assert!(handler.body.jump_target <= handler.active_range.end);
 
-        let with_backward_jump = if handler.active_range.end == handler.target {
+        let with_backward_jump = if handler.active_range.end == handler.body.jump_target {
             None
         } else {
             // If the handler is located before or within the `try` block, we have to emit a jump.
@@ -149,7 +149,7 @@ pub fn compute_block_requirements(
             requirements.push((
                 RequirementKey::BackwardCatch { handler_index },
                 BlockRequirement {
-                    range: handler.target..handler.active_range.end,
+                    range: handler.body.jump_target..handler.active_range.end,
                     kind: RequirementKind::BackwardJump,
                 },
             ));

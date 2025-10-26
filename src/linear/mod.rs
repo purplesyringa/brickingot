@@ -17,7 +17,7 @@ impl<'code> DebugIr<'code> for Program<'code> {
             writeln!(f, "{stmt_index}: {}", arena.debug(stmt))?;
         }
         for handler in &self.exception_handlers {
-            writeln!(f, "{handler}")?;
+            writeln!(f, "{}", arena.debug(handler))?;
         }
         Ok(())
     }
@@ -58,7 +58,7 @@ pub fn linearize_ir<'code>(mut stackless_ir: stackless::Program<'code>) -> Progr
         // assumptions.
         handler.active_range.start = bb_stmt_starts[handler.active_range.start];
         handler.active_range.end = bb_stmt_starts[handler.active_range.end];
-        handler.target = bb_stmt_starts[handler.target];
+        handler.body.jump_target = bb_stmt_starts[handler.body.jump_target];
     }
 
     let mut statements = Vec::with_capacity(next_stmt_index);
