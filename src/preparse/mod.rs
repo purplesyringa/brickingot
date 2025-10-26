@@ -338,26 +338,49 @@ pub fn extract_basic_blocks<'code>(
         basic_blocks[bb_id].successors = tmp_successors;
     }
 
-    // Erase unreachable BBs. We don't really remove them from this list, since that would affect BB
-    // IDs, but we clean them up just enough that they're guaranteed not to refer to invalid
-    // bytecode, which could cause problems in future passes.
-    for (in_stack, bb) in in_stack.iter().zip(&mut basic_blocks) {
-        if !in_stack {
-            *bb = BasicBlock {
-                instruction_range: 0..0,
-                stack_size_at_start: 0,
-                successors: Vec::new(),
-                throws: false,
-            };
-        }
-    }
-    // Erase unused exception handlers.
+    // Remove unreachable exception handlers.
     exception_handlers.retain(|handler| handler.is_reachable);
-    // Truncate the exception handler.
+    // Truncate exception handlers associated with malformed `finally`.
     for handler in &mut exception_handlers {
         if !handler.tail_is_reachable && handler.target < handler.active_range.end {
             handler.active_range.end = handler.target;
         }
+    }
+
+    // Remove unreachable BBs, since having unreachable BBs, even if empty, is an edge case we'd
+    // rather not deal with. It's a bit expensive, but it's an upfront cost we're willing to pay if
+    // it simplifies other passes.
+    let present_bbs: Vec<usize> = in_stack
+        .iter()
+        .enumerate()
+        .filter(|(_, in_stack)| **in_stack)
+        .map(|(bb_id, _)| bb_id)
+        .collect();
+    let mut in_stack = in_stack.into_iter();
+    basic_blocks.retain(|_| in_stack.next().unwrap());
+
+    // Update BB IDs in existing structures.
+    let renumber = |bb_id: &mut usize| {
+        *bb_id = present_bbs
+            .binary_search(bb_id)
+            .expect("target is unreachable")
+    };
+    for bb in &mut basic_blocks {
+        bb.successors.iter_mut().for_each(renumber);
+    }
+
+    for handler in &mut exception_handlers {
+        renumber(&mut handler.target);
+
+        // Since some BBs could have been optimized out as unreachable, `start` and `end` don't
+        // necessarily correspond to any newly existing basic block boundary! Look for the region of
+        // present basic blocks that fit within the range.
+        let start =
+            present_bbs.partition_point(|old_bb_id| *old_bb_id < handler.active_range.start);
+        let end = present_bbs.partition_point(|old_bb_id| *old_bb_id < handler.active_range.end);
+        // We've already removed unreachable `try` blocks.
+        assert!(start < end, "unreachable try block");
+        handler.active_range = start..end;
     }
 
     Ok(Program {

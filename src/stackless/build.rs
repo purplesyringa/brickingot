@@ -194,11 +194,6 @@ pub fn build_stackless_ir<'code>(
         .zip(eh_entry_for_bb_ranges)
         .enumerate()
     {
-        if bb.instruction_range.end == 0 {
-            // Skip empty BBs -- don't let them emit out-of-order labels.
-            continue;
-        }
-
         machine.stack_size = bb.stack_size_at_start;
         machine.bb_id = bb_id;
 
@@ -340,33 +335,28 @@ pub fn build_stackless_ir<'code>(
 
     // Compute new exception handlers.
     let mut exception_handlers = Vec::new();
+    let bb_id_to_stmt_index = |bb_id: usize| -> usize {
+        let index = labels
+            .binary_search_by_key(&bb_id, |label| label.bb_id)
+            .expect("invalid BB ID");
+        labels[index].stmt_index
+    };
     for handler in preparsed_program.exception_handlers {
-        let target_label = labels
-            .binary_search_by_key(&handler.target, |label| label.bb_id)
-            .expect("invalid jump destination");
-
-        // Since some instructions could have been optimized out as unreachable, `start` and `end`
-        // don't necessarily correspond to any existing basic block boundary! Look for the region of
-        // present basic blocks that fit within the range.
-        let start_label = labels.partition_point(|label| label.bb_id < handler.active_range.start);
-        let end_label = labels.partition_point(|label| label.bb_id < handler.active_range.end);
-        // `preparse` removes unreachable `try` blocks.
-        assert!(start_label < end_label, "unreachable try block");
-
-        // Despite that, `start_index` and `end_index` may compare equal, which indicates that the
-        // `try` body is empty. But that's not a good reason to remove the handler. Although we know
-        // this means `catch` is never executed, removing the exception handler can cause more code
-        // to become *syntactically* unreachable, which violates our assumption that all code in the
-        // IR is syntactically reachable. Retaining an empty `try` is better than breaking those
+        // `start` and `end` may compare equal if all basic blocks covered by the `try` block are
+        // e.g. `nop`s. But that's not a good reason to remove the handler. Although we know this
+        // means `catch` is never executed, removing the exception handler can cause more code to
+        // become *syntactically* unreachable, which violates our assumption that all code in the IR
+        // is syntactically reachable. Retaining an empty `try` is better than breaking those
         // assumptions.
-        let start_index = labels[start_label].stmt_index;
-        let end_index = labels[end_label].stmt_index;
+        let start = bb_id_to_stmt_index(handler.active_range.start);
+        let end = bb_id_to_stmt_index(handler.active_range.end);
 
+        let target = bb_id_to_stmt_index(handler.target);
         let eh = ir_basic_blocks[handler.target].eh.as_ref().unwrap();
 
         exception_handlers.push(ExceptionHandler {
-            active_range: start_index..end_index,
-            target: labels[target_label].stmt_index,
+            active_range: start..end,
+            target,
             class: handler.class,
             // Since multiple handlers can have the same target, these IDs are not unique and can
             // only be used as versions, not as expression IDs.
