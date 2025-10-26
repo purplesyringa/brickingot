@@ -36,7 +36,7 @@ pub fn structure_control_flow<'code>(
     // Add keys for dynamically created dispatch jumps.
     let mut id = req_keys.len();
     req_keys.resize_with(implementations.len(), || {
-        let key = RequirementKey::Dispatch { id };
+        let key = RequirementKey::Dispatch { req_id: id };
         id += 1;
         key
     });
@@ -46,11 +46,13 @@ pub fn structure_control_flow<'code>(
     let mut has_dispatch = false;
     for (key, imp) in req_keys.into_iter().zip(implementations) {
         if let RequirementImplementation::Try { block_id } = imp {
-            let RequirementKey::Try { index } = key else {
+            let RequirementKey::Try { handler_index } = key else {
                 panic!("unexpected key for try implementation");
             };
             assert!(
-                try_block_to_handler.insert(block_id, index).is_none(),
+                try_block_to_handler
+                    .insert(block_id, handler_index)
+                    .is_none(),
                 "multiple handlers per try block"
             );
         } else {
@@ -116,13 +118,11 @@ impl<'code> Structurizer<'_, 'code> {
             }),
 
             Node::Try { id, children } => {
-                let handler = self
+                let handler_index = self
                     .try_block_to_handler
                     .remove(&id)
                     .expect("try block without catch");
-
-                let key = RequirementKey::BackwardCatch { index: handler };
-                let handler = self.stackless_ir.exception_handlers[handler].clone();
+                let handler = self.stackless_ir.exception_handlers[handler_index].clone();
 
                 let mut catch_children = Vec::new();
                 if let Some((stack0_version, exception0_version)) =
@@ -145,6 +145,8 @@ impl<'code> Structurizer<'_, 'code> {
                         })),
                     }));
                 }
+
+                let key = RequirementKey::BackwardCatch { handler_index };
                 if self.jump_implementations.contains_key(&key) {
                     self.emit_jump(key, &mut catch_children);
                 }
@@ -176,7 +178,7 @@ impl<'code> Structurizer<'_, 'code> {
                             })];
                             self.emit_jump(
                                 RequirementKey::Dispatch {
-                                    id: target.jump_req_id,
+                                    req_id: target.jump_req_id,
                                 },
                                 &mut stmts,
                             );

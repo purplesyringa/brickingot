@@ -57,11 +57,11 @@ pub enum RequirementKey {
     /// `case` or `default` in a `switch`.
     Switch { stmt_index: usize, key: Option<i32> },
     /// A `try` block.
-    Try { index: usize },
+    Try { handler_index: usize },
     /// A backward jump from `catch` to the real exception handler.
-    BackwardCatch { index: usize },
+    BackwardCatch { handler_index: usize },
     /// A synthetic jump.
-    Dispatch { id: usize },
+    Dispatch { req_id: usize },
 }
 
 #[derive(Clone)]
@@ -125,7 +125,7 @@ pub fn compute_block_requirements(
 
     // `try` blocks are guaranteed to be nested correctly by the call to
     // `legalize_exception_handling` in `structure_control_flow`.
-    for (index, handler) in stackless_ir.exception_handlers.iter().enumerate() {
+    for (handler_index, handler) in stackless_ir.exception_handlers.iter().enumerate() {
         // If `target > end`, `treeify_try_blocks` would have extended `end`.
         assert!(handler.target <= handler.active_range.end);
 
@@ -147,7 +147,7 @@ pub fn compute_block_requirements(
             // codegen.
             let jump_req_id = requirements.len();
             requirements.push((
-                RequirementKey::BackwardCatch { index },
+                RequirementKey::BackwardCatch { handler_index },
                 BlockRequirement {
                     range: handler.target..handler.active_range.end,
                     kind: RequirementKind::BackwardJump,
@@ -157,7 +157,7 @@ pub fn compute_block_requirements(
         };
 
         requirements.push((
-            RequirementKey::Try { index },
+            RequirementKey::Try { handler_index },
             BlockRequirement {
                 range: handler.active_range.clone(),
                 kind: RequirementKind::Try { with_backward_jump },
@@ -335,8 +335,7 @@ impl Treeificator {
     }
 
     fn build_single_block(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
-        // The goal here is to handle enough requirements such that a new gap appears within the
-        // range.
+        // The goal here is to handle enough requirements to let a new gap appear within the range.
 
         // By the time this function is entered, no jumps cover the range strictly.
 
