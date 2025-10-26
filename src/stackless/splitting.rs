@@ -10,7 +10,7 @@
 // only merges `stackN` and `slotN` use-def chains, this is closer to O(n_basic_blocks * n_locals).
 // While this can get quite large, it's reasonably fast in practice.
 
-use super::{BasicBlock, ExceptionHandlerBlock, Statement, abstract_eval::UnresolvedUse};
+use super::{ExceptionHandlerBlock, InternalBasicBlock, Statement, abstract_eval::UnresolvedUse};
 use crate::ast::{
     Arena, BasicStatement, ExprId, Expression, Variable, VariableName, VariableNamespace,
 };
@@ -39,7 +39,7 @@ enum Predicate {
 type TryRangeMap = BTreeMap<usize, (usize, ExprId)>; // start -> (end, use_expr_id)
 
 struct Merger<'a> {
-    basic_blocks: &'a [BasicBlock],
+    basic_blocks: &'a [InternalBasicBlock],
     versions: UnionFind,
     resolved_uses: FxHashMap<(usize, VariableName), ExprId>, // (bb_id, name) -> version
     try_ranges_per_variable: FxHashMap<VariableName, TryRangeMap>,
@@ -47,7 +47,7 @@ struct Merger<'a> {
 }
 
 impl<'a> Merger<'a> {
-    fn new(basic_blocks: &'a mut [BasicBlock], n_versions: u32) -> Self {
+    fn new(basic_blocks: &'a mut [InternalBasicBlock], n_versions: u32) -> Self {
         Self {
             basic_blocks,
             versions: UnionFind::new(n_versions),
@@ -239,7 +239,7 @@ impl MergedVariables {
 
 pub fn merge_versions_across_basic_blocks(
     arena: &mut Arena<'_>,
-    basic_blocks: &mut [BasicBlock],
+    basic_blocks: &mut [InternalBasicBlock],
     unresolved_uses: &FxHashMap<(usize, Variable), UnresolvedUse>,
     statements: &mut Vec<Statement>,
 ) {

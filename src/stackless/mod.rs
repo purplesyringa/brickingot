@@ -14,6 +14,7 @@ use noak::MStr;
 #[derive(Debug)]
 pub struct Program<'code> {
     pub statements: Vec<Statement>,
+    pub basic_blocks: Vec<BasicBlock>,
     pub exception_handlers: Vec<ExceptionHandler<'code>>,
 }
 
@@ -32,9 +33,7 @@ impl<'code> DebugIr<'code> for Program<'code> {
 #[derive(Debug)]
 pub enum Statement {
     Basic(BasicStatement),
-    Label {
-        bb_id: usize,
-    },
+    Label,
     Jump {
         condition: ExprId,
         target: usize,
@@ -50,7 +49,7 @@ impl<'code> DebugIr<'code> for Statement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         match self {
             Self::Basic(stmt) => write!(f, "{}", arena.debug(stmt)),
-            Self::Label { bb_id } => write!(f, "bb{bb_id}:"),
+            Self::Label => write!(f, "label;"),
             Self::Jump { condition, target } => {
                 write!(f, "if ({}) jump {target};", arena.debug(condition))
             }
@@ -63,6 +62,13 @@ impl<'code> DebugIr<'code> for Statement {
             }
         }
     }
+}
+
+#[derive(Debug)]
+pub struct BasicBlock {
+    pub stmt_range: Range<usize>,
+    /// Excludes throwing locations that call into this BB for exception handling.
+    pub predecessors: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,7 +92,7 @@ impl Display for ExceptionHandler<'_> {
     }
 }
 
-struct BasicBlock {
+struct InternalBasicBlock {
     sealed_bb: SealedBlock,
     /// Excludes throwing locations that call into this BB for exception handling.
     predecessors: Vec<usize>,

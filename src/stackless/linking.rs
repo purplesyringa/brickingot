@@ -21,7 +21,7 @@
 // Tarjan's algorithm and propagating the up-to-date information from the entry node to the whole
 // SCC.
 
-use super::{BasicBlock, abstract_eval::UnresolvedUse};
+use super::{InternalBasicBlock, abstract_eval::UnresolvedUse};
 use crate::ast::{Arena, Expression, Variable, VariableName, VariableNamespace};
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
@@ -55,13 +55,13 @@ struct DfsNodeState {
 }
 
 struct Linker<'a> {
-    basic_blocks: &'a [BasicBlock],
+    basic_blocks: &'a [InternalBasicBlock],
     node_info: FxHashMap<(usize, usize), DfsNodeState>,
     tarjan_stack: Vec<(usize, usize)>,
 }
 
 impl<'a> Linker<'a> {
-    fn new(basic_blocks: &'a [BasicBlock]) -> Self {
+    fn new(basic_blocks: &'a [InternalBasicBlock]) -> Self {
         Self {
             basic_blocks,
             node_info: FxHashMap::default(),
@@ -158,7 +158,7 @@ impl<'a> Linker<'a> {
 
 pub fn link_stack_across_basic_blocks(
     arena: &mut Arena<'_>,
-    basic_blocks: &[BasicBlock],
+    basic_blocks: &[InternalBasicBlock],
     unresolved_uses: &mut FxHashMap<(usize, Variable), UnresolvedUse>,
 ) {
     let mut linker = Linker::new(basic_blocks);

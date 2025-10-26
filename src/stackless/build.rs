@@ -108,7 +108,9 @@ use super::abstract_eval::{Machine, SealedBlock};
 use super::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use super::linking::link_stack_across_basic_blocks;
 use super::splitting::merge_versions_across_basic_blocks;
-use super::{BasicBlock, ExceptionHandler, ExceptionHandlerBlock, Program, Statement};
+use super::{
+    BasicBlock, ExceptionHandler, ExceptionHandlerBlock, InternalBasicBlock, Program, Statement,
+};
 use crate::ClassInfo;
 use crate::ast::{Arena, Expression, Variable, VariableName, VariableNamespace};
 use crate::preparse::{self, insn_stack_effect::type_descriptor_width};
@@ -138,12 +140,6 @@ pub enum StacklessIrError {
     },
 }
 
-struct Label {
-    address: u32,
-    stmt_index: usize,
-    bb_id: usize,
-}
-
 pub fn build_stackless_ir<'code>(
     class_info: &mut ClassInfo<'code>,
     arena: &mut Arena<'code>,
@@ -158,10 +154,12 @@ pub fn build_stackless_ir<'code>(
     let mut ir_basic_blocks = Vec::new();
     // +1 for a fake entry BB populating method arguments. This needs to be done in a separate basic
     // block and not as part of the first real BB, as the first BB may have predecessors.
-    ir_basic_blocks.resize_with(preparsed_program.basic_blocks.len() + 1, || BasicBlock {
-        sealed_bb: SealedBlock::default(),
-        predecessors: Vec::new(),
-        eh: None,
+    ir_basic_blocks.resize_with(preparsed_program.basic_blocks.len() + 1, || {
+        InternalBasicBlock {
+            sealed_bb: SealedBlock::default(),
+            predecessors: Vec::new(),
+            eh: None,
+        }
     });
 
     // Initialize method arguments
@@ -230,8 +228,9 @@ pub fn build_stackless_ir<'code>(
 
         // Place a label at the beginning of each BB, since we need to resolve addresses in jump
         // targets or `try` blocks to statement indices. We can't read `statements.len()` and
-        // populate a map directly here, as statements will be rearranged in a bit.
-        machine.add(Statement::Label { bb_id });
+        // populate a map directly here, as statements will be rearranged in a bit by
+        // `merge_versions_across_basic_blocks`.
+        machine.add(Statement::Label);
 
         for row in code.raw_instructions_from(Index::new(bb.instruction_range.start))? {
             let (address, insn) = row?;
@@ -284,7 +283,7 @@ pub fn build_stackless_ir<'code>(
     );
 
     // Fixup jump destinations
-    let mut labels = Vec::new();
+    let mut bb_stmt_starts = Vec::new();
     let mut transitions = Vec::new();
     let mut stmt_index = 0;
     statements.retain(|stmt| match stmt {
@@ -292,14 +291,8 @@ pub fn build_stackless_ir<'code>(
             stmt_index += 1;
             true
         }
-        Statement::Label { bb_id } => {
-            labels.push(Label {
-                address: preparsed_program.basic_blocks[*bb_id]
-                    .instruction_range
-                    .start,
-                stmt_index,
-                bb_id: *bb_id,
-            });
+        Statement::Label => {
+            bb_stmt_starts.push(stmt_index);
             false
         }
         Statement::Jump { .. } | Statement::Switch { .. } => {
@@ -308,17 +301,14 @@ pub fn build_stackless_ir<'code>(
             true
         }
     });
-    labels.push(Label {
-        address: u32::MAX,
-        stmt_index: statements.len(),
-        bb_id: preparsed_program.basic_blocks.len(),
-    });
+    bb_stmt_starts.push(statements.len());
 
     let address_to_stmt_index = |address: u32| -> usize {
-        let index = labels
-            .binary_search_by_key(&address, |label| label.address)
+        let bb_id = preparsed_program
+            .basic_blocks
+            .binary_search_by_key(&address, |bb| bb.instruction_range.start)
             .expect("invalid jump destination");
-        labels[index].stmt_index
+        bb_stmt_starts[bb_id]
     };
     for stmt_index in transitions {
         match &mut statements[stmt_index] {
@@ -335,12 +325,6 @@ pub fn build_stackless_ir<'code>(
 
     // Compute new exception handlers.
     let mut exception_handlers = Vec::new();
-    let bb_id_to_stmt_index = |bb_id: usize| -> usize {
-        let index = labels
-            .binary_search_by_key(&bb_id, |label| label.bb_id)
-            .expect("invalid BB ID");
-        labels[index].stmt_index
-    };
     for handler in preparsed_program.exception_handlers {
         // `start` and `end` may compare equal if all basic blocks covered by the `try` block are
         // e.g. `nop`s. But that's not a good reason to remove the handler. Although we know this
@@ -348,10 +332,10 @@ pub fn build_stackless_ir<'code>(
         // become *syntactically* unreachable, which violates our assumption that all code in the IR
         // is syntactically reachable. Retaining an empty `try` is better than breaking those
         // assumptions.
-        let start = bb_id_to_stmt_index(handler.active_range.start);
-        let end = bb_id_to_stmt_index(handler.active_range.end);
+        let start = bb_stmt_starts[handler.active_range.start];
+        let end = bb_stmt_starts[handler.active_range.end];
 
-        let target = bb_id_to_stmt_index(handler.target);
+        let target = bb_stmt_starts[handler.target];
         let eh = ir_basic_blocks[handler.target].eh.as_ref().unwrap();
 
         exception_handlers.push(ExceptionHandler {
@@ -366,8 +350,22 @@ pub fn build_stackless_ir<'code>(
         });
     }
 
+    // Collect simple BB info for basic stages. We're not interested in the fake entry BB, so remove
+    // it.
+    ir_basic_blocks.pop();
+    ir_basic_blocks[0].predecessors.remove(0);
+    let basic_blocks = ir_basic_blocks
+        .into_iter()
+        .enumerate()
+        .map(|(bb_id, bb)| BasicBlock {
+            stmt_range: bb_stmt_starts[bb_id]..bb_stmt_starts[bb_id + 1],
+            predecessors: bb.predecessors,
+        })
+        .collect();
+
     Ok(Program {
         statements,
+        basic_blocks,
         exception_handlers,
     })
 }

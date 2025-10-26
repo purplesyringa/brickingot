@@ -200,7 +200,7 @@ impl<'code> Structurizer<'_, 'code> {
         match stmt {
             stackless::Statement::Basic(stmt) => out.push(Statement::Basic(stmt)),
 
-            stackless::Statement::Label { .. } => {
+            stackless::Statement::Label => {
                 unreachable!("labels should've been removed on the previous pass")
             }
 

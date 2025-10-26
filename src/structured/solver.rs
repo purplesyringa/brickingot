@@ -96,7 +96,7 @@ pub fn compute_block_requirements(
     // Jumps are satisfied by normal blocks.
     for (stmt_index, stmt) in stackless_ir.statements.iter().enumerate() {
         match stmt {
-            stackless::Statement::Basic(_) | stackless::Statement::Label { .. } => {}
+            stackless::Statement::Basic(_) | stackless::Statement::Label => {}
             stackless::Statement::Jump { target, .. } => requirements.push((
                 RequirementKey::Jump { stmt_index },
                 jump(stmt_index, *target),
