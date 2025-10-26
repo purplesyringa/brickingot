@@ -126,53 +126,53 @@ fn compute_contexts(n_points: usize, ranges: &[Range<usize>]) -> Vec<u32> {
     let mut id_stack: Vec<(usize, u32)> = Vec::new();
     let mut next_id = 0;
 
-    (0..n_points)
-        .map(|point| {
-            while let Some(event) = events.next_if(|event| {
-                let range = &ranges[event.range_id];
-                (if event.is_open {
-                    range.start
-                } else {
-                    range.end
-                }) == point
-            }) {
-                if event.is_open {
-                    // A new range has just opened. This context is guaranteed to be distinct from
-                    // all contexts thus far. We'll create a new one in a bit.
-                    pos_in_stack[event.range_id] = range_stack.len();
-                    range_stack.push(event.range_id);
-                } else {
-                    // A range has just closed -- drop it from the stack.
-                    let pos = pos_in_stack[event.range_id];
-                    pos_in_stack[*range_stack.last().expect("range stack is empty")] = pos;
-                    pos_in_stack[event.range_id] = usize::MAX;
-                    range_stack.swap_remove(pos);
-                    // Removing a range from the middle of the list invalidates context IDs of all
-                    // prefixes that contain that range.
-                    // |-------------|
-                    //    |---------------------|
-                    //         |-----------|
-                    //               ^ we're here
-                    //                ^^^^^^^^^^ none of these sets can possibly match any set from
-                    //                           before, so we'll only ever encounter old IDs if we
-                    //                           pop the whole suffix since `pos`.
-                    // It doesn't matter that we modify the order of the following ranges in the
-                    // stack because the order of ranges that have opened in a now-closed range is
-                    // indistinguishable.
-                    while id_stack.pop_if(|(len, _)| pos < *len).is_some() {}
-                }
+    let mut result = Vec::with_capacity(n_points);
+    for point in 0..n_points {
+        while let Some(event) = events.next_if(|event| {
+            let range = &ranges[event.range_id];
+            (if event.is_open {
+                range.start
+            } else {
+                range.end
+            }) == point
+        }) {
+            if event.is_open {
+                // A new range has just opened. This context is guaranteed to be distinct from all
+                // contexts thus far. We'll create a new one in a bit.
+                pos_in_stack[event.range_id] = range_stack.len();
+                range_stack.push(event.range_id);
+            } else {
+                // A range has just closed -- drop it from the stack.
+                let pos = pos_in_stack[event.range_id];
+                pos_in_stack[*range_stack.last().expect("range stack is empty")] = pos;
+                pos_in_stack[event.range_id] = usize::MAX;
+                range_stack.swap_remove(pos);
+                // Removing a range from the middle of the list invalidates context IDs of all
+                // prefixes that contain that range.
+                // |-------------|
+                //    |---------------------|
+                //         |-----------|
+                //               ^ we're here
+                //                ^^^^^^^^^^ none of these sets can possibly match any set from
+                //                           before, so we'll only ever encounter old IDs if we pop
+                //                           the whole suffix since `pos`.
+                // It doesn't matter that we modify the order of the following ranges in the stack
+                // because the order of ranges that have opened in a now-closed range is
+                // indistinguishable.
+                while id_stack.pop_if(|(len, _)| pos < *len).is_some() {}
             }
+        }
 
-            if id_stack
-                .last()
-                .is_none_or(|(len, _)| *len != range_stack.len())
-            {
-                id_stack.push((range_stack.len(), next_id));
-                next_id += 1;
-            }
-            id_stack.last().unwrap().1
-        })
-        .collect()
+        if id_stack
+            .last()
+            .is_none_or(|(len, _)| *len != range_stack.len())
+        {
+            id_stack.push((range_stack.len(), next_id));
+            next_id += 1;
+        }
+        result.push(id_stack.last().unwrap().1);
+    }
+    result
 }
 
 #[cfg(test)]
