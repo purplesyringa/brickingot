@@ -50,7 +50,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
             // more information about why this matters.
             if self.rev_stmts.peek().is_some() {
                 let subexprs = match &stmt_meta.stmt {
-                    Statement::Basic { stmt, .. } => stmt.subexprs(),
+                    Statement::Basic(stmt) => stmt.subexprs(),
                     Statement::If { condition, .. } => {
                         BasicStatement::subexprs_from_single(*condition)
                     }
@@ -121,10 +121,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
 
         // Is the previous statement a definition of this variable?
         if let Some(stmt_meta) = self.rev_stmts.peek()
-            && let Statement::Basic {
-                stmt: BasicStatement::Assign { target, value },
-                ..
-            } = stmt_meta.stmt
+            && let Statement::Basic(BasicStatement::Assign { target, value }) = stmt_meta.stmt
             && let Expression::Variable(def_var) = self.arena[target]
             && def_var == var
         {

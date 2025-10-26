@@ -3,7 +3,6 @@ use rustc_hash::FxHashMap;
 use super::gap_tracker::GapTracker;
 use crate::stackless;
 use crate::utils::IntervalTree;
-use alloc::collections::BTreeMap;
 use core::ops::Range;
 
 #[derive(Debug)]
@@ -124,18 +123,13 @@ pub fn compute_block_requirements(
         }
     }
 
-    // `try` blocks are not guaranteed to be nested correctly. Even if nested, the outer `try` block
-    // can have more priority than the inner one. There's no better way to handle this than forcing
-    // the inner `try` block to be as large as the outer one. But that would require not just its
-    // left end, but also its right end to be extended, which would change the position of `catch`
-    // and force us to insert a backward jump. We thus need to perform these extensions before the
-    // requirement list is generated. `treeify_try_blocks` is responsible for doing this.
-    for (index, handler) in treeify_try_blocks(&stackless_ir.exception_handlers)
-        .into_iter()
-        .enumerate()
-    {
+    // `try` blocks are guaranteed to be nested correctly by the call to
+    // `legalize_exception_handling` in `structure_control_flow`.
+    for (index, handler) in stackless_ir.exception_handlers.iter().enumerate() {
+        // If `target > end`, `treeify_try_blocks` would have extended `end`.
+        assert!(handler.target <= handler.active_range.end);
+
         let with_backward_jump = if handler.active_range.end == handler.target {
-            // If `target > end`, `treeify_try_blocks` would have extended `end`.
             None
         } else {
             // If the handler is located before or within the `try` block, we have to emit a jump.
@@ -172,47 +166,6 @@ pub fn compute_block_requirements(
     }
 
     requirements
-}
-
-// Extends exception handler ranges such that each range #i either contains or doesn't intersect
-// range #j for all i > j. Does not reorder handlers.
-fn treeify_try_blocks<'code>(
-    handlers: &[stackless::ExceptionHandler<'code>],
-) -> Vec<stackless::ExceptionHandler<'code>> {
-    let mut active_ranges = BTreeMap::new(); // start -> end
-
-    let mut handlers = Vec::from(handlers);
-    for handler in &mut handlers {
-        // Typically, the `try` block range ends before the handler; in this case, we emit
-        // a slightly larger `try` block so that the handler directly follows its end and `catch`
-        // can fallthrough into the handler without any explicit jumps. If the range contains more
-        // statements than necessary, we'll sort it out later with synthetic variables.
-        //
-        // We could also emit `start..end` and a forward jump, but it's not yet clear if that's any
-        // better, since that might be harder to optimize.
-        let mut new_start = handler.active_range.start;
-        let mut new_end = handler.active_range.end.max(handler.target);
-
-        // Find the subset of ranges intersecting `new_start..new_end`. Unfortunately, this has to
-        // be hacky without cursors.
-        let it_start = active_ranges
-            .range(..new_start)
-            .last()
-            .map(|(start, _)| *start)
-            .unwrap_or(0);
-        for (start, end) in active_ranges.extract_if(it_start..new_end, move |start, end| {
-            *start < new_end && *end > new_start
-        }) {
-            // Make the new range encompass the old ones.
-            new_start = new_start.min(start);
-            new_end = new_end.max(end);
-        }
-
-        active_ranges.insert(new_start, new_end);
-        handler.active_range = new_start..new_end;
-    }
-
-    handlers
 }
 
 pub fn satisfy_block_requirements(

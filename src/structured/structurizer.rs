@@ -1,8 +1,11 @@
-use super::solver::{
-    Node, RequirementImplementation, RequirementKey, compute_block_requirements,
-    satisfy_block_requirements,
+use super::{
+    Catch, Statement,
+    exceptions::legalize_exception_handling,
+    solver::{
+        Node, RequirementImplementation, RequirementKey, compute_block_requirements,
+        satisfy_block_requirements,
+    },
 };
-use super::{Catch, Statement};
 use crate::ast::{
     Arena, BasicStatement, ExprId, Expression, Variable, VariableName, VariableNamespace,
 };
@@ -11,13 +14,18 @@ use rustc_hash::FxHashMap;
 
 pub fn structure_control_flow<'code>(
     arena: &Arena<'code>,
-    stackless_ir: stackless::Program<'code>,
+    mut stackless_ir: stackless::Program<'code>,
 ) -> Vec<Statement<'code>> {
     // If you're confused as to what's happening here, read this first:
     // https://purplesyringa.moe/blog/recovering-control-flow-structures-without-cfgs/. The post
     // does not cover this implementation in its entirety, but it's pretty close.
     // `compute_block_requirements` effectively generates the arrows, `satisfy_block_requirements`
     // effectively builds a tree, and everything else is glue and exception handling logic.
+
+    // `try` blocks are weird. They are not guaranteed to be nested correctly, which causes all
+    // sorts of problems. Fixing this also requires modifying statements, so it's the first thing we
+    // do, before we have a chance to run any analysis pass.
+    legalize_exception_handling(&mut stackless_ir);
 
     let requirements = compute_block_requirements(&stackless_ir);
     let (mut req_keys, req_values): (Vec<_>, _) = requirements.into_iter().unzip();
@@ -64,13 +72,10 @@ pub fn structure_control_flow<'code>(
 
     let mut stmts = Vec::new();
     if has_dispatch {
-        stmts.push(Statement::Basic {
-            index: None,
-            stmt: BasicStatement::Assign {
-                target: structurizer.selector(),
-                value: arena.int(0),
-            },
-        });
+        stmts.push(Statement::Basic(BasicStatement::Assign {
+            target: structurizer.selector(),
+            value: arena.int(0),
+        }));
     }
     for node in tree {
         structurizer.emit_node(node, &mut stmts);
@@ -123,25 +128,22 @@ impl<'code> Structurizer<'_, 'code> {
                 if let Some((stack0_version, exception0_version)) =
                     handler.stack0_exception0_copy_versions
                 {
-                    catch_children.push(Statement::Basic {
-                        index: None,
-                        stmt: BasicStatement::Assign {
-                            target: self.arena.alloc(Expression::Variable(Variable {
-                                name: VariableName {
-                                    id: 0,
-                                    namespace: VariableNamespace::Stack,
-                                },
-                                version: stack0_version,
-                            })),
-                            value: self.arena.alloc(Expression::Variable(Variable {
-                                name: VariableName {
-                                    id: 0,
-                                    namespace: VariableNamespace::Exception,
-                                },
-                                version: exception0_version,
-                            })),
-                        },
-                    });
+                    catch_children.push(Statement::Basic(BasicStatement::Assign {
+                        target: self.arena.alloc(Expression::Variable(Variable {
+                            name: VariableName {
+                                id: 0,
+                                namespace: VariableNamespace::Stack,
+                            },
+                            version: stack0_version,
+                        })),
+                        value: self.arena.alloc(Expression::Variable(Variable {
+                            name: VariableName {
+                                id: 0,
+                                namespace: VariableNamespace::Exception,
+                            },
+                            version: exception0_version,
+                        })),
+                    }));
                 }
                 if self.jump_implementations.contains_key(&key) {
                     self.emit_jump(key, &mut catch_children);
@@ -168,13 +170,10 @@ impl<'code> Structurizer<'_, 'code> {
                     arms: dispatch_targets
                         .into_iter()
                         .map(|target| {
-                            let mut stmts = vec![Statement::Basic {
-                                index: None,
-                                stmt: BasicStatement::Assign {
-                                    target: self.selector(),
-                                    value: self.arena.int(0),
-                                },
-                            }];
+                            let mut stmts = vec![Statement::Basic(BasicStatement::Assign {
+                                target: self.selector(),
+                                value: self.arena.int(0),
+                            })];
                             self.emit_jump(
                                 RequirementKey::Dispatch {
                                     id: target.jump_req_id,
@@ -197,10 +196,7 @@ impl<'code> Structurizer<'_, 'code> {
         );
 
         match stmt {
-            stackless::Statement::Basic(stmt) => out.push(Statement::Basic {
-                index: Some(stmt_index),
-                stmt,
-            }),
+            stackless::Statement::Basic(stmt) => out.push(Statement::Basic(stmt)),
 
             stackless::Statement::Label { .. } => {
                 unreachable!("labels should've been removed on the previous pass")
@@ -281,13 +277,10 @@ impl<'code> Structurizer<'_, 'code> {
                 out.push(Statement::Continue { block_id })
             }
             RequirementImplementation::ContinueToDispatcher { block_id, selector } => {
-                out.push(Statement::Basic {
-                    index: None,
-                    stmt: BasicStatement::Assign {
-                        target: self.selector(),
-                        value: self.arena.int(selector),
-                    },
-                });
+                out.push(Statement::Basic(BasicStatement::Assign {
+                    target: self.selector(),
+                    value: self.arena.int(selector),
+                }));
                 out.push(Statement::Continue { block_id })
             }
             RequirementImplementation::Try { .. } => {

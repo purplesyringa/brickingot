@@ -10,10 +10,7 @@ use noak::MStr;
 
 #[derive(Debug)]
 enum Statement<'code> {
-    Basic {
-        index: Option<usize>,
-        stmt: BasicStatement,
-    },
+    Basic(BasicStatement),
     Block {
         id: usize,
         children: StmtList<'code>,
@@ -83,12 +80,7 @@ impl<'code> DebugIr<'code> for Meta {
 impl<'code> DebugIr<'code> for Statement<'code> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         match self {
-            Self::Basic { index, stmt } => {
-                if let Some(index) = index {
-                    write!(f, "#{index} ")?;
-                }
-                write!(f, "{}", arena.debug(stmt))
-            }
+            Self::Basic(stmt) => write!(f, "{}", arena.debug(stmt)),
 
             Self::Block { id, children } => {
                 writeln!(f, "block #{id} {{")?;

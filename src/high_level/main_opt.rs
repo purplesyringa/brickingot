@@ -50,9 +50,7 @@ impl<'code> Optimizer<'_, 'code> {
         out: &mut StmtList<'code>,
     ) {
         match stmt {
-            structured::Statement::Basic { index, stmt } => {
-                self.handle_basic_stmt(index, stmt, out);
-            }
+            structured::Statement::Basic(stmt) => self.handle_basic_stmt(stmt, out),
 
             structured::Statement::Block { id, children } => {
                 self.handle_block(id, children, fallthrough_breaks_from, out);
@@ -79,12 +77,7 @@ impl<'code> Optimizer<'_, 'code> {
         }
     }
 
-    fn handle_basic_stmt(
-        &mut self,
-        index: Option<usize>,
-        mut stmt: BasicStatement,
-        out: &mut StmtList<'code>,
-    ) {
+    fn handle_basic_stmt(&mut self, mut stmt: BasicStatement, out: &mut StmtList<'code>) {
         // Replace dead `valueN` assignments with computations and drop no-op computations. Dead
         // stack assignments have already been removed in `splitting`, which means that dead
         // `valueN`s have no uses whatsoever (except for the definition itself), so we don't have to
@@ -144,7 +137,7 @@ impl<'code> Optimizer<'_, 'code> {
             ..Meta::default()
         };
         out.push(StmtMeta {
-            stmt: Statement::Basic { index, stmt },
+            stmt: Statement::Basic(stmt),
             meta,
         });
     }
@@ -556,10 +549,7 @@ impl<'code> Optimizer<'_, 'code> {
                 &mut stmts[i],
                 StmtMeta {
                     meta: Meta::default(),
-                    stmt: Statement::Basic {
-                        index: None,
-                        stmt: BasicStatement::ReturnVoid,
-                    },
+                    stmt: Statement::Basic(BasicStatement::ReturnVoid),
                 },
             );
 
@@ -665,14 +655,10 @@ impl<'code> Optimizer<'_, 'code> {
         if let [
             StmtMeta {
                 stmt:
-                    Statement::Basic {
-                        stmt:
-                            BasicStatement::Assign {
-                                target: then_target,
-                                value: then_value,
-                            },
-                        ..
-                    },
+                    Statement::Basic(BasicStatement::Assign {
+                        target: then_target,
+                        value: then_value,
+                    }),
                 ..
             },
         ] = then_children[..]
@@ -683,14 +669,12 @@ impl<'code> Optimizer<'_, 'code> {
             && let [
                 StmtMeta {
                     stmt:
-                        Statement::Basic {
-                            stmt:
+                        Statement::Basic(
                                 BasicStatement::Assign {
                                     target: else_target,
                                     value: else_value,
                                 },
-                            ..
-                        },
+                        ),
                     ..
                 },
             ] = else_children[..]
@@ -699,16 +683,13 @@ impl<'code> Optimizer<'_, 'code> {
         {
             let condition = self.invert_condition(*condition);
 
-            stmt_meta.stmt = Statement::Basic {
-                index: None, // FIXME: handle try ranges here
-                stmt: BasicStatement::Assign {
-                    target: then_target,
-                    value: self.arena.alloc(Expression::Ternary {
-                        condition,
-                        branches: [then_value, else_value],
-                    }),
-                },
-            };
+            stmt_meta.stmt = Statement::Basic(BasicStatement::Assign {
+                target: then_target,
+                value: self.arena.alloc(Expression::Ternary {
+                    condition,
+                    branches: [then_value, else_value],
+                }),
+            });
             // Decrement refcount for the variable so that it can be inlined.
             self.arena[else_target] = Expression::Null;
             *self
