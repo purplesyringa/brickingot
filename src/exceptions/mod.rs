@@ -1,9 +1,7 @@
-mod exceptions;
-mod gap_tracker;
-mod solver;
-mod structurizer;
+mod contexts;
+mod parse;
 
-pub use self::structurizer::structure_control_flow;
+pub use self::parse::parse_try_blocks;
 use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
 use alloc::fmt;
 use noak::MStr;
@@ -15,20 +13,15 @@ pub struct Program<'code> {
 
 #[derive(Debug)]
 pub enum Statement<'code> {
-    Basic {
-        index: Index,
-        stmt: BasicStatement,
-    },
+    Basic(BasicStatement),
     Block {
         id: usize,
         children: Vec<Statement<'code>>,
     },
     Continue {
-        index: Index,
         block_id: usize,
     },
     Break {
-        index: Index,
         block_id: usize,
     },
     If {
@@ -36,24 +29,21 @@ pub enum Statement<'code> {
         then_children: Vec<Statement<'code>>,
     },
     Switch {
-        index: Index,
         id: usize,
         key: ExprId,
         arms: Vec<(Option<i32>, Vec<Statement<'code>>)>,
     },
-    TryCatch {
+    Try {
         try_children: Vec<Statement<'code>>,
-        class: Option<Str<'code>>,
-        catch_children: Vec<Statement<'code>>,
+        catches: Vec<Catch<'code>>,
+        finally_children: Vec<Statement<'code>>,
     },
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum Index {
-    /// An auto-generated non-throwing statement not linked to any position in the source code.
-    Synthetic,
-    /// Produced from the statement at the given position in the linear IR.
-    Real(usize),
+#[derive(Debug)]
+pub struct Catch<'code> {
+    pub class: Option<Str<'code>>,
+    pub children: Vec<Statement<'code>>,
 }
 
 impl<'code> DebugIr<'code> for Program<'code> {
@@ -68,7 +58,7 @@ impl<'code> DebugIr<'code> for Program<'code> {
 impl<'code> DebugIr<'code> for Statement<'code> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         match self {
-            Self::Basic { index, stmt } => write!(f, "{index} {}", arena.debug(stmt)),
+            Self::Basic(stmt) => write!(f, "{}", arena.debug(stmt)),
 
             Self::Block { id, children } => {
                 writeln!(f, "block #{id} {{")?;
@@ -78,9 +68,9 @@ impl<'code> DebugIr<'code> for Statement<'code> {
                 write!(f, "}} block #{id}")
             }
 
-            Self::Continue { index, block_id } => write!(f, "{index} continue #{block_id};"),
+            Self::Continue { block_id } => write!(f, "continue #{block_id};"),
 
-            Self::Break { index, block_id } => write!(f, "{index} break #{block_id};"),
+            Self::Break { block_id } => write!(f, "break #{block_id};"),
 
             Self::If {
                 condition,
@@ -93,13 +83,8 @@ impl<'code> DebugIr<'code> for Statement<'code> {
                 write!(f, "}}")
             }
 
-            Self::Switch {
-                index,
-                id,
-                key,
-                arms,
-            } => {
-                writeln!(f, "{index} switch #{id} ({}) {{", arena.debug(key))?;
+            Self::Switch { id, key, arms } => {
+                writeln!(f, "switch #{id} ({}) {{", arena.debug(key))?;
                 for (value, children) in arms {
                     match value {
                         Some(value) => writeln!(f, "case {value}:")?,
@@ -112,34 +97,35 @@ impl<'code> DebugIr<'code> for Statement<'code> {
                 write!(f, "}} switch #{id};")
             }
 
-            Self::TryCatch {
+            Self::Try {
                 try_children,
-                class,
-                catch_children,
+                catches,
+                finally_children,
             } => {
                 writeln!(f, "try {{")?;
                 for child in try_children {
                     writeln!(f, "{}", arena.debug(child))?;
                 }
-                writeln!(
-                    f,
-                    "}} catch ({}) {{",
-                    class.unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
-                )?;
-                for child in catch_children {
-                    writeln!(f, "{}", arena.debug(child))?;
+                for catch in catches {
+                    writeln!(
+                        f,
+                        "}} catch ({}) {{",
+                        catch
+                            .class
+                            .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
+                    )?;
+                    for child in &catch.children {
+                        writeln!(f, "{}", arena.debug(child))?;
+                    }
+                }
+                if !finally_children.is_empty() {
+                    writeln!(f, "}} finally {{")?;
+                    for child in finally_children {
+                        writeln!(f, "{}", arena.debug(child))?;
+                    }
                 }
                 write!(f, "}}")
             }
-        }
-    }
-}
-
-impl fmt::Display for Index {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Synthetic => write!(f, ".syn"),
-            Self::Real(index) => write!(f, ".{index}"),
         }
     }
 }

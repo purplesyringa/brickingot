@@ -1,14 +1,15 @@
 use crate::ast::{Arena, DebugIr};
 use crate::stackless;
-pub use crate::stackless::{ExceptionHandler, Statement};
-use core::fmt::{self};
+pub use crate::stackless::{CatchHandler, Statement};
+use crate::utils::merge_overlapping_ranges;
+use core::fmt;
 
-// We reuse the `ExceptionHandler` and `Statement` types from `stackless`, since the only difference
-// is whether BB IDs or statement IDs are used. It's a bit janky, but somewhat simplifies things.
+// We reuse the `CatchHandler` and `Statement` types from `stackless`, since the only difference is
+// whether BB IDs or statement IDs are used. It's a bit janky, but somewhat simplifies things.
 #[derive(Debug)]
 pub struct Program<'code> {
     pub statements: Vec<Statement>,
-    pub exception_handlers: Vec<ExceptionHandler<'code>>,
+    pub catch_handlers: Vec<CatchHandler<'code>>,
 }
 
 impl<'code> DebugIr<'code> for Program<'code> {
@@ -16,7 +17,7 @@ impl<'code> DebugIr<'code> for Program<'code> {
         for (stmt_index, stmt) in self.statements.iter().enumerate() {
             writeln!(f, "{stmt_index}: {}", arena.debug(stmt))?;
         }
-        for handler in &self.exception_handlers {
+        for handler in &self.catch_handlers {
             writeln!(f, "{}", arena.debug(handler))?;
         }
         Ok(())
@@ -48,17 +49,21 @@ pub fn linearize_ir<'code>(mut stackless_ir: stackless::Program<'code>) -> Progr
         }
     }
 
-    // Fixup exception handlers.
-    for handler in &mut stackless_ir.exception_handlers {
-        // `start` and `end` may compare equal if all basic blocks covered by the `try` block are
-        // e.g. `nop`s. But that's not a good reason to remove the handler. Although we know this
-        // means `catch` is never executed, removing the exception handler can cause more code to
-        // become *syntactically* unreachable, which violates our assumption that all code in the IR
-        // is syntactically reachable. Retaining an empty `try` is better than breaking those
-        // assumptions.
-        handler.active_range.start = bb_stmt_starts[handler.active_range.start];
-        handler.active_range.end = bb_stmt_starts[handler.active_range.end];
+    // Fixup `catch` handlers.
+    for handler in &mut stackless_ir.catch_handlers {
+        for range in &mut handler.active_ranges {
+            range.start = bb_stmt_starts[range.start];
+            range.end = bb_stmt_starts[range.end];
+        }
         handler.body.jump_target = bb_stmt_starts[handler.body.jump_target];
+        // `start` and `end` may compare equal if all basic blocks covered by a given range are e.g.
+        // `nop`s. Remove empty ranges and merge adjacent ones.
+        merge_overlapping_ranges(&mut handler.active_ranges);
+        // As a side-effect, `active_ranges` can become empty. Even then, that's not a good reason
+        // to remove the handler. Although we know this means `catch` is never executed, removing
+        // the exception handler can cause some code to become *syntactically* unreachable, which
+        // violates our assumption that all code in the IR is syntactically reachable. Retaining
+        // an empty `catch` is better than breaking those assumptions.
     }
 
     let mut statements = Vec::with_capacity(next_stmt_index);
@@ -68,6 +73,6 @@ pub fn linearize_ir<'code>(mut stackless_ir: stackless::Program<'code>) -> Progr
 
     Program {
         statements,
-        exception_handlers: stackless_ir.exception_handlers,
+        catch_handlers: stackless_ir.catch_handlers,
     }
 }

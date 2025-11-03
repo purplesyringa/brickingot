@@ -392,7 +392,7 @@ macro_rules! var {
     ($($tt:tt)*) => { $crate::var!(@muncher [] $($tt)*) };
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Str<'code>(pub &'code MStr);
 
 impl Display for Str<'_> {

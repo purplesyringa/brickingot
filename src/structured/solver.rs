@@ -1,6 +1,6 @@
 use rustc_hash::FxHashMap;
 
-use super::gap_tracker::GapTracker;
+use super::{exceptions::compute_syntactic_eh_ranges, gap_tracker::GapTracker};
 use crate::linear;
 use crate::utils::IntervalTree;
 use core::ops::Range;
@@ -45,8 +45,8 @@ pub enum RequirementKind {
     ForwardJump,
     /// The block must catch exceptions.
     Try {
-        /// ...and optionally jump according to this requirement in `catch`.
-        with_backward_jump: Option<usize>,
+        /// ...and jump from `catch` to the exception handler according to this requirement.
+        with_backward_catch_jump: Option<usize>,
     },
 }
 
@@ -123,13 +123,24 @@ pub fn compute_block_requirements(
         }
     }
 
-    // `try` blocks are guaranteed to be nested correctly by the call to
-    // `legalize_exception_handling` in `structure_control_flow`.
-    for (handler_index, handler) in linear_ir.exception_handlers.iter().enumerate() {
-        // If `target > end`, `treeify_try_blocks` would have extended `end`.
-        assert!(handler.body.jump_target <= handler.active_range.end);
+    // Since a `catch` block can be associated with multiple active ranges, we need to choose
+    // a single syntactic range encompassing all active ranges. This is further complicated by the
+    // fact that choosing the minimal range doesn't work: a) such ranges may be nested in the
+    // opposite order from `catch` priorities, b) if such ranges overlap and are later extended by
+    // the general-purpose logic, the order may be broken even less predictably. So this is a whole
+    // process in and of itself.
+    let syntactic_eh_ranges = compute_syntactic_eh_ranges(&linear_ir.catch_handlers);
 
-        let with_backward_jump = if handler.active_range.end == handler.body.jump_target {
+    for (handler_index, (handler, syntactic_range)) in linear_ir
+        .catch_handlers
+        .iter()
+        .zip(syntactic_eh_ranges)
+        .enumerate()
+    {
+        // The `end` of a syntactic range is always extended to `target`.
+        assert!(handler.body.jump_target <= syntactic_range.end);
+
+        let with_backward_catch_jump = if syntactic_range.end == handler.body.jump_target {
             None
         } else {
             // If the handler is located before or within the `try` block, we have to emit a jump.
@@ -139,17 +150,17 @@ pub fn compute_block_requirements(
             // to `try` internals since it's located *after* `try`, not at the end of `try`. We want
             // to force the jump to be handled before `try` regardless of apparent nesting.
             //
-            // A special variation of this problem arises if the handler is inside `try`: if we
-            // split `try` into two parts and handled them separately, and a smaller nested `try`
-            // block crosses `target`, we would have an invalid tree; moreover, since each
-            // individual part can be smaller than the nested `try` block, the `try` order may
-            // become swapped. This forces us to emit a single `try` even if it produces worse
-            // codegen.
+            // A special variation of this problem arises if the handler is inside `try`. It seems
+            // like it's be reasonable to split `try` into two parts and handle them separately.
+            // However, this causes as problem: if there's another `try` block that crosses
+            // `target`, we're be unable to codegen the outer `try` corresponding to range
+            // `target..end` without extending it, and the act of extension would just bring us back
+            // to square one. This forces us to emit a single `try` even if it's less pretty.
             let jump_req_id = requirements.len();
             requirements.push((
                 RequirementKey::BackwardCatch { handler_index },
                 BlockRequirement {
-                    range: handler.body.jump_target..handler.active_range.end,
+                    range: handler.body.jump_target..syntactic_range.end,
                     kind: RequirementKind::BackwardJump,
                 },
             ));
@@ -159,8 +170,10 @@ pub fn compute_block_requirements(
         requirements.push((
             RequirementKey::Try { handler_index },
             BlockRequirement {
-                range: handler.active_range.clone(),
-                kind: RequirementKind::Try { with_backward_jump },
+                range: syntactic_range,
+                kind: RequirementKind::Try {
+                    with_backward_catch_jump,
+                },
             },
         ));
     }
@@ -428,7 +441,7 @@ impl Treeificator {
 
         if let Some(req_id) = self.tries_to[range.end].last()
             && let RequirementKind::Try {
-                with_backward_jump: Some(jump_req_id),
+                with_backward_catch_jump: Some(jump_req_id),
             } = self.reqs[*req_id].kind
             && self.imps[jump_req_id].is_none()
         {

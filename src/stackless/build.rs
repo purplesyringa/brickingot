@@ -109,7 +109,7 @@ use super::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use super::linking::link_stack_across_basic_blocks;
 use super::splitting::merge_versions_across_basic_blocks;
 use super::{
-    BasicBlock, EhBody, ExceptionHandler, ExceptionHandlerBlock, InternalBasicBlock, Program,
+    BasicBlock, CatchBody, CatchHandler, ExceptionHandlerBlock, InternalBasicBlock, Program,
 };
 use crate::ClassInfo;
 use crate::ast::BasicStatement;
@@ -162,8 +162,11 @@ pub fn build_stackless_ir<'code>(
             *succ_bb_id += 1;
         }
     }
-    for handler in &mut preparsed_program.exception_handlers {
-        handler.active_range = handler.active_range.start + 1..handler.active_range.end + 1;
+    for handler in &mut preparsed_program.catch_handlers {
+        for range in &mut handler.active_ranges {
+            range.start += 1;
+            range.end += 1;
+        }
         handler.target += 1;
     }
     preparsed_program.basic_blocks.insert(
@@ -208,8 +211,8 @@ pub fn build_stackless_ir<'code>(
 
     // Accumulate `try` ranges for exception handlers.
     let mut eh_entry_for_bb_ranges = vec![Vec::new(); preparsed_program.basic_blocks.len()];
-    for handler in &preparsed_program.exception_handlers {
-        eh_entry_for_bb_ranges[handler.target].push(handler.active_range.clone());
+    for handler in &preparsed_program.catch_handlers {
+        eh_entry_for_bb_ranges[handler.target].extend(handler.active_ranges.iter().cloned());
     }
 
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
@@ -230,9 +233,10 @@ pub fn build_stackless_ir<'code>(
         } else {
             Some(ExceptionHandlerBlock {
                 eh_entry_for_bb_ranges,
-                // It doesn't make sense to allocate variables here, since a single handler may be
-                // used by multiple `try` blocks and we'd have to create new allocations. Using
-                // `null` here ensures we don't affect variable refcounts.
+                // It doesn't make sense to allocate variables here, since a single target address
+                // may be used by multiple `catch` blocks (e.g. with different classes), so we'd
+                // have to create new allocations. Using `null` here ensures we don't affect
+                // variable refcounts until we actually codegen assignments.
                 stack0_def: arena.alloc(Expression::Null),
                 exception0_use: arena.alloc(Expression::Null),
                 stack0_exception0_copy_is_necessary: true, // populated by `splitting`
@@ -286,9 +290,9 @@ pub fn build_stackless_ir<'code>(
     link_stack_across_basic_blocks(arena, &ir_basic_blocks, &mut unresolved_uses);
     merge_versions_across_basic_blocks(arena, &mut ir_basic_blocks, &unresolved_uses);
 
-    // Compute exception handlers.
-    let exception_handlers = preparsed_program
-        .exception_handlers
+    // Convert `catch` blocks and add `stack0 = exception0` to the body if necessary.
+    let catch_handlers = preparsed_program
+        .catch_handlers
         .into_iter()
         .map(|handler| {
             let eh = ir_basic_blocks[handler.target].eh.as_ref().unwrap();
@@ -302,11 +306,10 @@ pub fn build_stackless_ir<'code>(
                 }
             });
 
-            ExceptionHandler {
-                active_range: handler.active_range,
+            CatchHandler {
+                active_ranges: handler.active_ranges,
                 class: handler.class,
-                body: EhBody {
-                    condition: None, // will be populated later by `legalize_exception_handling`
+                body: CatchBody {
                     exception0_use: eh.exception0_use,
                     stack0_exception0_copy,
                     jump_target: handler.target,
@@ -326,6 +329,6 @@ pub fn build_stackless_ir<'code>(
 
     Ok(Program {
         basic_blocks,
-        exception_handlers,
+        catch_handlers,
     })
 }

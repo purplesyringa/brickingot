@@ -1,13 +1,11 @@
 mod abstract_eval;
 mod build;
-mod exceptions;
 mod insn_ir_import;
 mod linking;
 mod splitting;
 
 use self::abstract_eval::SealedBlock;
 pub use self::build::{StacklessIrError, build_stackless_ir};
-pub use self::exceptions::legalize_exception_handling;
 use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
 use core::fmt;
 use core::ops::Range;
@@ -16,7 +14,7 @@ use noak::MStr;
 #[derive(Debug)]
 pub struct Program<'code> {
     pub basic_blocks: Vec<BasicBlock>,
-    pub exception_handlers: Vec<ExceptionHandler<'code>>,
+    pub catch_handlers: Vec<CatchHandler<'code>>,
 }
 
 impl<'code> DebugIr<'code> for Program<'code> {
@@ -27,7 +25,7 @@ impl<'code> DebugIr<'code> for Program<'code> {
                 writeln!(f, "{}", arena.debug(stmt))?;
             }
         }
-        for handler in &self.exception_handlers {
+        for handler in &self.catch_handlers {
             writeln!(f, "{}", arena.debug(handler))?;
         }
         Ok(())
@@ -74,20 +72,18 @@ pub struct BasicBlock {
 }
 
 #[derive(Debug)]
-pub struct ExceptionHandler<'code> {
-    pub active_range: Range<usize>,
+pub struct CatchHandler<'code> {
+    pub active_ranges: Vec<Range<usize>>,
     pub class: Option<Str<'code>>,
-    pub body: EhBody,
+    pub body: CatchBody,
 }
 
 /// What to do on exception. Basically just the body of `catch`, but very limited structurally,
-// since we still  don't have structured control flow, but also don't want to create auxiliary BBs
-// just for the `catch` body, so we can't create the logic we want. It'll be rewritten to normal
-// code eventually.
+/// since we still don't have structured control flow, but also don't want to create auxiliary BBs
+/// just for the `catch` body, so we can't create the logic we want. It'll be rewritten to normal
+/// code eventually.
 #[derive(Debug)]
-pub struct EhBody {
-    /// The condition under which this catch should be performed.
-    pub condition: Option<ExprId>,
+pub struct CatchBody {
     /// The version of `exception0` available within this body. Note that it's not the `exception0`
     /// expression itself, just the version that can be used to create it.
     pub exception0_use: ExprId,
@@ -97,18 +93,15 @@ pub struct EhBody {
     pub jump_target: usize,
 }
 
-impl<'code> DebugIr<'code> for ExceptionHandler<'code> {
+impl<'code> DebugIr<'code> for CatchHandler<'code> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
         write!(
             f,
             "try {{ {:?} }} catch ({}",
-            self.active_range,
+            self.active_ranges,
             self.class
                 .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
         )?;
-        if let Some(condition) = &self.body.condition {
-            write!(f, " if {condition:?}")?;
-        }
         writeln!(f, ") {{")?;
         if let Some(stmt) = &self.body.stack0_exception0_copy {
             writeln!(f, "{}", arena.debug(stmt))?;

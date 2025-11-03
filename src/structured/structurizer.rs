@@ -1,18 +1,21 @@
 use super::{
-    Catch, Statement,
+    Index, Program, Statement,
     solver::{
         Node, RequirementImplementation, RequirementKey, compute_block_requirements,
         satisfy_block_requirements,
     },
 };
-use crate::ast::{Arena, BasicStatement, ExprId, Expression, UnaryOp};
-use crate::{linear, var};
+use crate::ast::{Arena, BasicStatement, ExprId, Expression};
+use crate::{
+    linear::{self, CatchHandler},
+    var,
+};
 use rustc_hash::FxHashMap;
 
 pub fn structure_control_flow<'code>(
     arena: &Arena<'code>,
     linear_ir: linear::Program<'code>,
-) -> Vec<Statement<'code>> {
+) -> Program<'code> {
     // If you're confused as to what's happening here, read this first:
     // https://purplesyringa.moe/blog/recovering-control-flow-structures-without-cfgs/. The post
     // does not cover this implementation in its entirety, but it's pretty close.
@@ -57,31 +60,33 @@ pub fn structure_control_flow<'code>(
     let mut structurizer = Structurizer {
         arena,
         statements: linear_ir.statements,
-        exception_handlers: linear_ir.exception_handlers.into_iter().map(Some).collect(),
+        catch_handlers: linear_ir.catch_handlers.into_iter().map(Some).collect(),
         try_block_to_handler,
         jump_implementations,
         next_block_id,
         unique_selector_id: arena.alloc(Expression::Null), // doesn't matter, just a unique ID
     };
 
-    let mut stmts = Vec::new();
+    let mut statements = Vec::new();
     if has_dispatch {
-        stmts.push(Statement::Basic(BasicStatement::Assign {
-            target: structurizer.selector(),
-            value: arena.int(0),
-        }));
+        statements.push(Statement::Basic {
+            index: Index::Synthetic,
+            stmt: BasicStatement::Assign {
+                target: structurizer.selector(),
+                value: arena.int(0),
+            },
+        });
     }
     for node in tree {
-        structurizer.emit_node(node, &mut stmts);
+        structurizer.emit_node(node, &mut statements);
     }
-
-    stmts
+    Program { statements }
 }
 
 struct Structurizer<'arena, 'code> {
     arena: &'arena Arena<'code>,
     statements: Vec<linear::Statement>,
-    exception_handlers: Vec<Option<linear::ExceptionHandler<'code>>>,
+    catch_handlers: Vec<Option<CatchHandler<'code>>>,
     try_block_to_handler: FxHashMap<usize, usize>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
     next_block_id: usize,
@@ -115,39 +120,26 @@ impl<'code> Structurizer<'_, 'code> {
                     .try_block_to_handler
                     .remove(&id)
                     .expect("try block without catch");
-                let handler = self.exception_handlers[handler_index]
+                let handler = self.catch_handlers[handler_index]
                     .take()
-                    .expect("missing exception handler");
+                    .expect("missing `catch` handler");
 
                 let mut catch_children = Vec::new();
-                if let Some(condition) = handler.body.condition {
-                    // Rethrow if the condition is not satisfied.
-                    catch_children.push(Statement::If {
-                        condition: self.arena.alloc(Expression::UnaryOp {
-                            op: UnaryOp::Not,
-                            argument: condition,
-                        }),
-                        then_children: vec![Statement::Basic(BasicStatement::Throw {
-                            exception: self
-                                .arena
-                                .var(var!(exception0 v handler.body.exception0_use)),
-                        })],
-                    });
-                }
                 if let Some(stmt) = handler.body.stack0_exception0_copy {
-                    catch_children.push(Statement::Basic(stmt));
+                    catch_children.push(Statement::Basic {
+                        index: Index::Synthetic,
+                        stmt,
+                    });
                 }
                 let key = RequirementKey::BackwardCatch { handler_index };
                 if self.jump_implementations.contains_key(&key) {
-                    self.emit_jump(key, &mut catch_children);
+                    self.emit_jump(key, Index::Synthetic, &mut catch_children);
                 }
 
-                out.push(Statement::Try {
-                    children: self.emit_tree(children),
-                    catches: vec![Catch {
-                        class: handler.class,
-                        children: catch_children,
-                    }],
+                out.push(Statement::TryCatch {
+                    try_children: self.emit_tree(children),
+                    class: handler.class,
+                    catch_children,
                 });
             }
 
@@ -157,19 +149,24 @@ impl<'code> Structurizer<'_, 'code> {
                 let id = self.next_block_id;
                 self.next_block_id += 1;
                 out.push(Statement::Switch {
+                    index: Index::Synthetic,
                     id,
                     key: self.selector(),
                     arms: dispatch_targets
                         .into_iter()
                         .map(|target| {
-                            let mut stmts = vec![Statement::Basic(BasicStatement::Assign {
-                                target: self.selector(),
-                                value: self.arena.int(0),
-                            })];
+                            let mut stmts = vec![Statement::Basic {
+                                index: Index::Synthetic,
+                                stmt: BasicStatement::Assign {
+                                    target: self.selector(),
+                                    value: self.arena.int(0),
+                                },
+                            }];
                             self.emit_jump(
                                 RequirementKey::Dispatch {
                                     req_id: target.jump_req_id,
                                 },
+                                Index::Synthetic,
                                 &mut stmts,
                             );
                             (Some(target.selector), stmts)
@@ -188,8 +185,10 @@ impl<'code> Structurizer<'_, 'code> {
             linear::Statement::Basic(BasicStatement::ReturnVoid),
         );
 
+        let index = Index::Real(stmt_index);
+
         match stmt {
-            linear::Statement::Basic(stmt) => out.push(Statement::Basic(stmt)),
+            linear::Statement::Basic(stmt) => out.push(Statement::Basic { index, stmt }),
 
             linear::Statement::Jump { condition, .. } => {
                 let out = if let Expression::ConstInt(1) = self.arena[condition] {
@@ -204,7 +203,7 @@ impl<'code> Structurizer<'_, 'code> {
                     };
                     then_children
                 };
-                self.emit_jump(RequirementKey::Jump { stmt_index }, out);
+                self.emit_jump(RequirementKey::Jump { stmt_index }, index, out);
             }
 
             linear::Statement::Switch { key, arms, default } => {
@@ -218,6 +217,7 @@ impl<'code> Structurizer<'_, 'code> {
                 let id = self.next_block_id;
                 self.next_block_id += 1;
                 out.push(Statement::Switch {
+                    index,
                     id,
                     key,
                     arms: arms
@@ -237,11 +237,15 @@ impl<'code> Structurizer<'_, 'code> {
                                 // breaking from the switch itself. Breaks from the last arm don't
                                 // have to be emitted.
                                 if i != arms.len() - 1 {
-                                    children.push(Statement::Break { block_id: id });
+                                    children.push(Statement::Break {
+                                        index,
+                                        block_id: id,
+                                    });
                                 }
                             } else {
                                 self.emit_jump(
                                     RequirementKey::Switch { stmt_index, key },
+                                    index,
                                     &mut children,
                                 );
                             }
@@ -253,24 +257,27 @@ impl<'code> Structurizer<'_, 'code> {
         }
     }
 
-    fn emit_jump(&mut self, key: RequirementKey, out: &mut Vec<Statement<'code>>) {
+    fn emit_jump(&mut self, key: RequirementKey, index: Index, out: &mut Vec<Statement<'code>>) {
         let Some(imp) = self.jump_implementations.get(&key) else {
             panic!("missing jump implementation for {key:?}");
         };
 
         match *imp {
             RequirementImplementation::Break { block_id } => {
-                out.push(Statement::Break { block_id })
+                out.push(Statement::Break { index, block_id })
             }
             RequirementImplementation::Continue { block_id } => {
-                out.push(Statement::Continue { block_id })
+                out.push(Statement::Continue { index, block_id })
             }
             RequirementImplementation::ContinueToDispatcher { block_id, selector } => {
-                out.push(Statement::Basic(BasicStatement::Assign {
-                    target: self.selector(),
-                    value: self.arena.int(selector),
-                }));
-                out.push(Statement::Continue { block_id })
+                out.push(Statement::Basic {
+                    index,
+                    stmt: BasicStatement::Assign {
+                        target: self.selector(),
+                        value: self.arena.int(selector),
+                    },
+                });
+                out.push(Statement::Continue { index, block_id })
             }
             RequirementImplementation::Try { .. } => {
                 panic!("jump cannot be implemented with try")

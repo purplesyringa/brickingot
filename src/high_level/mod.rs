@@ -3,9 +3,13 @@ mod main_opt;
 
 use self::main_opt::optimize;
 use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
-use crate::structured;
+use crate::exceptions;
 use alloc::fmt;
 use noak::MStr;
+
+pub struct Program<'code> {
+    statements: Vec<StmtMeta<'code>>,
+}
 
 #[derive(Debug)]
 enum Statement<'code> {
@@ -34,8 +38,9 @@ enum Statement<'code> {
         arms: Vec<(Option<i32>, StmtList<'code>)>,
     },
     Try {
-        children: StmtList<'code>,
+        try_children: StmtList<'code>,
         catches: Vec<Catch<'code>>,
+        finally_children: StmtList<'code>,
     },
 }
 
@@ -59,6 +64,15 @@ pub struct StmtMeta<'code> {
 }
 
 type StmtList<'code> = Vec<StmtMeta<'code>>;
+
+impl<'code> DebugIr<'code> for Program<'code> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+        for stmt in &self.statements {
+            writeln!(f, "{}", arena.debug(stmt))?;
+        }
+        Ok(())
+    }
+}
 
 impl<'code> DebugIr<'code> for StmtMeta<'code> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
@@ -133,9 +147,13 @@ impl<'code> DebugIr<'code> for Statement<'code> {
                 write!(f, "}} switch #{id};")
             }
 
-            Self::Try { children, catches } => {
+            Self::Try {
+                try_children,
+                catches,
+                finally_children,
+            } => {
                 writeln!(f, "try {{")?;
-                for child in children {
+                for child in try_children {
                     writeln!(f, "{}", arena.debug(child))?;
                 }
                 for catch in catches {
@@ -150,6 +168,12 @@ impl<'code> DebugIr<'code> for Statement<'code> {
                         writeln!(f, "{}", arena.debug(child))?;
                     }
                 }
+                if !finally_children.is_empty() {
+                    writeln!(f, "}} finally {{")?;
+                    for child in finally_children {
+                        writeln!(f, "{}", arena.debug(child))?;
+                    }
+                }
                 write!(f, "}}")
             }
         }
@@ -158,8 +182,8 @@ impl<'code> DebugIr<'code> for Statement<'code> {
 
 pub fn decompile_cf_constructs<'code>(
     arena: &mut Arena<'code>,
-    structured_ir: Vec<structured::Statement<'code>>,
-) -> Vec<StmtMeta<'code>> {
+    eh_ir: exceptions::Program<'code>,
+) -> Program<'code> {
     // The general approach here is to consider a high-level Java control flow construct, find the
     // properties that all of its lowerings are guaranteed to have, and tweak them such that either
     // there are no false positive matches, or all false positives are documented and can be
@@ -179,6 +203,6 @@ pub fn decompile_cf_constructs<'code>(
     // The above implies that this pass must convert statements into a single `Assign` if that's
     // possible; but if it's not, basically no requirements are made regarding the pass output. This
     // allows unused blocks, no-op `break`/`continue`, etc., which are hard to fix up in a single
-    // pass.
-    optimize(arena, structured_ir)
+    // pass efficiently.
+    optimize(arena, eh_ir)
 }

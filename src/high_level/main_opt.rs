@@ -1,15 +1,15 @@
 use super::inlining::Inliner;
-use super::{Catch, Meta, Statement, StmtList, StmtMeta};
+use super::{Catch, Meta, Program, Statement, StmtList, StmtMeta};
 use crate::ast::{
     Arena, BasicStatement, BinOp, ExprId, Expression, UnaryOp, Variable, VariableNamespace,
 };
-use crate::structured;
+use crate::exceptions;
 use rustc_hash::FxHashMap;
 
 pub fn optimize<'code>(
     arena: &mut Arena<'code>,
-    structured_ir: Vec<structured::Statement<'code>>,
-) -> Vec<StmtMeta<'code>> {
+    eh_ir: exceptions::Program<'code>,
+) -> Program<'code> {
     // This is a bit sketchy, but there shouldn't be any dead variable uses in the arena at this
     // point, and a single linear iteration is better than yet another tree walk. This assumption is
     // a little tricky to support, e.g. `stackless::splitting` has some special handling for this.
@@ -22,13 +22,14 @@ pub fn optimize<'code>(
         }
     }
 
-    Optimizer {
+    let statements = Optimizer {
         arena,
         n_var_mentions,
         block_info: FxHashMap::default(),
     }
-    .handle_stmt_list(structured_ir, None)
-    .0
+    .handle_stmt_list(eh_ir.statements, None)
+    .0;
+    Program { statements }
 }
 
 struct Optimizer<'arena, 'code> {
@@ -45,34 +46,44 @@ struct BlockInfo {
 impl<'code> Optimizer<'_, 'code> {
     fn handle_stmt(
         &mut self,
-        stmt: structured::Statement<'code>,
+        stmt: exceptions::Statement<'code>,
         fallthrough_breaks_from: Option<usize>,
         out: &mut StmtList<'code>,
     ) {
         match stmt {
-            structured::Statement::Basic(stmt) => self.handle_basic_stmt(stmt, out),
+            exceptions::Statement::Basic(stmt) => self.handle_basic_stmt(stmt, out),
 
-            structured::Statement::Block { id, children } => {
+            exceptions::Statement::Block { id, children } => {
                 self.handle_block(id, children, fallthrough_breaks_from, out);
             }
 
-            structured::Statement::Continue { block_id } => self.handle_continue(block_id, out),
+            exceptions::Statement::Continue { block_id } => self.handle_continue(block_id, out),
 
-            structured::Statement::Break { block_id } => self.handle_break(block_id, out),
+            exceptions::Statement::Break { block_id } => self.handle_break(block_id, out),
 
-            structured::Statement::If {
+            exceptions::Statement::If {
                 condition,
                 then_children,
             } => {
                 self.handle_if(condition, then_children, fallthrough_breaks_from, out);
             }
 
-            structured::Statement::Switch { id, key, arms } => {
+            exceptions::Statement::Switch { id, key, arms } => {
                 self.handle_switch(id, key, arms, fallthrough_breaks_from, out);
             }
 
-            structured::Statement::Try { children, catches } => {
-                self.handle_try(children, catches, fallthrough_breaks_from, out);
+            exceptions::Statement::Try {
+                try_children,
+                catches,
+                finally_children,
+            } => {
+                self.handle_try(
+                    try_children,
+                    catches,
+                    finally_children,
+                    fallthrough_breaks_from,
+                    out,
+                );
             }
         }
     }
@@ -145,7 +156,7 @@ impl<'code> Optimizer<'_, 'code> {
     fn handle_block(
         &mut self,
         id: usize,
-        children: Vec<structured::Statement<'code>>,
+        children: Vec<exceptions::Statement<'code>>,
         fallthrough_breaks_from: Option<usize>,
         out: &mut StmtList<'code>,
     ) {
@@ -310,7 +321,7 @@ impl<'code> Optimizer<'_, 'code> {
     fn handle_if(
         &mut self,
         condition: ExprId,
-        then_children: Vec<structured::Statement<'code>>,
+        then_children: Vec<exceptions::Statement<'code>>,
         fallthrough_breaks_from: Option<usize>,
         out: &mut StmtList<'code>,
     ) {
@@ -333,7 +344,7 @@ impl<'code> Optimizer<'_, 'code> {
         &mut self,
         id: usize,
         key: ExprId,
-        arms: Vec<(Option<i32>, Vec<structured::Statement<'code>>)>,
+        arms: Vec<(Option<i32>, Vec<exceptions::Statement<'code>>)>,
         fallthrough_breaks_from: Option<usize>,
         out: &mut StmtList<'code>,
     ) {
@@ -391,12 +402,13 @@ impl<'code> Optimizer<'_, 'code> {
 
     fn handle_try(
         &mut self,
-        children: Vec<structured::Statement<'code>>,
-        catches: Vec<structured::Catch<'code>>,
+        try_children: Vec<exceptions::Statement<'code>>,
+        catches: Vec<exceptions::Catch<'code>>,
+        finally_children: Vec<exceptions::Statement<'code>>,
         fallthrough_breaks_from: Option<usize>,
         out: &mut StmtList<'code>,
     ) {
-        let (children, try_meta) = self.handle_stmt_list(children, fallthrough_breaks_from);
+        let (try_children, try_meta) = self.handle_stmt_list(try_children, fallthrough_breaks_from);
         let mut is_divergent = try_meta.is_divergent;
         let catches = catches
             .into_iter()
@@ -410,8 +422,19 @@ impl<'code> Optimizer<'_, 'code> {
                 }
             })
             .collect();
+        // `finally` is not really part of control flow: it can be entered from any point and it
+        // transfers control to an arbitrary point after finishing. For example, it can rethrow
+        // an ongoing exception, `break` or `continue` a loop, or `return`; meaning that its
+        // fallthrough target is undefined.
+        let (finally_children, finally_meta) = self.handle_stmt_list(finally_children, None);
+        // `finally` is executed on every exit path in sequence after the previous code.
+        is_divergent |= finally_meta.is_divergent;
         out.push(StmtMeta {
-            stmt: Statement::Try { children, catches },
+            stmt: Statement::Try {
+                try_children,
+                catches,
+                finally_children,
+            },
             meta: Meta {
                 is_divergent,
                 ..Meta::default()
@@ -421,7 +444,7 @@ impl<'code> Optimizer<'_, 'code> {
 
     fn handle_stmt_list(
         &mut self,
-        stmts: Vec<structured::Statement<'code>>,
+        stmts: Vec<exceptions::Statement<'code>>,
         fallthrough_breaks_from: Option<usize>,
     ) -> (StmtList<'code>, Meta) {
         let mut out = Vec::with_capacity(stmts.len()); // only approximate, but that's fine
@@ -433,7 +456,7 @@ impl<'code> Optimizer<'_, 'code> {
                 if let Some(next_stmt) = stmts.peek() {
                     // This can happen in the middle of a `switch` if we `break` from a higher-level
                     // block.
-                    if let structured::Statement::Break { block_id } = next_stmt {
+                    if let exceptions::Statement::Break { block_id } = next_stmt {
                         Some(*block_id)
                     } else {
                         None
