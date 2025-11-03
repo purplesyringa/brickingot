@@ -171,7 +171,6 @@ pub fn build_stackless_ir<'code>(
             instruction_range: 0..0,
             stack_size_at_start: 0,
             successors: vec![1],
-            throws: false,
         },
     );
 

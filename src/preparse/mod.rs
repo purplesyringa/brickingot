@@ -51,8 +51,6 @@ pub struct BasicBlock {
     /// The IDs of BBs the last instruction in this BB can jump to. This includes fallthrough, but
     /// excludes jumps to exception handlers.
     pub successors: Vec<usize>,
-    /// Whether any instruction within the basic block can throw.
-    pub throws: bool,
 }
 
 pub struct Program<'code> {
@@ -134,7 +132,6 @@ pub fn extract_basic_blocks<'code>(
             // stays in a sentinel-like state where only the trivial successor is recorded. We'll
             // remove it for divergent control flow a bit later.
             successors: vec![bb_id + 1],
-            throws: false,
         })
         .collect();
 
@@ -288,6 +285,7 @@ pub fn extract_basic_blocks<'code>(
 
         let mut stack_size_at_end = bb.stack_size_at_start as isize;
         let mut reached_end_of_stream = true;
+        let mut throws = false;
 
         for row in code.raw_instructions_from(Index::new(bb.instruction_range.start))? {
             let (address, insn) = row?;
@@ -298,7 +296,7 @@ pub fn extract_basic_blocks<'code>(
                 return Err(BytecodePreparsingError::SplitInstruction);
             }
             stack_size_at_end += get_insn_stack_effect(cpool, &insn, class_info)?;
-            bb.throws |= can_insn_throw(&insn);
+            throws |= can_insn_throw(&insn);
         }
         let stack_size_at_end: usize = stack_size_at_end
             .try_into()
@@ -321,7 +319,7 @@ pub fn extract_basic_blocks<'code>(
                 .drain_containing(bb_id)
                 .map(|handler_id| (handler_id, false))
                 .chain(
-                    bb.throws
+                    throws
                         .then(|| {
                             remaining_eh_throwing
                                 .drain_containing(bb_id)
