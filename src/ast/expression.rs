@@ -361,6 +361,37 @@ pub enum VariableNamespace {
     Context,
 }
 
+/// A helper macro for creating instances of `VariableName` and `Variable`.
+#[macro_export]
+macro_rules! var {
+    (@impl $namespace:tt $id:expr) => {
+        $crate::ast::VariableName {
+            id: $id,
+            namespace: $crate::ast::VariableNamespace::$namespace,
+        }
+    };
+
+    (slot $n:expr) => { $crate::var!(@impl Slot $n) };
+    (stack $n:expr) => { $crate::var!(@impl Stack $n) };
+    (stack0) => { $crate::var!(@impl Stack 0) };
+    (value $n:expr) => { $crate::var!(@impl Value $n) };
+    (exception0) => { $crate::var!(@impl Exception 0) };
+    (selector0) => { $crate::var!(@impl Selector 0) };
+    (context0) => { $crate::var!(@impl Context 0) };
+
+    (@muncher [$($parsed:tt)*] v $version:expr) => {
+        $crate::ast::Variable {
+            name: $crate::var!($($parsed)*),
+            version: $version,
+        }
+    };
+    (@muncher [$($parsed:tt)*]) => { $($parsed)* };
+    (@muncher [$($parsed:tt)*] $head:tt $($tail:tt)*) => {
+        $crate::var!(@muncher [$($parsed)* $head] $($tail)*)
+    };
+    ($($tt:tt)*) => { $crate::var!(@muncher [] $($tt)*) };
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Str<'code>(pub &'code MStr);
 

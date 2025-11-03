@@ -15,6 +15,7 @@ use crate::ast::{
     Arena, BasicStatement, ExprId, Expression, Variable, VariableName, VariableNamespace,
 };
 use crate::utils::UnionFind;
+use crate::var;
 use alloc::collections::BTreeMap;
 use core::cell::Cell;
 use rustc_hash::FxHashMap;
@@ -144,7 +145,7 @@ impl<'a> Merger<'a> {
         use_expr_id: ExprId,
         eh: &ExceptionHandlerBlock,
     ) {
-        if name.namespace == VariableNamespace::Stack && name.id == 0 {
+        if name == var!(stack0) {
             self.versions.merge(use_expr_id.0, eh.stack0_def.0);
             return;
         }

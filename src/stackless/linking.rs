@@ -22,7 +22,8 @@
 // SCC.
 
 use super::{InternalBasicBlock, abstract_eval::UnresolvedUse};
-use crate::ast::{Arena, Expression, Variable, VariableName, VariableNamespace};
+use crate::ast::{Arena, Expression, Variable, VariableNamespace};
+use crate::var;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 
@@ -83,11 +84,7 @@ impl<'a> Linker<'a> {
         self.tarjan_stack.push(node);
 
         let (bb_id, position) = node;
-
-        let name = VariableName {
-            namespace: VariableNamespace::Stack,
-            id: position,
-        };
+        let name = var!(stack position);
 
         // Find all assignments to `stackN` reachable from the beginning of `bb_id`.
 
@@ -96,13 +93,9 @@ impl<'a> Linker<'a> {
         if position == 0
             && let Some(eh) = &self.basic_blocks[bb_id].eh
         {
-            state.source.merge(Source::Value(Variable {
-                name: VariableName {
-                    namespace: VariableNamespace::Exception,
-                    id: 0,
-                },
-                version: eh.exception0_use,
-            }));
+            state
+                .source
+                .merge(Source::Value(var!(exception0 v eh.exception0_use)));
         }
 
         for pred_bb_id in &self.basic_blocks[bb_id].predecessors {

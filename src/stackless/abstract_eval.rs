@@ -4,6 +4,7 @@ use crate::ast::{
     VariableNamespace,
 };
 use crate::preparse::insn_stack_effect::{nat_width, type_descriptor_width};
+use crate::var;
 use noak::{
     descriptor::{MethodDescriptor, TypeDescriptor},
     reader::cpool::value::NameAndType,
@@ -187,85 +188,52 @@ impl<'arena, 'code> Machine<'arena, 'code> {
                     .unwrap()
                     .is_stack_manipulation = false;
             }
-            self.arena.alloc(Expression::Variable(def.var))
+            self.arena.var(def.var)
         } else {
-            let use_expr_id = self.arena.alloc_with(|use_expr_id| {
-                Expression::Variable(Variable {
-                    name,
-                    version: use_expr_id,
-                })
-            });
+            let var = self.arena.var_name(name);
             self.unresolved_uses.insert(
-                (
-                    self.bb_id,
-                    Variable {
-                        name,
-                        version: use_expr_id,
-                    },
-                ),
+                (self.bb_id, var),
                 UnresolvedUse {
                     is_stack_manipulation,
                 },
             );
-            use_expr_id
+            var.version
         }
     }
 
     // Takes `value` because we want to enforce that the value is computed before the assignment is
     // performed, i.e. that uses in `value` see old defs.
     fn set_var(&mut self, name: VariableName, value: ExprId) -> Variable {
-        let def_expr_id = self.arena.alloc_with(|def_expr_id| {
-            Expression::Variable(Variable {
-                name,
-                version: def_expr_id,
-            })
-        });
-        let var = Variable {
-            name,
-            version: def_expr_id,
-        };
+        let var = self.arena.var_name(name);
         self.add(Statement::Basic(BasicStatement::Assign {
-            target: def_expr_id,
+            target: var.version,
             value,
         }));
         var
     }
 
     pub fn get_slot(&mut self, id: usize) -> ExprId {
-        self.get_var(
-            VariableName {
-                id,
-                namespace: VariableNamespace::Slot,
-            },
-            false,
-        )
+        self.get_var(var!(slot id), false)
     }
 
     pub fn set_slot(&mut self, id: usize, value: ExprId) {
-        let name = VariableName {
-            id,
-            namespace: VariableNamespace::Slot,
-        };
-        let var = self.set_var(name, value);
+        let var = self.set_var(var!(slot id), value);
         self.active_defs.insert(
-            name,
+            var.name,
             ActiveDef {
                 def_expr_id: Some(var.version),
                 var,
                 copy_stack_from_predecessor: None,
             },
         );
-        self.slot_defs.entry(name).or_default().push(var.version);
+        self.slot_defs
+            .entry(var.name)
+            .or_default()
+            .push(var.version);
     }
 
     fn get_stack(&mut self, position: usize, is_stack_manipulation: bool) -> ExprId {
-        self.get_var(
-            VariableName {
-                id: position,
-                namespace: VariableNamespace::Stack,
-            },
-            is_stack_manipulation,
-        )
+        self.get_var(var!(stack position), is_stack_manipulation)
     }
 
     fn set_stack(&mut self, position: usize, value: ExprId) {
@@ -278,14 +246,9 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         {
             value_var
         } else {
+            let id = self.next_value_id;
             self.next_value_id += 1;
-            self.set_var(
-                VariableName {
-                    id: self.next_value_id - 1,
-                    namespace: VariableNamespace::Value,
-                },
-                value,
-            )
+            self.set_var(var!(value id), value)
             // Value variables are never accessed by `get_var` or read by other BBs, so no need
             // to save their definitions. This significantly reduces the size of the hashmap.
         };
@@ -299,10 +262,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         };
 
         self.active_defs.insert(
-            VariableName {
-                id: position,
-                namespace: VariableNamespace::Stack,
-            },
+            var!(stack position),
             ActiveDef {
                 def_expr_id: None,
                 var: value_var,
@@ -332,21 +292,12 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         delayed_stack_assignments.sort_by_key(|(_, write)| write.order_id);
 
         for (position, write) in delayed_stack_assignments {
-            let name = VariableName {
-                namespace: VariableNamespace::Stack,
-                id: position,
-            };
-            let def_expr_id = self.arena.alloc_with(|def_expr_id| {
-                Expression::Variable(Variable {
-                    name,
-                    version: def_expr_id,
-                })
-            });
-            self.active_defs.get_mut(&name).unwrap().def_expr_id = Some(def_expr_id);
+            let var = self.arena.var_name(var!(stack position));
+            self.active_defs.get_mut(&var.name).unwrap().def_expr_id = Some(var.version);
             self.statements
                 .push(Statement::Basic(BasicStatement::Assign {
-                    target: def_expr_id,
-                    value: self.arena.alloc(Expression::Variable(write.value_var)),
+                    target: var.version,
+                    value: self.arena.var(write.value_var),
                 }));
         }
     }

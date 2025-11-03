@@ -113,8 +113,9 @@ use super::{
 };
 use crate::ClassInfo;
 use crate::ast::BasicStatement;
-use crate::ast::{Arena, Expression, Variable, VariableName, VariableNamespace};
+use crate::ast::{Arena, Expression};
 use crate::preparse::{self, insn_stack_effect::type_descriptor_width};
+use crate::var;
 use noak::{
     descriptor::MethodDescriptor,
     error::DecodeError,
@@ -294,22 +295,10 @@ pub fn build_stackless_ir<'code>(
 
             let stack0_exception0_copy = eh.stack0_exception0_copy_is_necessary.then(|| {
                 BasicStatement::Assign {
-                    target: arena.alloc(Expression::Variable(Variable {
-                        name: VariableName {
-                            id: 0,
-                            namespace: VariableNamespace::Stack,
-                        },
-                        // Since multiple handlers can have the same target, these IDs are not
-                        // unique and can only be used as versions, not as expression IDs.
-                        version: eh.stack0_def,
-                    })),
-                    value: arena.alloc(Expression::Variable(Variable {
-                        name: VariableName {
-                            id: 0,
-                            namespace: VariableNamespace::Exception,
-                        },
-                        version: eh.exception0_use,
-                    })),
+                    // Since multiple handlers can have the same target, these IDs are not unique
+                    // and can only be used as versions, not as expression IDs.
+                    target: arena.var(var!(stack0 v eh.stack0_def)),
+                    value: arena.var(var!(exception0 v eh.exception0_use)),
                 }
             });
 

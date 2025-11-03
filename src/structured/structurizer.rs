@@ -5,10 +5,8 @@ use super::{
         satisfy_block_requirements,
     },
 };
-use crate::ast::{
-    Arena, BasicStatement, ExprId, Expression, UnaryOp, Variable, VariableName, VariableNamespace,
-};
-use crate::linear;
+use crate::ast::{Arena, BasicStatement, ExprId, Expression, UnaryOp};
+use crate::{linear, var};
 use rustc_hash::FxHashMap;
 
 pub fn structure_control_flow<'code>(
@@ -130,13 +128,9 @@ impl<'code> Structurizer<'_, 'code> {
                             argument: condition,
                         }),
                         then_children: vec![Statement::Basic(BasicStatement::Throw {
-                            exception: self.arena.alloc(Expression::Variable(Variable {
-                                name: VariableName {
-                                    id: 0,
-                                    namespace: VariableNamespace::Exception,
-                                },
-                                version: handler.body.exception0_use,
-                            })),
+                            exception: self
+                                .arena
+                                .var(var!(exception0 v handler.body.exception0_use)),
                         })],
                     });
                 }
@@ -288,12 +282,6 @@ impl<'code> Structurizer<'_, 'code> {
         // This pass runs after variables are merged, so we need to explicitly use the same version
         // for all selectors. That's not *quite* correct in the sense that this can merge
         // independent selectors, but later passes are prepared to deal with that.
-        self.arena.alloc(Expression::Variable(Variable {
-            name: VariableName {
-                id: 0,
-                namespace: VariableNamespace::Selector,
-            },
-            version: self.unique_selector_id,
-        }))
+        self.arena.var(var!(selector0 v self.unique_selector_id))
     }
 }

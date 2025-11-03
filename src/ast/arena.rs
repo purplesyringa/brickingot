@@ -1,4 +1,4 @@
-use super::{DebugIr, Expression};
+use super::{DebugIr, Expression, Variable, VariableName};
 use alloc::alloc;
 use core::cell::Cell;
 use core::fmt::{self, Display};
@@ -123,6 +123,15 @@ impl<'code> Arena<'code> {
 
     pub fn int(&self, value: i32) -> ExprId {
         self.alloc(Expression::ConstInt(value))
+    }
+
+    pub fn var(&self, var: Variable) -> ExprId {
+        self.alloc(Expression::Variable(var))
+    }
+
+    pub fn var_name(&self, name: VariableName) -> Variable {
+        let version = self.alloc_with(|version| Expression::Variable(Variable { name, version }));
+        Variable { name, version }
     }
 
     pub fn null(&self) -> ExprId {

@@ -16,9 +16,8 @@
 // end user as well.
 
 use super::{ExceptionHandler, Program, Statement};
-use crate::ast::{
-    Arena, BasicStatement, BinOp, Expression, LogicalOp, Variable, VariableName, VariableNamespace,
-};
+use crate::ast::{Arena, BasicStatement, BinOp, Expression, LogicalOp};
+use crate::var;
 use alloc::collections::BTreeMap;
 use core::cmp::Reverse;
 use core::ops::Range;
@@ -46,22 +45,14 @@ pub fn legalize_exception_handling<'code>(arena: &mut Arena<'code>, program: &mu
     // This allocates a single version for the context variables, which is not exactly optimal, but
     // more than fine for readability.
     let context_version = arena.alloc(Expression::Null);
-    let context_var = || {
-        arena.alloc(Expression::Variable(Variable {
-            name: VariableName {
-                id: 0,
-                namespace: VariableNamespace::Context,
-            },
-            version: context_version,
-        }))
-    };
+    let context_var = var!(context0 v context_version);
 
     // Add context checks to exception handlers.
     for (handler, context_id_range) in extended_handlers.into_iter().zip(handler_context_ids) {
         let condition = if context_id_range.len() == 1 {
             arena.alloc(Expression::BinOp {
                 op: BinOp::Eq,
-                lhs: context_var(),
+                lhs: arena.var(context_var),
                 rhs: arena.int(context_id_range.start as i32),
             })
         } else {
@@ -69,12 +60,12 @@ pub fn legalize_exception_handling<'code>(arena: &mut Arena<'code>, program: &mu
                 op: LogicalOp::And,
                 lhs: arena.alloc(Expression::BinOp {
                     op: BinOp::Ge,
-                    lhs: context_var(),
+                    lhs: arena.var(context_var),
                     rhs: arena.int(context_id_range.start as i32),
                 }),
                 rhs: arena.alloc(Expression::BinOp {
                     op: BinOp::Le,
-                    lhs: context_var(),
+                    lhs: arena.var(context_var),
                     rhs: arena.int(context_id_range.end as i32 - 1),
                 }),
             })
@@ -112,7 +103,7 @@ pub fn legalize_exception_handling<'code>(arena: &mut Arena<'code>, program: &mu
         bb.statements.insert(
             0,
             Statement::Basic(BasicStatement::Assign {
-                target: context_var(),
+                target: arena.var(context_var),
                 value: arena.int(*context_id as i32),
             }),
         )
