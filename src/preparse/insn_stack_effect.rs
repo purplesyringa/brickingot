@@ -1,4 +1,4 @@
-use crate::ClassInfo;
+use crate::class::{self, ClassInfo};
 use noak::{
     descriptor::{BaseType, TypeDescriptor},
     error::DecodeError,
@@ -13,6 +13,9 @@ use thiserror::Error;
 pub enum InsnStackEffectError {
     #[error("Failed to parse class file: {0}")]
     Noak(#[from] DecodeError),
+
+    #[error("While populating class cache: {0}")]
+    Class(#[from] class::Error),
 
     #[error("The legacy JSR instruction is unsupported")]
     JsrUnsupported,

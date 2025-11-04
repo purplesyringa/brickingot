@@ -2,10 +2,10 @@ use super::{
     Statement,
     abstract_eval::{Machine, StackUnderflowError},
 };
-use crate::ClassInfo;
 use crate::ast::{
     Arena, BasicStatement, BinOp, CallKind, ExprId, Expression, PrimitiveType, Str, Type, UnaryOp,
 };
+use crate::class::{self, ClassInfo};
 use noak::{
     error::DecodeError,
     reader::{
@@ -25,6 +25,9 @@ use thiserror::Error;
 pub enum InsnIrImportError {
     #[error("Failed to parse class file: {0}")]
     Noak(#[from] DecodeError),
+
+    #[error("While populating class cache: {0}")]
+    Class(#[from] class::Error),
 
     #[error("Accessed more elements than there are in the stack")]
     StackUnderflow(#[from] StackUnderflowError),
