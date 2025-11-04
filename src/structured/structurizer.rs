@@ -67,18 +67,18 @@ pub fn structure_control_flow<'code>(
         unique_selector_id: arena.alloc(Expression::Null), // doesn't matter, just a unique ID
     };
 
-    let mut statements = Vec::new();
+    let mut statements = structurizer.emit_tree(tree);
     if has_dispatch {
-        statements.push(Statement::Basic {
-            index: Index::Synthetic,
-            stmt: BasicStatement::Assign {
-                target: structurizer.selector(),
-                value: arena.int(0),
+        statements.insert(
+            0,
+            Statement::Basic {
+                index: Index::Synthetic,
+                stmt: BasicStatement::Assign {
+                    target: structurizer.selector(),
+                    value: arena.int(0),
+                },
             },
-        });
-    }
-    for node in tree {
-        structurizer.emit_node(node, &mut statements);
+        );
     }
     Program { statements }
 }
@@ -95,7 +95,16 @@ struct Structurizer<'arena, 'code> {
 
 impl<'code> Structurizer<'_, 'code> {
     fn emit_tree(&mut self, tree: Vec<Node>) -> Vec<Statement<'code>> {
-        let mut stmts = Vec::with_capacity(tree.len()); // underestimating, but better than nothing
+        // This does not need to be exact, but it turns out that computing the size is better than
+        // a rough estimate just because we're hammering the allocator too much otherwise.
+        let capacity = tree
+            .iter()
+            .map(|node| match node {
+                Node::Linear { stmt_range } => stmt_range.len(),
+                _ => 1,
+            })
+            .sum();
+        let mut stmts = Vec::with_capacity(capacity);
         for node in tree {
             self.emit_node(node, &mut stmts);
         }
