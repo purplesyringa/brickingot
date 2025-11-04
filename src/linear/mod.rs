@@ -25,7 +25,7 @@ impl<'code> DebugIr<'code> for Program<'code> {
 }
 
 pub fn linearize_ir<'code>(mut stackless_ir: stackless::Program<'code>) -> Program<'code> {
-    let mut bb_stmt_starts = Vec::new();
+    let mut bb_stmt_starts = Vec::with_capacity(stackless_ir.basic_blocks.len() + 1);
     let mut next_stmt_index = 0;
     for bb in &stackless_ir.basic_blocks {
         bb_stmt_starts.push(next_stmt_index);
