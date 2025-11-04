@@ -87,9 +87,8 @@ pub fn can_insn_throw(insn: &RawInstruction<'_>) -> bool {
     // So we're doing what seems reasonable rather than correct, i.e. following the behavior of
     // HotSpot. HotSpot only throws `StackOverflowError` in the prologue of a method (i.e. after
     // `invoke`, but before any bytecode instruction) [2], and `OutOfMemoryError` is only considered
-    // recoverable
-    // when occurring directly due to memory-allocating instructions. [3] This is not guaranteed to
-    // apply to other JVMs, but these assumptions seem realistic enough.
+    // recoverable when occurring directly due to memory-allocating instructions. [3] This is not
+    // guaranteed to apply to other JVMs, but these assumptions seem realistic enough.
     //
     // [1]: https://docs.oracle.com/javase/specs/jvms/se8/html/jvms-6.html#jvms-6.3
     // [2]: https://pangin.pro/posts/stack-overflow-handling

@@ -9,7 +9,8 @@ pub fn coalesce_exception_handlers(
 ) -> Vec<CatchHandler<'_>> {
     // We assume that all exception handlers with matching `target` and `class` properties
     // correspond to the same `catch` block. This is not *guaranteed* to be true, but it's true for
-    // javac and it's as intuitive as it gets.
+    // javac and it's as intuitive as it gets. If we're mistaken, the worst that can happen is we
+    // get a slightly worse output.
     let mut by_target_class: FxHashMap<(usize, Option<Str<'_>>), Vec<Range<usize>>> =
         FxHashMap::default();
     for handler in exception_handlers {

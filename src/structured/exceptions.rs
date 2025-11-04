@@ -23,8 +23,9 @@ pub fn compute_syntactic_eh_ranges(handlers: &[CatchHandler<'_>]) -> Vec<Range<u
         } else {
             syn_start = handler.active_ranges[0].start;
             // If `end < jump_target`, we have to either emit a forward jump or extend the `try`
-            // block to `jump_target`. The latter handles finalizers correctly and is simpler to
-            // implement.
+            // block to `jump_target`. The former doesn't handle finalizers correctly because it
+            // effectively jumps over the finalizer, complicating everything. The latter solution
+            // works and is also easier to implement.
             syn_end = handler
                 .active_ranges
                 .last()

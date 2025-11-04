@@ -234,7 +234,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         // Create an intermediate variable to link multiple uses of the expression together, even if
         // its stack location becomes overwritten. If `value` already refers to a value variable,
         // there's no need to create an intermediate one, as value variables cannot be overwritten
-        // (except if re-entering the basic block).
+        // (except by re-entering the basic block).
         let value_var = if let Expression::Variable(value_var) = self.arena[value]
             && value_var.name.namespace == VariableNamespace::Value
         {

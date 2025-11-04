@@ -96,7 +96,7 @@ struct Structurizer<'arena, 'code> {
 impl<'code> Structurizer<'_, 'code> {
     fn emit_tree(&mut self, tree: Vec<Node>) -> Vec<Statement<'code>> {
         // This does not need to be exact, but it turns out that computing the size is better than
-        // a rough estimate just because we're hammering the allocator too much otherwise.
+        // using a rough estimate just because we're hammering the allocator too much otherwise.
         let capacity = tree
             .iter()
             .map(|node| match node {
