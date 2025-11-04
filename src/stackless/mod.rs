@@ -112,7 +112,6 @@ impl<'code> DebugIr<'code> for CatchHandler<'code> {
 }
 
 struct InternalBasicBlock {
-    statements: Vec<Statement>,
     sealed_bb: SealedBlock,
     /// Excludes throwing locations that call into this BB for exception handling.
     predecessors: Vec<usize>,

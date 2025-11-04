@@ -187,7 +187,6 @@ pub fn build_stackless_ir<'code>(
 
     let mut ir_basic_blocks: Vec<InternalBasicBlock> = (0..preparsed_program.basic_blocks.len())
         .map(|_| InternalBasicBlock {
-            statements: Vec::new(),
             sealed_bb: SealedBlock::default(),
             predecessors: Vec::new(),
             eh: None,
@@ -268,7 +267,6 @@ pub fn build_stackless_ir<'code>(
             })?;
         }
 
-        ir_basic_blocks[bb_id].statements = core::mem::take(&mut machine.statements);
         ir_basic_blocks[bb_id].sealed_bb = machine.seal_basic_block();
     }
 
@@ -322,7 +320,7 @@ pub fn build_stackless_ir<'code>(
     let basic_blocks = ir_basic_blocks
         .into_iter()
         .map(|bb| BasicBlock {
-            statements: bb.statements,
+            statements: bb.sealed_bb.statements,
             predecessors: bb.predecessors,
         })
         .collect();

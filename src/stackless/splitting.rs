@@ -288,7 +288,7 @@ pub fn merge_versions_across_basic_blocks(
         // `valueN` variable is ever mentioned more than once to remove all dead stores. This allows
         // us to localize a heavy DFS step to this single pass and run much simpler logic to remove
         // `valueN` later.
-        bb.statements.retain(|stmt| {
+        bb.sealed_bb.statements.retain(|stmt| {
             if let Statement::Basic(BasicStatement::Assign { target, value }) = stmt
                 && let Expression::Variable(Variable {
                     name,

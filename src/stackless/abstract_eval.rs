@@ -35,6 +35,7 @@ struct StackWrite {
 
 #[derive(Default)]
 pub struct SealedBlock {
+    pub statements: Vec<Statement>,
     pub active_defs_at_end: FxHashMap<VariableName, ActiveDef>,
     pub slot_defs: FxHashMap<VariableName, Vec<ExprId>>,
 }
@@ -311,6 +312,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
     pub fn seal_basic_block(&mut self) -> SealedBlock {
         self.flush_stack_writes();
         SealedBlock {
+            statements: core::mem::take(&mut self.statements),
             active_defs_at_end: core::mem::take(&mut self.active_defs),
             slot_defs: core::mem::take(&mut self.slot_defs),
         }
