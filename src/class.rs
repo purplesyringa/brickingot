@@ -1,3 +1,4 @@
+use bitvec::BitArr;
 use noak::{
     descriptor::{BaseType, MethodDescriptor, TypeDescriptor},
     error::DecodeError,
@@ -18,7 +19,17 @@ pub struct ClassInfo<'code> {
 pub struct MethodDescriptorInfo<'code> {
     pub descriptor: MethodDescriptor<'code>,
     pub stack_effect: isize,
-    pub parameter_sizes: Vec<usize>,
+    pub parameter_sizes: ParameterSizes,
+}
+
+// Since the only valid sizes are 1 and 2, we can store sizes as a bit array. This removes
+// an allocation and speeds up `invoke*` instruction handling.
+pub struct ParameterSizes {
+    /// 0 indicates a category-1 type, 1 indicates a category-2 type. JVM allows 255 parameters per
+    /// method at most, pad this to 256 for clean code.
+    bits: BitArr!(for 256),
+    /// Number of parameters.
+    len: usize,
 }
 
 impl<'code> ClassInfo<'code> {
@@ -47,12 +58,18 @@ impl<'code> ClassInfo<'code> {
 
 impl<'code> MethodDescriptorInfo<'code> {
     fn new(descriptor: MethodDescriptor<'code>) -> Self {
-        let mut parameter_sizes = Vec::new();
+        let mut parameter_sizes = ParameterSizes {
+            bits: Default::default(),
+            len: 0,
+        };
         for param in descriptor.parameters() {
-            parameter_sizes.push(type_descriptor_width(param));
+            parameter_sizes
+                .bits
+                .set(parameter_sizes.len, type_descriptor_width(param) == 2);
+            parameter_sizes.len += 1;
         }
 
-        let total_parameters_size: usize = parameter_sizes.iter().copied().sum();
+        let total_parameters_size = parameter_sizes.len + parameter_sizes.bits.count_ones();
 
         // For the return type in particular, we could check whether the method descriptor ends with
         // `)V`, `)D`, `)J`, or anything else. But we also have to check argument categories, which
@@ -68,6 +85,18 @@ impl<'code> MethodDescriptorInfo<'code> {
             stack_effect: return_size as isize - total_parameters_size as isize,
             parameter_sizes,
         }
+    }
+}
+
+impl ParameterSizes {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = usize> + ExactSizeIterator {
+        self.bits[..self.len]
+            .iter()
+            .map(|is_double| if *is_double { 2 } else { 1 })
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
     }
 }
 

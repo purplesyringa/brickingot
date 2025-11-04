@@ -96,7 +96,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         let sizes = &method_info.parameter_sizes;
         let mut arguments = vec![ExprId(0); sizes.len()];
         for (i, size) in sizes.iter().enumerate().rev() {
-            arguments[i] = self.pop_sized(*size)?;
+            arguments[i] = self.pop_sized(size)?;
         }
         Ok(arguments)
     }
