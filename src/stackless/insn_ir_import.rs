@@ -71,10 +71,10 @@ fn invoke<'arena, 'code>(
         _ => unreachable!("pre-parsing should have checked the types"),
     };
 
-    let method_descriptor = class_info.get_method_descriptor(*name_and_type)?;
+    let method_info = class_info.get_method_descriptor(*name_and_type)?;
     let name_and_type = pool.retrieve(*name_and_type)?;
     let class_or_interface = Str(pool.retrieve(*class)?.name);
-    let arguments = machine.pop_method_arguments(&method_descriptor.descriptor)?;
+    let arguments = machine.pop_method_arguments(method_info)?;
 
     let kind = if has_receiver {
         CallKind::Method {
@@ -87,7 +87,7 @@ fn invoke<'arena, 'code>(
     };
 
     machine.push_return_type(
-        &method_descriptor.descriptor.return_type(),
+        &method_info.descriptor.return_type(),
         machine.arena.alloc(Expression::Call {
             method_name: Str(name_and_type.name),
             kind,
@@ -764,13 +764,11 @@ pub fn import_insn_to_ir<'arena, 'code>(
         // Function calls
         InvokeDynamic { index } => {
             let indy = pool.get(*index)?;
-            let method_descriptor = &class_info
-                .get_method_descriptor(indy.name_and_type)?
-                .descriptor;
+            let method_info = class_info.get_method_descriptor(indy.name_and_type)?;
             let name_and_type = pool.retrieve(indy.name_and_type)?;
-            let arguments = machine.pop_method_arguments(method_descriptor)?;
+            let arguments = machine.pop_method_arguments(method_info)?;
             machine.push_return_type(
-                &method_descriptor.return_type(),
+                &method_info.descriptor.return_type(),
                 arena.alloc(Expression::Call {
                     method_name: Str(name_and_type.name),
                     kind: CallKind::Dynamic {

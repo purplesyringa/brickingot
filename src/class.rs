@@ -18,6 +18,7 @@ pub struct ClassInfo<'code> {
 pub struct MethodDescriptorInfo<'code> {
     pub descriptor: MethodDescriptor<'code>,
     pub stack_effect: isize,
+    pub parameter_sizes: Vec<usize>,
 }
 
 impl<'code> ClassInfo<'code> {
@@ -46,12 +47,17 @@ impl<'code> ClassInfo<'code> {
 
 impl<'code> MethodDescriptorInfo<'code> {
     fn new(descriptor: MethodDescriptor<'code>) -> Self {
-        let arguments_size: usize = descriptor.parameters().map(type_descriptor_width).sum();
+        let mut parameter_sizes = Vec::new();
+        for param in descriptor.parameters() {
+            parameter_sizes.push(type_descriptor_width(param));
+        }
 
-        // For the return type in particular, we could check whether the method descriptor ends
-        // with `)V`, `)D`, `)J`, or anything else. But we also have to check argument
-        // categories, which cannot be computed that easily without parsing, so let's bite the
-        // bullet. This is cached anyway, so the performance doesn't matter as much.
+        let total_parameters_size: usize = parameter_sizes.iter().copied().sum();
+
+        // For the return type in particular, we could check whether the method descriptor ends with
+        // `)V`, `)D`, `)J`, or anything else. But we also have to check argument categories, which
+        // cannot be computed that easily without parsing, so let's bite the bullet. This is cached
+        // anyway, so the performance doesn't matter as much.
         let return_size = descriptor
             .return_type()
             .map(type_descriptor_width)
@@ -59,7 +65,8 @@ impl<'code> MethodDescriptorInfo<'code> {
 
         Self {
             descriptor,
-            stack_effect: return_size as isize - arguments_size as isize,
+            stack_effect: return_size as isize - total_parameters_size as isize,
+            parameter_sizes,
         }
     }
 }

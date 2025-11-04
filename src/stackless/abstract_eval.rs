@@ -3,12 +3,10 @@ use crate::ast::{
     Arena, BasicStatement, BinOp, ExprId, Expression, PrimitiveType, Variable, VariableName,
     VariableNamespace,
 };
+use crate::class::MethodDescriptorInfo;
 use crate::preparse::insn_stack_effect::{nat_width, type_descriptor_width};
 use crate::var;
-use noak::{
-    descriptor::{MethodDescriptor, TypeDescriptor},
-    reader::cpool::value::NameAndType,
-};
+use noak::{descriptor::TypeDescriptor, reader::cpool::value::NameAndType};
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 
@@ -93,18 +91,13 @@ impl<'arena, 'code> Machine<'arena, 'code> {
 
     pub fn pop_method_arguments(
         &mut self,
-        method_descriptor: &MethodDescriptor<'code>,
+        method_info: &MethodDescriptorInfo<'code>,
     ) -> Result<Vec<ExprId>, StackUnderflowError> {
-        let parameter_sizes: Vec<usize> = method_descriptor
-            .parameters()
-            .map(type_descriptor_width)
-            .collect();
-        let mut arguments = parameter_sizes
-            .iter()
-            .rev()
-            .map(|size| self.pop_sized(*size))
-            .collect::<Result<Vec<ExprId>, _>>()?;
-        arguments.reverse();
+        let sizes = &method_info.parameter_sizes;
+        let mut arguments = vec![ExprId(0); sizes.len()];
+        for (i, size) in sizes.iter().enumerate().rev() {
+            arguments[i] = self.pop_sized(*size)?;
+        }
         Ok(arguments)
     }
 
