@@ -42,6 +42,8 @@ pub struct BasicBlock {
     /// The range of bytecode instructions covered by this BB, indexed by bytes (rather than
     /// instruction numbers).
     pub instruction_range: Range<u32>,
+    /// The number of instructions in the range.
+    pub n_instructions: usize,
     /// The size of the stack on entry to this BB, counting double-width elements (`long` and
     /// `double`) as two.
     pub stack_size_at_start: usize,

@@ -82,6 +82,7 @@ pub fn extract_basic_blocks<'code>(
         .enumerate()
         .map(|(bb_id, range)| BasicBlock {
             instruction_range: range[0]..range[1],
+            n_instructions: 0,      // will be populated in a bit
             stack_size_at_start: 0, // will be populated in a bit
             // `successors` can only be populated after BB boundaries have been decided, so this
             // stays in a sentinel-like state where only the trivial successor is recorded. We'll
@@ -245,6 +246,7 @@ pub fn extract_basic_blocks<'code>(
             } else if address.as_u32() > bb.instruction_range.end {
                 return Err(BytecodePreparsingError::SplitInstruction);
             }
+            bb.n_instructions += 1;
             stack_size_at_end += get_insn_stack_effect(cpool, &insn, class_info)?;
             throws |= can_insn_throw(&insn);
         }

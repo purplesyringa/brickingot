@@ -173,6 +173,7 @@ pub fn build_stackless_ir<'code>(
         0,
         preparse::BasicBlock {
             instruction_range: 0..0,
+            n_instructions: 0,
             stack_size_at_start: 0,
             successors: vec![1],
         },
@@ -245,6 +246,9 @@ pub fn build_stackless_ir<'code>(
         for succ_bb_id in &preparsed_bb.successors {
             ir_basic_blocks[*succ_bb_id].predecessors.push(bb_id);
         }
+
+        // Most bytecode instructions correspond to one statement, so this is a good estimate.
+        machine.statements.reserve(preparsed_bb.n_instructions + 4);
 
         for row in code.raw_instructions_from(Index::new(preparsed_bb.instruction_range.start))? {
             let (address, insn) = row?;
