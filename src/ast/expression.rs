@@ -1,5 +1,6 @@
 use super::{Arena, DebugIr, ExprId};
 use core::fmt::{self, Display};
+use core::hash::{Hash, Hasher};
 use displaydoc::Display;
 use noak::MStr;
 use noak::reader::cpool::value::{Dynamic, MethodHandle};
@@ -326,10 +327,24 @@ pub enum LogicalOp {
     Or,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug)]
 pub struct Variable {
     pub name: VariableName,
     pub version: Version,
+}
+
+// Variables with equal versions are guaranteed to have the same name, so only versions need to be
+// compared.
+impl PartialEq for Variable {
+    fn eq(&self, rhs: &Variable) -> bool {
+        self.version == rhs.version
+    }
+}
+impl Eq for Variable {}
+impl Hash for Variable {
+    fn hash<H: Hasher>(&self, hasher: &mut H) {
+        self.version.hash(hasher);
+    }
 }
 
 impl Display for Variable {
