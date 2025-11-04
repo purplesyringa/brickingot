@@ -39,7 +39,7 @@ pub enum Expression<'code> {
     DynamicConst(Dynamic<'code>),
     ConstMethodHandle(MethodHandle<'code>),
     ConstMethodType {
-        descriptor: &'code MStr,
+        descriptor: Str<'code>,
     },
     ConstByte(i8),
     ConstShort(i16),
@@ -47,7 +47,7 @@ pub enum Expression<'code> {
     ConstLong(i64),
     ConstFloat(f32),
     ConstDouble(f64),
-    ConstString(&'code MStr),
+    ConstString(Str<'code>),
     InstanceOf {
         object: ExprId,
         class: Str<'code>,

@@ -283,14 +283,14 @@ pub fn import_insn_to_ir<'arena, 'code>(
                 machine.push(arena.alloc(Expression::Class(Str(pool.retrieve(*name)?))));
             }
             Item::String(cpool::String { string }) => {
-                machine.push(arena.alloc(Expression::ConstString(pool.retrieve(*string)?)));
+                machine.push(arena.alloc(Expression::ConstString(Str(pool.retrieve(*string)?))));
             }
             Item::MethodHandle(_) => machine.push(arena.alloc(Expression::ConstMethodHandle(
                 pool.retrieve(Index::<MethodHandle>::new(index.as_u16()).unwrap())?,
             ))),
             Item::MethodType(cpool::MethodType { descriptor }) => {
                 machine.push(arena.alloc(Expression::ConstMethodType {
-                    descriptor: pool.retrieve(*descriptor)?,
+                    descriptor: Str(pool.retrieve(*descriptor)?),
                 }));
             }
             Item::Dynamic(_) => machine.push(arena.alloc(Expression::DynamicConst(
