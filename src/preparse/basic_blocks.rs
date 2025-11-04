@@ -222,13 +222,18 @@ pub fn extract_basic_blocks<'code>(
         },
     ]
     .map(|range_fn| {
-        IntervalTree::new(
-            basic_blocks.len(),
-            exception_handlers
-                .iter()
-                .enumerate()
-                .filter_map(|(handler_id, handler)| Some((handler_id, range_fn(handler)?))),
-        )
+        // Don't populate these tables if there are no exception handlers.
+        if exception_handlers.is_empty() {
+            IntervalTree::new(0, core::iter::empty())
+        } else {
+            IntervalTree::new(
+                basic_blocks.len(),
+                exception_handlers
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(handler_id, handler)| Some((handler_id, range_fn(handler)?))),
+            )
+        }
     });
 
     while let Some(bb_id) = dfs_stack.pop() {
@@ -267,28 +272,36 @@ pub fn extract_basic_blocks<'code>(
                 .iter()
                 .map(|succ_bb_id| (*succ_bb_id, stack_size_at_end));
 
-            // I'm sorry for this mess.
-            let eh_successors = remaining_eh
-                .drain_containing(bb_id)
-                .map(|handler_id| (handler_id, false))
-                .chain(
-                    throws
-                        .then(|| {
-                            remaining_eh_throwing
-                                .drain_containing(bb_id)
-                                .map(|handler_id| (handler_id, true))
-                        })
-                        .into_iter()
-                        .flatten(),
+            // Don't access EH tables if there are no exception handlers. I'm sorry for this mess.
+            let eh_successors = if exception_handlers.is_empty() {
+                None
+            } else {
+                Some(
+                    remaining_eh
+                        .drain_containing(bb_id)
+                        .map(|handler_id| (handler_id, false))
+                        .chain(
+                            throws
+                                .then(|| {
+                                    remaining_eh_throwing
+                                        .drain_containing(bb_id)
+                                        .map(|handler_id| (handler_id, true))
+                                })
+                                .into_iter()
+                                .flatten(),
+                        )
+                        .map(|(handler_id, is_tail)| {
+                            let handler = &mut exception_handlers[handler_id];
+                            handler.is_reachable = true;
+                            if is_tail {
+                                handler.has_throwing_reachable_bb_in_tail = true;
+                            }
+                            (handler.target, 1)
+                        }),
                 )
-                .map(|(handler_id, is_tail)| {
-                    let handler = &mut exception_handlers[handler_id];
-                    handler.is_reachable = true;
-                    if is_tail {
-                        handler.has_throwing_reachable_bb_in_tail = true;
-                    }
-                    (handler.target, 1)
-                });
+            }
+            .into_iter()
+            .flatten();
 
             for (succ_bb_id, stack_size) in explicit_successors.chain(eh_successors) {
                 if succ_bb_id == basic_blocks.len() {
