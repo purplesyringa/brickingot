@@ -5,7 +5,7 @@ use super::{
         satisfy_block_requirements,
     },
 };
-use crate::ast::{Arena, BasicStatement, ExprId, Expression};
+use crate::ast::{Arena, BasicStatement, ExprId, Expression, Version};
 use crate::{
     linear::{self, CatchHandler},
     var,
@@ -64,7 +64,7 @@ pub fn structure_control_flow<'code>(
         try_block_to_handler,
         jump_implementations,
         next_block_id,
-        unique_selector_id: arena.alloc(Expression::Null), // doesn't matter, just a unique ID
+        selector_version: arena.version(),
     };
 
     let mut statements = structurizer.emit_tree(tree);
@@ -90,7 +90,7 @@ struct Structurizer<'arena, 'code> {
     try_block_to_handler: FxHashMap<usize, usize>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
     next_block_id: usize,
-    unique_selector_id: ExprId,
+    selector_version: Version,
 }
 
 impl<'code> Structurizer<'_, 'code> {
@@ -298,6 +298,6 @@ impl<'code> Structurizer<'_, 'code> {
         // This pass runs after variables are merged, so we need to explicitly use the same version
         // for all selectors. That's not *quite* correct in the sense that this can merge
         // independent selectors, but later passes are prepared to deal with that.
-        self.arena.var(var!(selector0 v self.unique_selector_id))
+        self.arena.var(var!(selector0 v self.selector_version))
     }
 }

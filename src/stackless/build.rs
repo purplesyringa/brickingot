@@ -112,8 +112,7 @@ use super::{
     BasicBlock, CatchBody, CatchHandler, ExceptionHandlerBlock, InternalBasicBlock, Program,
 };
 use crate::ClassInfo;
-use crate::ast::BasicStatement;
-use crate::ast::{Arena, Expression};
+use crate::ast::{Arena, BasicStatement, Expression};
 use crate::preparse::{self, insn_stack_effect::type_descriptor_width};
 use crate::var;
 use noak::{
@@ -237,8 +236,8 @@ pub fn build_stackless_ir<'code>(
                 // may be used by multiple `catch` blocks (e.g. with different classes), so we'd
                 // have to create new allocations. Using `null` here ensures we don't affect
                 // variable refcounts until we actually codegen assignments.
-                stack0_def: arena.alloc(Expression::Null),
-                exception0_use: arena.alloc(Expression::Null),
+                stack0_def: arena.version(),
+                exception0_use: arena.version(),
                 stack0_exception0_copy_is_necessary: true, // populated by `splitting`
             })
         };

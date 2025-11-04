@@ -329,12 +329,12 @@ pub enum LogicalOp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Variable {
     pub name: VariableName,
-    pub version: ExprId,
+    pub version: Version,
 }
 
 impl Display for Variable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}v{}", self.name, self.version.0 - 32)
+        write!(f, "{}{}", self.name, self.version)
     }
 }
 
@@ -359,6 +359,15 @@ pub enum VariableNamespace {
     Selector,
     /// context
     Context,
+}
+
+#[derive(Clone, Copy, Debug, Display, Hash, PartialEq, Eq)]
+pub struct Version(pub u32);
+
+impl Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "v{}", self.0 - 32)
+    }
 }
 
 /// A helper macro for creating instances of `VariableName` and `Variable`.

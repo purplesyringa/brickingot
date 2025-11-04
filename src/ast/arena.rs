@@ -1,4 +1,4 @@
-use super::{DebugIr, Expression, Variable, VariableName};
+use super::{DebugIr, Expression, Variable, VariableName, Version};
 use alloc::alloc;
 use core::cell::Cell;
 use core::fmt::{self, Display};
@@ -129,13 +129,30 @@ impl<'code> Arena<'code> {
         self.alloc(Expression::Variable(var))
     }
 
-    pub fn var_name(&self, name: VariableName) -> Variable {
-        let version = self.alloc_with(|version| Expression::Variable(Variable { name, version }));
-        Variable { name, version }
+    pub fn var_name(&self, name: VariableName) -> (Variable, ExprId) {
+        let expr_id = self.alloc_with(|expr_id| {
+            Expression::Variable(Variable {
+                name,
+                version: Version(expr_id.0),
+            })
+        });
+        (
+            Variable {
+                name,
+                version: Version(expr_id.0),
+            },
+            expr_id,
+        )
     }
 
     pub fn null(&self) -> ExprId {
         self.alloc(Expression::Null)
+    }
+
+    pub fn version(&self) -> Version {
+        // Doesn't need to actually allocate an object on the arena, just needs a unique ID, but
+        // this is the most straightforward solution.
+        Version(self.null().0)
     }
 
     pub fn debug<'a, T: DebugIr<'code> + ?Sized>(&'a self, value: &'a T) -> impl Display {

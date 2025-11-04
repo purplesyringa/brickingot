@@ -1,7 +1,7 @@
 use super::Statement;
 use crate::ast::{
     Arena, BasicStatement, BinOp, ExprId, Expression, PrimitiveType, Variable, VariableName,
-    VariableNamespace,
+    VariableNamespace, Version,
 };
 use crate::class::MethodDescriptorInfo;
 use crate::preparse::insn_stack_effect::{nat_width, type_descriptor_width};
@@ -12,7 +12,7 @@ use thiserror::Error;
 
 pub struct ActiveDef {
     // Can be `None` for stack variables until the BB is sealed.
-    pub def_expr_id: Option<ExprId>,
+    pub def_version: Option<Version>,
     // The variable the definition sets. `var.name` can mismatch the name of the defined variable if
     // it's a `stackN = valueM` situation: `var.name` will be set to `valueM` to link preemptively.
     pub var: Variable,
@@ -35,14 +35,14 @@ struct StackWrite {
 pub struct SealedBlock {
     pub statements: Vec<Statement>,
     pub active_defs_at_end: FxHashMap<VariableName, ActiveDef>,
-    pub slot_defs: FxHashMap<VariableName, Vec<ExprId>>,
+    pub slot_defs: FxHashMap<VariableName, Vec<Version>>,
 }
 
 pub struct Machine<'arena, 'code> {
     pub arena: &'arena Arena<'code>,
     pub stack_size: usize,
     active_defs: FxHashMap<VariableName, ActiveDef>,
-    slot_defs: FxHashMap<VariableName, Vec<ExprId>>, // `ExprId`s correspond to the LHS expr
+    slot_defs: FxHashMap<VariableName, Vec<Version>>, // versions correspond to the LHS expr
     stack_state: FxHashMap<usize, StackWrite>,
     pub unresolved_uses: FxHashMap<(usize, Variable), UnresolvedUse>,
     pub bb_id: usize,
@@ -115,7 +115,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         // uninitialized memory, which triggers problems down the road, or access elements that have
         // already been popped, creating phantom uses. Using a filler value like `null` solves this.
         for offset in 1..size {
-            self.set_stack(self.stack_size + offset, self.arena.alloc(Expression::Null));
+            self.set_stack(self.stack_size + offset, self.arena.null());
         }
         self.stack_size += size;
     }
@@ -184,23 +184,23 @@ impl<'arena, 'code> Machine<'arena, 'code> {
             }
             self.arena.var(def.var)
         } else {
-            let var = self.arena.var_name(name);
+            let (var, use_expr_id) = self.arena.var_name(name);
             self.unresolved_uses.insert(
                 (self.bb_id, var),
                 UnresolvedUse {
                     is_stack_manipulation,
                 },
             );
-            var.version
+            use_expr_id
         }
     }
 
     // Takes `value` because we want to enforce that the value is computed before the assignment is
     // performed, i.e. that uses in `value` see old defs.
     fn set_var(&mut self, name: VariableName, value: ExprId) -> Variable {
-        let var = self.arena.var_name(name);
+        let (var, def_expr_id) = self.arena.var_name(name);
         self.add(Statement::Basic(BasicStatement::Assign {
-            target: var.version,
+            target: def_expr_id,
             value,
         }));
         var
@@ -215,7 +215,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         self.active_defs.insert(
             var.name,
             ActiveDef {
-                def_expr_id: Some(var.version),
+                def_version: Some(var.version),
                 var,
                 copy_stack_from_predecessor: None,
             },
@@ -258,7 +258,7 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         self.active_defs.insert(
             var!(stack position),
             ActiveDef {
-                def_expr_id: None,
+                def_version: None,
                 var: value_var,
                 copy_stack_from_predecessor,
             },
@@ -286,11 +286,11 @@ impl<'arena, 'code> Machine<'arena, 'code> {
         delayed_stack_assignments.sort_by_key(|(_, write)| write.order_id);
 
         for (position, write) in delayed_stack_assignments {
-            let var = self.arena.var_name(var!(stack position));
-            self.active_defs.get_mut(&var.name).unwrap().def_expr_id = Some(var.version);
+            let (var, def_expr_id) = self.arena.var_name(var!(stack position));
+            self.active_defs.get_mut(&var.name).unwrap().def_version = Some(var.version);
             self.statements
                 .push(Statement::Basic(BasicStatement::Assign {
-                    target: var.version,
+                    target: def_expr_id,
                     value: self.arena.var(write.value_var),
                 }));
         }

@@ -6,7 +6,7 @@ mod splitting;
 
 use self::abstract_eval::SealedBlock;
 pub use self::build::{StacklessIrError, build_stackless_ir};
-use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
+use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str, Version};
 use core::fmt;
 use core::ops::Range;
 use noak::MStr;
@@ -86,7 +86,7 @@ pub struct CatchHandler<'code> {
 pub struct CatchBody {
     /// The version of `exception0` available within this body. Note that it's not the `exception0`
     /// expression itself, just the version that can be used to create it.
-    pub exception0_use: ExprId,
+    pub exception0_use: Version,
     /// If present, the `stack0 = exception0` assignment in this body.
     pub stack0_exception0_copy: Option<BasicStatement>,
     /// Where to jump to.
@@ -121,9 +121,9 @@ struct InternalBasicBlock {
 struct ExceptionHandlerBlock {
     /// The ranges of basic blocks that can jump to the start of this BB on exception.
     eh_entry_for_bb_ranges: Vec<Range<usize>>,
-    /// stack0 in implicit `stack0 = exception0`.
-    stack0_def: ExprId,
-    /// exception0 in implicit `stack0 = exception0`.
-    exception0_use: ExprId,
+    /// Version of `stack0` in implicit `stack0 = exception0`.
+    stack0_def: Version,
+    /// Version of `exception0` in implicit `stack0 = exception0`.
+    exception0_use: Version,
     stack0_exception0_copy_is_necessary: bool,
 }

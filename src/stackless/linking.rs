@@ -22,7 +22,7 @@
 // SCC.
 
 use super::{InternalBasicBlock, abstract_eval::UnresolvedUse};
-use crate::ast::{Arena, Expression, Variable, VariableNamespace};
+use crate::ast::{Arena, ExprId, Expression, Variable, VariableNamespace};
 use crate::var;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
@@ -191,7 +191,10 @@ pub fn link_stack_across_basic_blocks(
 
         match source {
             Source::Value(value_var) => {
-                arena[var.version] = Expression::Variable(value_var);
+                // Versions haven't been merged yet, so the version matches the expression ID and we
+                // can just replace the expression.
+                let use_expr_id = ExprId(var.version.0);
+                arena[use_expr_id] = Expression::Variable(value_var);
                 // Uses in `unresolved_uses` are treated as GC roots. Drop the now-unused access to
                 // make sure that the replaced `stackN` use won't keep `stackN` alive if it's
                 // otherwise unused. This is sufficient to guarantee no false positives during the

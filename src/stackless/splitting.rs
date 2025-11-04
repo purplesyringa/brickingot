@@ -12,7 +12,7 @@
 
 use super::{ExceptionHandlerBlock, InternalBasicBlock, Statement, abstract_eval::UnresolvedUse};
 use crate::ast::{
-    Arena, BasicStatement, ExprId, Expression, Variable, VariableName, VariableNamespace,
+    Arena, BasicStatement, Expression, Variable, VariableName, VariableNamespace, Version,
 };
 use crate::utils::UnionFind;
 use crate::var;
@@ -22,11 +22,11 @@ use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 
 // We're interested in finding definitions of `name` matching the predicate, and we want them to be
-// merged with `use_expr_id`.
+// merged with `use_version`.
 struct UseDefTask {
     bb_id: usize,
     name: VariableName,
-    use_expr_id: ExprId,
+    use_version: Version,
     predicate: Predicate,
 }
 
@@ -37,12 +37,12 @@ enum Predicate {
     Within,
 }
 
-type TryRangeMap = BTreeMap<usize, (usize, ExprId)>; // start -> (end, use_expr_id)
+type TryRangeMap = BTreeMap<usize, (usize, Version)>; // start -> (end, use_version)
 
 struct Merger<'a> {
     basic_blocks: &'a [InternalBasicBlock],
-    versions: UnionFind,
-    resolved_uses: FxHashMap<(usize, VariableName), ExprId>, // (bb_id, name) -> version
+    versions: MergedVariables,
+    resolved_uses: FxHashMap<(usize, VariableName), Version>, // (bb_id, name) -> version
     try_ranges_per_variable: FxHashMap<VariableName, TryRangeMap>,
     tasks: Vec<UseDefTask>,
 }
@@ -51,20 +51,22 @@ impl<'a> Merger<'a> {
     fn new(basic_blocks: &'a mut [InternalBasicBlock], n_versions: u32) -> Self {
         Self {
             basic_blocks,
-            versions: UnionFind::new(n_versions),
+            versions: MergedVariables {
+                versions: UnionFind::new(n_versions),
+            },
             resolved_uses: FxHashMap::default(),
             try_ranges_per_variable: FxHashMap::default(),
             tasks: Vec::new(),
         }
     }
 
-    /// Merge all definitions of `name` visible at the start of `bb_id` with version `use_expr_id`.
-    fn visit_use(&mut self, bb_id: usize, name: VariableName, use_expr_id: ExprId) {
+    /// Merge all definitions of `name` visible at the start of `bb_id` with version `use_version`.
+    fn visit_use(&mut self, bb_id: usize, name: VariableName, use_version: Version) {
         // Reuse single stack allocation between `visit_use` calls.
         self.tasks.push(UseDefTask {
             bb_id,
             name,
-            use_expr_id,
+            use_version,
             predicate: Predicate::AtStart,
         });
 
@@ -77,20 +79,20 @@ impl<'a> Merger<'a> {
         let UseDefTask {
             bb_id,
             name,
-            use_expr_id,
+            use_version,
             predicate,
         } = task;
 
         // `resolved_uses` stores *some* valid representative of the connected component.
         match self.resolved_uses.entry((bb_id, name)) {
             Entry::Occupied(entry) => {
-                self.versions.merge(use_expr_id.0, entry.get().0);
+                self.versions.merge(use_version, *entry.get());
                 return;
             }
             Entry::Vacant(entry) => {
-                // DFS will merge all reachable definitions with `use_expr_id`, so that's a valid
+                // DFS will merge all reachable definitions with `use_version`, so that's a valid
                 // representative for all further iterations.
-                entry.insert(use_expr_id);
+                entry.insert(use_version);
             }
         }
 
@@ -101,14 +103,14 @@ impl<'a> Merger<'a> {
                 "can only recognize slot assignments for Within predicate",
             );
             if let Some(defs) = self.basic_blocks[bb_id].sealed_bb.slot_defs.get(&name) {
-                for def_expr_id in defs {
-                    self.versions.merge(use_expr_id.0, def_expr_id.0);
+                for def_version in defs {
+                    self.versions.merge(use_version, *def_version);
                 }
             }
         }
 
         if let Some(eh) = &self.basic_blocks[bb_id].eh {
-            self.handle_eh_task(name, use_expr_id, eh);
+            self.handle_eh_task(name, use_version, eh);
         }
 
         for pred_bb_id in &self.basic_blocks[bb_id].predecessors {
@@ -117,14 +119,14 @@ impl<'a> Merger<'a> {
                 .active_defs_at_end
                 .get(&name)
             {
-                let def_expr_id = def.def_expr_id.expect("def_expr_id not set for variable");
-                self.versions.merge(use_expr_id.0, def_expr_id.0);
+                let def_version = def.def_version.expect("def_version not set for variable");
+                self.versions.merge(use_version, def_version);
                 if let Some(var) = def.copy_stack_from_predecessor {
                     // Now that we know the store is live, use what it loads from.
                     self.tasks.push(UseDefTask {
                         bb_id,
                         name: var.name,
-                        use_expr_id: var.version,
+                        use_version: var.version,
                         predicate: Predicate::AtStart,
                     });
                 }
@@ -132,7 +134,7 @@ impl<'a> Merger<'a> {
                 self.tasks.push(UseDefTask {
                     bb_id: *pred_bb_id,
                     name,
-                    use_expr_id,
+                    use_version,
                     predicate: Predicate::AtStart,
                 });
             }
@@ -142,11 +144,11 @@ impl<'a> Merger<'a> {
     fn handle_eh_task(
         &mut self,
         name: VariableName,
-        use_expr_id: ExprId,
+        use_version: Version,
         eh: &ExceptionHandlerBlock,
     ) {
         if name == var!(stack0) {
-            self.versions.merge(use_expr_id.0, eh.stack0_def.0);
+            self.versions.merge(use_version, eh.stack0_def);
             return;
         }
 
@@ -189,7 +191,7 @@ impl<'a> Merger<'a> {
                 .map(|(start, (end, range_expr_id))| {
                     new_range = new_range.start.min(start)..new_range.end.max(end);
                     let uncovered_range = it_bb.get()..start;
-                    self.versions.merge(use_expr_id.0, range_expr_id.0);
+                    self.versions.merge(use_version, range_expr_id);
                     it_bb.set(end);
                     uncovered_range
                 })
@@ -200,7 +202,7 @@ impl<'a> Merger<'a> {
                 self.tasks.push(UseDefTask {
                     bb_id: uncovered_bb_id,
                     name,
-                    use_expr_id,
+                    use_version,
                     // We aren't merely looking for definitions live at the end of the BB, since
                     // an exception may be thrown before the reassignment, hence the predicate is
                     // "within".
@@ -210,7 +212,7 @@ impl<'a> Merger<'a> {
 
             // Mark the whole range as covered.
             assert!(
-                map.insert(new_range.start, (new_range.end, use_expr_id))
+                map.insert(new_range.start, (new_range.end, use_version))
                     .is_none(),
                 "corrupted range map",
             );
@@ -218,9 +220,7 @@ impl<'a> Merger<'a> {
     }
 
     fn finish(self) -> MergedVariables {
-        MergedVariables {
-            versions: self.versions,
-        }
+        self.versions
     }
 }
 
@@ -229,12 +229,16 @@ struct MergedVariables {
 }
 
 impl MergedVariables {
-    fn resolve(&mut self, expr_id: ExprId) -> ExprId {
-        ExprId(self.versions.resolve(expr_id.0))
+    fn merge(&mut self, a: Version, b: Version) {
+        self.versions.merge(a.0, b.0)
     }
 
-    fn is_unique(&self, expr_id: ExprId) -> bool {
-        self.versions.is_unique(expr_id.0)
+    fn resolve(&mut self, version: Version) -> Version {
+        Version(self.versions.resolve(version.0))
+    }
+
+    fn is_unique(&self, version: Version) -> bool {
+        self.versions.is_unique(version.0)
     }
 }
 
@@ -290,12 +294,9 @@ pub fn merge_versions_across_basic_blocks(
         // `valueN` later.
         bb.sealed_bb.statements.retain(|stmt| {
             if let Statement::Basic(BasicStatement::Assign { target, value }) = stmt
-                && let Expression::Variable(Variable {
-                    name,
-                    version: def_expr_id,
-                }) = arena[*target]
+                && let Expression::Variable(Variable { name, version }) = arena[*target]
                 && name.namespace == VariableNamespace::Stack
-                && merged.is_unique(def_expr_id)
+                && merged.is_unique(version)
             {
                 // `value` must be a `valueN` variable; remove it from the arena so that variable
                 // refcounts can be computed just by iterating over the arena without recursion.
