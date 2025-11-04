@@ -26,11 +26,6 @@ pub struct UnresolvedUse {
     pub is_stack_manipulation: bool,
 }
 
-struct StackWrite {
-    value_var: Variable,
-    order_id: usize,
-}
-
 #[derive(Default)]
 pub struct SealedBlock {
     pub statements: Vec<Statement>,
@@ -43,12 +38,11 @@ pub struct Machine<'arena, 'code> {
     pub stack_size: usize,
     active_defs: FxHashMap<VariableName, ActiveDef>,
     slot_defs: FxHashMap<VariableName, Vec<Version>>, // versions correspond to the LHS expr
-    stack_state: FxHashMap<usize, StackWrite>,
+    stack_state: FxHashMap<usize, Variable>,          // position -> value variable
     pub unresolved_uses: FxHashMap<(usize, Variable), UnresolvedUse>,
     pub bb_id: usize,
     pub statements: Vec<Statement>,
     next_value_id: usize,
-    next_order_id: usize,
     pub address_to_bb_id: FxHashMap<u32, usize>,
 }
 
@@ -68,7 +62,6 @@ impl<'arena, 'code> Machine<'arena, 'code> {
             bb_id: usize::MAX,
             statements: Vec::new(),
             next_value_id: 0,
-            next_order_id: 0,
             address_to_bb_id: FxHashMap::default(),
         }
     }
@@ -266,32 +259,19 @@ impl<'arena, 'code> Machine<'arena, 'code> {
 
         // Emitting assignment to stack variables is delayed until the end of the basic block, so
         // that definitions that are soon overwritten aren't present in the IR.
-        self.stack_state.insert(
-            position,
-            StackWrite {
-                value_var,
-                order_id: self.next_order_id,
-            },
-        );
-        self.next_order_id += 1;
+        self.stack_state.insert(position, value_var);
     }
 
     pub fn flush_stack_writes(&mut self) {
-        // Emit delayed stack assignments. Make sure not to reorder them, as reordering
-        //     stack1 = stack0
-        //     stack0 = value0
-        // is wrong even if `stack0`s have different versions.
-        let mut delayed_stack_assignments: Vec<(usize, StackWrite)> =
-            self.stack_state.drain().collect();
-        delayed_stack_assignments.sort_by_key(|(_, write)| write.order_id);
-
-        for (position, write) in delayed_stack_assignments {
+        // Emit delayed stack assignments. These can be emitted in any order, as we're exclusively
+        // copying valueN variables to stackM variables.
+        for (position, value_var) in self.stack_state.drain() {
             let (var, def_expr_id) = self.arena.var_name(var!(stack position));
             self.active_defs.get_mut(&var.name).unwrap().def_version = Some(var.version);
             self.statements
                 .push(Statement::Basic(BasicStatement::Assign {
                     target: def_expr_id,
-                    value: self.arena.var(write.value_var),
+                    value: self.arena.var(value_var),
                 }));
         }
     }
