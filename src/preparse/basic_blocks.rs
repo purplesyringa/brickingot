@@ -222,7 +222,7 @@ pub fn extract_basic_blocks<'code>(
         },
     ]
     .map(|range_fn| {
-        // Don't populate these tables if there are no exception handlers.
+        // Optimization: don't populate these tables if there are no exception handlers.
         if exception_handlers.is_empty() {
             IntervalTree::new(0, core::iter::empty())
         } else {
@@ -272,7 +272,8 @@ pub fn extract_basic_blocks<'code>(
                 .iter()
                 .map(|succ_bb_id| (*succ_bb_id, stack_size_at_end));
 
-            // Don't access EH tables if there are no exception handlers. I'm sorry for this mess.
+            // Optimization: don't access EH tables if there are no exception handlers.
+            // I'm sorry for this mess.
             let eh_successors = if exception_handlers.is_empty() {
                 None
             } else {
