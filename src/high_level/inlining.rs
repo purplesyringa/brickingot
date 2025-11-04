@@ -2,12 +2,12 @@
 // definitions, like `?:`. That's the responsibility of `Optimizer`.
 
 use super::{Statement, StmtList, StmtMeta};
-use crate::ast::{Arena, BasicStatement, ExprId, Expression, Variable, VariableNamespace};
+use crate::ast::{Arena, BasicStatement, ExprId, Expression, VariableNamespace, Version};
 use rustc_hash::FxHashMap;
 
 pub struct Inliner<'a, 'code> {
     arena: &'a Arena<'code>,
-    n_var_mentions: &'a FxHashMap<Variable, usize>,
+    n_var_mentions: &'a FxHashMap<Version, usize>,
     rev_stmts: core::iter::Peekable<core::iter::Rev<alloc::vec::IntoIter<StmtMeta<'code>>>>,
     inlined_exprs: Vec<(ExprId, ExprId)>, // (use, value)
 }
@@ -16,7 +16,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
     pub fn inline_expressions(
         stmts: StmtList<'code>,
         arena: &mut Arena<'code>,
-        n_var_mentions: &FxHashMap<Variable, usize>,
+        n_var_mentions: &FxHashMap<Version, usize>,
     ) -> StmtList<'code> {
         let mut inliner = Inliner {
             arena,
@@ -98,7 +98,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
 
         let n_mentions = *self
             .n_var_mentions
-            .get(&var)
+            .get(&var.version)
             .expect("used variable not mentioned");
         if var.name.namespace != VariableNamespace::Exception {
             // XXX: let's handle exceptions in some other manner...
@@ -123,7 +123,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
         if let Some(stmt_meta) = self.rev_stmts.peek()
             && let Statement::Basic(BasicStatement::Assign { target, value }) = stmt_meta.stmt
             && let Expression::Variable(def_var) = self.arena[target]
-            && def_var == var
+            && def_var.version == var.version
         {
             // Commit to inlining. This removes the statement from the output.
             self.rev_stmts.next();

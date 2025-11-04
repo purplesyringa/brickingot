@@ -1,7 +1,7 @@
 use super::inlining::Inliner;
 use super::{Catch, Meta, Program, Statement, StmtList, StmtMeta};
 use crate::ast::{
-    Arena, BasicStatement, BinOp, ExprId, Expression, UnaryOp, Variable, VariableNamespace,
+    Arena, BasicStatement, BinOp, ExprId, Expression, UnaryOp, VariableNamespace, Version,
 };
 use crate::exceptions;
 use rustc_hash::FxHashMap;
@@ -18,7 +18,7 @@ pub fn optimize<'code>(
     let mut n_var_mentions = FxHashMap::default();
     for expr in arena.iter_mut() {
         if let Expression::Variable(var) = expr {
-            *n_var_mentions.entry(*var).or_default() += 1;
+            *n_var_mentions.entry(var.version).or_default() += 1;
         }
     }
 
@@ -34,7 +34,7 @@ pub fn optimize<'code>(
 
 struct Optimizer<'arena, 'code> {
     arena: &'arena mut Arena<'code>,
-    n_var_mentions: FxHashMap<Variable, usize>,
+    n_var_mentions: FxHashMap<Version, usize>,
     block_info: FxHashMap<usize, BlockInfo>,
 }
 
@@ -105,7 +105,7 @@ impl<'code> Optimizer<'_, 'code> {
             && var.name.namespace == VariableNamespace::Value
             && *self
                 .n_var_mentions
-                .get(&var)
+                .get(&var.version)
                 .expect("used variable not mentioned")
                 == 1
         {
@@ -135,7 +135,7 @@ impl<'code> Optimizer<'_, 'code> {
                 // ...not inlining `stack0` into the use.
                 if let Expression::Variable(var) = self.arena[value] {
                     self.arena[value] = Expression::Null;
-                    *self.n_var_mentions.get_mut(&var).expect("used variable not mentioned") -= 1;
+                    *self.n_var_mentions.get_mut(&var.version).expect("used variable not mentioned") -= 1;
                 }
                 return;
             }
@@ -701,7 +701,7 @@ impl<'code> Optimizer<'_, 'code> {
                 },
             ] = else_children[..]
             && let Expression::Variable(else_var) = self.arena[else_target]
-            && then_var == else_var
+            && then_var.version == else_var.version
         {
             let condition = self.invert_condition(*condition);
 
@@ -716,7 +716,7 @@ impl<'code> Optimizer<'_, 'code> {
             self.arena[else_target] = Expression::Null;
             *self
                 .n_var_mentions
-                .get_mut(&else_var)
+                .get_mut(&else_var.version)
                 .expect("used variable not mentioned") -= 1;
         }
     }
