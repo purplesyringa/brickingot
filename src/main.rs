@@ -29,6 +29,10 @@ use noak::{
 };
 use std::time::Instant;
 use thiserror::Error;
+use tikv_jemallocator::Jemalloc;
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
 
 #[derive(Debug, Error)]
 enum ClassDecompileError {

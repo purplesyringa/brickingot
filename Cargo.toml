@@ -9,6 +9,7 @@ displaydoc = "0.2.5"
 noak = { version = "0.6.3", git = "https://github.com/purplesyringa/noak" }
 rustc-hash = "2.1.1"
 thiserror = "2.0.12"
+tikv-jemallocator = "0.6"
 
 [profile.release]
 debug = true
