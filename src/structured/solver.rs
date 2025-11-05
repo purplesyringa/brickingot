@@ -217,26 +217,12 @@ pub fn satisfy_block_requirements(
     //     -->          ...and is then forwarded via `break` in the inner block
     // We rewrite such requirements on the fly.
     //
-    // While jumps are independent, `try` blocks and jumps from `catch`es aren't, meaning that we
-    // want to retain nesting order in some cases. For example,
-    //     block #1 {
-    //         try #2 {
-    //             f();
-    //         } catch {
-    //             continue #1;
-    //         }
-    //     }
-    // is valid, while
-    //     try #1 {
-    //         block #2 {
-    //             f();
-    //         }
-    //     } catch {
-    //         continue #2;
-    //     }
-    // isn't, even though the ranges of `block` and `try` requirements are the same. We force the
-    // jump in `continue` to be lowered before attempting to lower `try`. In addition, the order in
-    // which `catch` closures match types matters since one catch a subclass of the other.
+    // This guarantees that blocks are only as small as they have to be, which typically coincides
+    // with the locations of the control flow structures we're trying to decode. There's a "but":
+    // conditions of `if` and `while`, as well as the initialization statement of a `for`, can be
+    // located outside the block. This works out fine anyway due to inlining.
+    //
+    // `try` blocks make this significantly more complicated, but we'll discuss that later.
 
     // Many data structures here are indexed by statement ID, and we don't want to waste cache on
     // whitespace. Unfortunately, we can't utilize basic blocks for this at this point, since we
@@ -351,102 +337,130 @@ impl Treeificator {
     }
 
     fn build_single_block(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
+        // By the time this function is entered, no jumps or `try` regions cover the range strictly.
+
         // The goal here is to handle enough requirements to let a new gap appear within the range.
+        // Typically, that's easy: just creating a new block covering `range` resolves all jumps
+        // targeting `range.start` and `range.end`, which suffices in all situations except for
+        // head-to-head collisions. This works because a single block can handle multiple jumps, and
+        // in a tail-to-tail collision we don't need to choose between extending one jump or the
+        // other, since we're only creating one block.
+        //
+        // `try` blocks make this trickier. If we see both a `try` requirement and a jump
+        // requirement, we need to choose which one to resolve first.
+        let try_range_start = self.tries_to[range.end]
+            .last()
+            .map(|&req_id| self.reqs[req_id].range.start);
 
-        // By the time this function is entered, no jumps cover the range strictly.
-
-        // Create a block, ostensibly for jumps.
-        let block_id = self.next_block_id;
-        self.next_block_id += 1;
-        let mut found_jumps = false;
-
-        // Handle simple jumps.
-        for req_id in self.backward_jumps_to[range.start].drain(..) {
-            if self.imps[req_id].is_some() {
-                // Already discharged during head-to-head collision resolution.
-                continue;
-            }
-            self.req_cover
-                .remove_segment(self.reqs[req_id].range.clone());
-            self.imps[req_id] = Some(RequirementImplementation::Continue { block_id });
-            found_jumps = true;
-        }
-        for req_id in self.forward_jumps_to[range.end].drain(..) {
-            let range = self.reqs[req_id].range.clone();
-            self.req_cover.remove_segment(range.clone());
-            self.forward_or_try_req_cover.remove_segment(range);
-            self.imps[req_id] = Some(RequirementImplementation::Break { block_id });
-            found_jumps = true;
-        }
-
-        // Recognize backward jumps forming head-to-head collisions that need to be resolved via
-        // this block.
-        if let Some(forward_gap) = self.forward_or_try_req_cover.first_gap(range.clone()) {
-            let mut backward_jumps = core::mem::take(&mut self.backward_jumps);
-            for req_id in backward_jumps.drain_containing(forward_gap) {
-                if self.imps[req_id].is_some() {
-                    // Either extracted twice or already removed.
-                    continue;
-                }
-                // Implement this jump with a jump to the dispatcher.
-                self.req_cover
-                    .remove_segment(self.reqs[req_id].range.clone());
-                self.imps[req_id] =
-                    Some(self.add_dispatch(block_id, range.start, self.reqs[req_id].range.start));
-                found_jumps = true;
-            }
-            self.backward_jumps = backward_jumps;
-        }
-
-        if found_jumps {
-            out.push(Node::Block {
-                id: block_id,
-                children: self.build_list(range),
-            });
+        // A `try` block covering the whole range has priority over normal blocks. This ensures that
+        // loops beginning at the start of the `try` region are decoded correctly, and less commonly
+        // that the `catch` body can be inlined, since it follows `try` immediately instead of
+        // sandwiching `} block #n`.
+        if try_range_start == Some(range.start) {
+            self.add_try_block(range, out);
             return;
         }
 
-        // Look for `try` blocks only after greedily matching jumps. This guarantees that `try`
-        // blocks are always nested within normal blocks if their nesting order is indeterminate,
-        // which is necessary for correct backward jump handling.
-        //
-        // It also guarantees that `try` blocks are only as small as necessary. Had we swapped this
-        // around, `try` with `continue` within a loop would get extended to span the whole loop,
-        // creating a mess.
-        //
-        // There is a small issue here, though. Loops at the beginning of `try` will be decoded as
-        //     block #1 {
-        //         try #2 {
-        //             ...
-        //             continue #1;
-        //             ...
-        //         } catch { ... }
+        // If a `try` block is present, but doesn't start at `range.start`, then the correct
+        // behavior depends on what exactly makes `range.start + 1` a non-gap. If it's a backward
+        // jump, we need to emit a block handling that backward jump:
+        //     while (true) {         block
+        //         a;                   ^
+        //         try {                |
+        //             b;               | |
+        //             if (cond) {      | |
+        //                 continue;    | |
+        //             }                  |
+        //             c;                 v
+        //         } catch {}            try
+        //         break;
         //     }
-        // instead of
-        //    try #1 {
-        //         block #2 {
-        //             ...
-        //             continue #2;
-        //             ...
-        //         }
-        //         ...
-        //     } catch { ... }
-        // It's not that big of a deal, since we have to deal with this for nested loops anyway, but
-        // it's good to keep in mind.
-        //
-        // We only take out the largest `try` block here, since smaller ones ending at the same
-        // location cannot really be easily implemented with the same `try`, unlike with forward
-        // jumps. The `try` block is thus only extended as much as necessary if it has multiple
-        // entries.
+        //          ----------------> try
+        //     <---------------       jump
+        let mut found_jumps = self.resolve_backward_jumps(range.start);
+        if found_jumps && try_range_start.is_some() {
+            // Notably, we still shouldn't resolve forward jumps even if we're creating a block,
+            // since those are logically located inside `try`.
+            self.add_normal_block(range, out);
+            return;
+        }
 
-        if let Some(req_id) = self.tries_to[range.end].last()
-            && let RequirementKind::Try {
-                with_backward_catch_jump: Some(jump_req_id),
-            } = self.reqs[*req_id].kind
+        // When javac generates a pattern-matching `switch`, it can wrap individual statements
+        // inside `case`s in `try` blocks with a common handler after the switch, i.e.:
+        //     switch { 1 => case1, 2 => case2, default => default }   | |  tries
+        //     case1: extract field                                    | |   |
+        //     ...                                                     v |   |
+        //     case2: extract field                                      |   | |
+        //     ...                                                       v   | |
+        //     default:                                               jumps  | |
+        //     ...                                                           v v
+        //     handle error
+        //          ----------------> try
+        //     --------------->       jump
+        // This means that if `range.start + 1` is a non-gap only due to forward jumps, `try` should
+        // be extended. This makes precomputed syntactic ranges obsolete, but never affects the
+        // nesting order.
+        if try_range_start.is_some() {
+            self.add_try_block(range, out);
+            return;
+        }
+
+        // If both situations occur, we generate `block for loop -> try -> block for switch`, even
+        // though `try -> block for both` would generate a smaller IR, since we can only parse `try`
+        // directly containing a `switch` as a pattern match.
+        //
+        // Note that, despite our best attempts, this does not guarantee that `catch` will be easy
+        // to inline. Since the bounds of a `catch` block are not stored in the bytecode, it's
+        // entirely possible that some blocks that were opened earlier get closed within the `catch`
+        // body, e.g. if `catch` contains a `continue` of an outer loop whose bounds are not
+        // otherwise represented, i.e. if it ends with `break`:
+        //     while (true) {
+        //         try {                         try
+        //             f1();                  ^   |
+        //             return;                |   v
+        //         } catch (Exception ex) {   |
+        //             f2();                  |
+        //             if (f3()) {            |
+        //                 continue;          |
+        //             }                    block
+        //             f4();
+        //         }
+        //         break;
+        //     }
+        // Another concern is that if this happens to a catch-all, we might be unable to decode
+        // a `finally` block, so inlining needs to be exceedingly greedy for this to work.
+
+        found_jumps |= self.resolve_forward_jumps(range.end);
+        found_jumps |= self.resolve_head_to_head_collisions(range.clone());
+        if found_jumps {
+            self.add_normal_block(range, out);
+            return;
+        }
+
+        // If there is nothing preventing a gap from appearing but there still isn't a gap, it must
+        // be a range of length 1.
+        assert_eq!(range.len(), 1, "failed to manifest a gap");
+        self.build_single_stmt(range.start, out);
+    }
+
+    fn add_try_block(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
+        let req_id = *self.tries_to[range.end].last().expect("missing try");
+        let try_range = &self.reqs[req_id].range;
+        assert_eq!(try_range.end, range.end, "unexpected try end");
+
+        let block_id = self.next_block_id;
+        self.next_block_id += 1;
+
+        // We want to generate a `try` block here. If `catch` wants to perform a backward jump, this
+        // is the last chance to generate a block for that.
+        //
+        // Note that the created block exclusively resolves this jump and not any others. This
+        // ensures that structures inside `try` that touch on one of the edges stay inside `try`.
+        if let RequirementKind::Try {
+            with_backward_catch_jump: Some(jump_req_id),
+        } = self.reqs[req_id].kind
             && self.imps[jump_req_id].is_none()
         {
-            // If the backward jump from `catch` hasn't been implemented yet, emit a block for it
-            // right now, since this is the last chance to generate it outside `try`.
             let BlockRequirement {
                 range: jump_range,
                 kind: RequirementKind::BackwardJump,
@@ -479,28 +493,88 @@ impl Treeificator {
             return;
         }
 
-        if let Some(req_id) = self.tries_to[range.end].pop() {
-            let try_range = self.reqs[req_id].range.clone();
-            self.req_cover.remove_segment(try_range.clone());
-            self.forward_or_try_req_cover
-                .remove_segment(try_range.clone());
-            self.imps[req_id] = Some(RequirementImplementation::Try { block_id });
-            out.push(Node::Try {
-                id: block_id,
-                children: self.build_list(range),
+        self.tries_to[range.end].pop();
+        self.req_cover.remove_segment(try_range.clone());
+        self.forward_or_try_req_cover
+            .remove_segment(try_range.clone());
+        self.imps[req_id] = Some(RequirementImplementation::Try { block_id });
+        out.push(Node::Try {
+            id: block_id,
+            children: self.build_list(range),
+        });
+    }
+
+    fn add_normal_block(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
+        out.push(Node::Block {
+            id: self.next_block_id,
+            children: self.build_list(range),
+        });
+        self.next_block_id += 1;
+    }
+
+    fn resolve_backward_jumps(&mut self, to: usize) -> bool {
+        let mut found_jumps = false;
+        for req_id in self.backward_jumps_to[to].drain(..) {
+            if self.imps[req_id].is_some() {
+                // Already discharged during head-to-head collision resolution.
+                continue;
+            }
+            self.req_cover
+                .remove_segment(self.reqs[req_id].range.clone());
+            self.imps[req_id] = Some(RequirementImplementation::Continue {
+                block_id: self.next_block_id,
             });
-            return;
+            found_jumps = true;
         }
+        found_jumps
+    }
 
-        // If there is nothing preventing a gap from appearing but there still isn't a gap, it must
-        // be a range of length 1.
-        assert_eq!(range.len(), 1, "failed to manifest a gap");
+    fn resolve_forward_jumps(&mut self, to: usize) -> bool {
+        let mut found_jumps = false;
+        for req_id in self.forward_jumps_to[to].drain(..) {
+            let range = self.reqs[req_id].range.clone();
+            self.req_cover.remove_segment(range.clone());
+            self.forward_or_try_req_cover.remove_segment(range);
+            self.imps[req_id] = Some(RequirementImplementation::Break {
+                block_id: self.next_block_id,
+            });
+            found_jumps = true;
+        }
+        found_jumps
+    }
 
-        // We don't need to create any block, so free up the block ID. This is not necessary, but it
-        // slightly simplifies the resulting IR for debugging.
-        self.next_block_id -= 1;
+    fn resolve_head_to_head_collisions(&mut self, range: Range<usize>) -> bool {
+        // Recognize backward jumps forming head-to-head collisions that need to be resolved via
+        // this block.
+        let Some(forward_gap) = self.forward_or_try_req_cover.first_gap(range.clone()) else {
+            return false;
+        };
 
-        if let Some(dispatcher) = self.dispatcher_at_stmt.remove(&range.start)
+        let mut found_jumps = false;
+
+        let mut backward_jumps = core::mem::take(&mut self.backward_jumps);
+        for req_id in backward_jumps.drain_containing(forward_gap) {
+            if self.imps[req_id].is_some() {
+                // Either extracted twice or already removed.
+                continue;
+            }
+            // Implement this jump with a jump to the dispatcher.
+            self.req_cover
+                .remove_segment(self.reqs[req_id].range.clone());
+            self.imps[req_id] = Some(self.add_dispatch(
+                self.next_block_id,
+                range.start,
+                self.reqs[req_id].range.start,
+            ));
+            found_jumps = true;
+        }
+        self.backward_jumps = backward_jumps;
+
+        found_jumps
+    }
+
+    fn build_single_stmt(&mut self, pos: usize, out: &mut Vec<Node>) {
+        if let Some(dispatcher) = self.dispatcher_at_stmt.remove(&pos)
             && !dispatcher.known_targets.is_empty()
         {
             // `switch` arms should be sorted by target so that they can be inlined. Allocating
@@ -515,7 +589,7 @@ impl Treeificator {
 
         out.push(Node::Linear {
             // Decompress coordinates
-            stmt_range: self.used_indices[range.start]..self.used_indices[range.end],
+            stmt_range: self.used_indices[pos]..self.used_indices[pos + 1],
         });
     }
 
