@@ -273,10 +273,10 @@ impl<'code> Structurizer<'_, 'code> {
 
         match *imp {
             RequirementImplementation::Break { block_id } => {
-                out.push(Statement::Break { index, block_id })
+                out.push(Statement::Break { index, block_id });
             }
             RequirementImplementation::Continue { block_id } => {
-                out.push(Statement::Continue { index, block_id })
+                out.push(Statement::Continue { index, block_id });
             }
             RequirementImplementation::ContinueToDispatcher { block_id, selector } => {
                 out.push(Statement::Basic {
@@ -286,10 +286,10 @@ impl<'code> Structurizer<'_, 'code> {
                         value: self.arena.int(selector),
                     },
                 });
-                out.push(Statement::Continue { index, block_id })
+                out.push(Statement::Continue { index, block_id });
             }
             RequirementImplementation::Try { .. } => {
-                panic!("jump cannot be implemented with try")
+                panic!("jump cannot be implemented with try");
             }
         }
     }

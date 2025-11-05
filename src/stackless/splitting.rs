@@ -165,7 +165,7 @@ impl<'a> Merger<'a> {
         // We want to merge `use_expr_id` with *all* definitions of the same variable within `try`
         // blocks that use this BB as the handler, since code may throw e.g. `VirtualMachineError`
         // at any point. In other words, we want to add a task for each BB contained within any
-        // range in `eh_entry_for_bb_ranges`. But that would be superquadratic, so to maintain
+        // range in `eh_entry_for_bb_ranges`. But that would be superquadratic, so to preserve
         // reasonable time complexity, we maintain a per-variable auxiliary range map that contains
         // information about BB ranges that have already been handled.
         let map = self.try_ranges_per_variable.entry(name).or_default();

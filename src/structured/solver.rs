@@ -151,11 +151,11 @@ pub fn compute_block_requirements(
             // to force the jump to be handled before `try` regardless of apparent nesting.
             //
             // A special variation of this problem arises if the handler is inside `try`. It seems
-            // like it's be reasonable to split `try` into two parts and handle them separately.
-            // However, this causes as problem: if there's another `try` block that crosses
-            // `target`, we're be unable to codegen the outer `try` corresponding to range
-            // `target..end` without extending it, and the act of extension would just bring us back
-            // to square one. This forces us to emit a single `try` even if it's less pretty.
+            // like it'd be reasonable to split `try` into two parts and handle them separately.
+            // However, this causes a problem: if there's another `try` block that crosses `target`,
+            // we're be unable to codegen the outer `try` corresponding to range `target..end`
+            // without extending it, and the act of extension would just bring us back to square
+            // one. This forces us to emit a single `try` even if it's less pretty.
             let jump_req_id = requirements.len();
             requirements.push((
                 RequirementKey::BackwardCatch { handler_index },
@@ -241,7 +241,7 @@ pub fn satisfy_block_requirements(
     // Many data structures here are indexed by statement ID, and we don't want to waste cache on
     // whitespace. Unfortunately, we can't utilize basic blocks for this at this point, since we
     // might want to make blocks that cover the terminators of a basic block, but not the basic
-    // block in its entirety, and operating on BBs does not allow that.
+    // block in its entirety, and operating on BB granularity does not allow that.
     let mut used_indices: Vec<usize> = [0, program_len]
         .into_iter()
         .chain(
@@ -250,7 +250,7 @@ pub fn satisfy_block_requirements(
                 .flat_map(|req| [req.range.start, req.range.end]),
         )
         .collect();
-    used_indices.sort();
+    used_indices.sort_unstable();
     used_indices.dedup();
     for req in &mut block_requirements {
         req.range.start = used_indices.binary_search(&req.range.start).unwrap();
@@ -363,7 +363,7 @@ impl Treeificator {
         // Handle simple jumps.
         for req_id in self.backward_jumps_to[range.start].drain(..) {
             if self.imps[req_id].is_some() {
-                // Already discharged during head-to-head collision resolving.
+                // Already discharged during head-to-head collision resolution.
                 continue;
             }
             self.req_cover
