@@ -20,7 +20,7 @@ pub struct ExceptionHandler<'code> {
     pub target: usize,              // BB ID
     pub class: Option<Str<'code>>,
     is_reachable: bool,
-    /// Whether there is a throwing reachable BB either in `target..end`.
+    /// Whether there is a throwing reachable BB in `target..end`.
     has_throwing_reachable_bb_in_tail: bool,
 }
 
@@ -326,7 +326,7 @@ pub fn extract_basic_blocks<'code>(
     exception_handlers.retain(|handler| handler.is_reachable);
     // Truncate exception handlers associated with malformed `finally`.
     for handler in &mut exception_handlers {
-        if !handler.has_throwing_reachable_bb_in_tail {
+        if handler.target < handler.active_range.end && !handler.has_throwing_reachable_bb_in_tail {
             handler.active_range.end = handler.target;
         }
     }
