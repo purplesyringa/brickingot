@@ -102,12 +102,11 @@ impl<'code> DebugIr<'code> for CatchHandler<'code> {
             self.class
                 .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
         )?;
-        writeln!(f, ") {{")?;
+        write!(f, ") {{ ")?;
         if let Some(stmt) = &self.body.stack0_exception0_copy {
-            writeln!(f, "{}", arena.debug(stmt))?;
+            write!(f, "{} ", arena.debug(stmt))?;
         }
-        writeln!(f, "goto {}", self.body.jump_target)?;
-        write!(f, "}}")
+        write!(f, "goto {} }}", self.body.jump_target)
     }
 }
 
