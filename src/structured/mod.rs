@@ -6,6 +6,7 @@ mod structurizer;
 pub use self::structurizer::structure_control_flow;
 use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
 use alloc::fmt;
+use core::ops::Range;
 use noak::MStr;
 
 #[derive(Debug)]
@@ -43,6 +44,7 @@ pub enum Statement<'code> {
     },
     TryCatch {
         try_children: Vec<Statement<'code>>,
+        active_index_ranges: Vec<Range<usize>>,
         class: Option<Str<'code>>,
         catch_children: Vec<Statement<'code>>,
     },
@@ -114,6 +116,7 @@ impl<'code> DebugIr<'code> for Statement<'code> {
 
             Self::TryCatch {
                 try_children,
+                active_index_ranges,
                 class,
                 catch_children,
             } => {
@@ -123,8 +126,9 @@ impl<'code> DebugIr<'code> for Statement<'code> {
                 }
                 writeln!(
                     f,
-                    "}} catch ({}) {{",
+                    "}} catch ({} in {:?}) {{",
                     class.unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
+                    active_index_ranges,
                 )?;
                 for child in catch_children {
                     writeln!(f, "{}", arena.debug(child))?;

@@ -147,6 +147,7 @@ impl<'code> Structurizer<'_, 'code> {
 
                 out.push(Statement::TryCatch {
                     try_children: self.emit_tree(children),
+                    active_index_ranges: handler.active_ranges,
                     class: handler.class,
                     catch_children,
                 });
