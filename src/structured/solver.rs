@@ -505,11 +505,13 @@ impl Treeificator {
     }
 
     fn add_normal_block(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
+        let block_id = self.next_block_id;
+        self.next_block_id += 1;
+
         out.push(Node::Block {
-            id: self.next_block_id,
+            id: block_id,
             children: self.build_list(range),
         });
-        self.next_block_id += 1;
     }
 
     fn resolve_backward_jumps(&mut self, to: usize) -> bool {
