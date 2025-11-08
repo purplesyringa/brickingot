@@ -8,7 +8,7 @@ mod str;
 pub use self::arena::{Arena, ExprId};
 pub use self::debug::DebugIr;
 pub use self::expression::*;
-pub use self::statement::{BasicStatement, Catch, IrDef, NoMeta, Statement, StmtList, StmtMeta};
+pub use self::statement::{BasicStatement, Catch, IrDef, Statement, StmtList, StmtMeta};
 pub use self::str::{Str, String};
 
 impl BasicStatement {

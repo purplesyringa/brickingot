@@ -2,7 +2,7 @@ mod inlining;
 mod main_opt;
 
 use self::main_opt::optimize;
-use crate::ast::{Arena, IrDef, NoMeta, StmtList};
+use crate::ast::{Arena, IrDef, StmtList};
 use crate::exceptions;
 use alloc::fmt;
 
@@ -10,33 +10,10 @@ pub struct Ir;
 
 impl IrDef for Ir {
     type Meta = Meta;
-    type BasicMeta = NoMeta;
-    type BlockMeta = NoMeta;
-    type ContinueMeta = NoMeta;
-    type BreakMeta = NoMeta;
     type IfMeta = IfMeta;
-    type SwitchMeta = NoMeta;
-    type TryMeta = NoMeta;
-    type CatchMeta = crate::ast::NoMeta;
 }
 
 pub type Program = StmtList<Ir>;
-
-#[derive(Debug)]
-pub struct IfMeta {
-    // We use this to reorder statements closer to source without patching `condition`, since we may
-    // need to invert it multiple times, and flicking a bool is simpler.
-    condition_inverted: bool,
-}
-
-impl fmt::Display for IfMeta {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.condition_inverted {
-            write!(f, "inverted ")?;
-        }
-        Ok(())
-    }
-}
 
 #[derive(Debug, Default)]
 pub struct Meta {
@@ -49,6 +26,22 @@ impl fmt::Display for Meta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_divergent {
             write!(f, "!divergent ")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct IfMeta {
+    // We use this to reorder statements closer to source without patching `condition`, since we may
+    // need to invert it multiple times, and flicking a bool is simpler.
+    condition_inverted: bool,
+}
+
+impl fmt::Display for IfMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.condition_inverted {
+            write!(f, "inverted ")?;
         }
         Ok(())
     }

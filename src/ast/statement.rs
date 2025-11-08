@@ -33,13 +33,13 @@ impl MetaDef for NoMeta {
 
 pub trait IrDef {
     type Meta: MetaDef = NoMeta;
-    type BasicMeta: MetaDef = !;
-    type BlockMeta: MetaDef = !;
-    type ContinueMeta: MetaDef = !;
-    type BreakMeta: MetaDef = !;
-    type IfMeta: MetaDef = !;
-    type SwitchMeta: MetaDef = !;
-    type TryMeta: MetaDef = !;
+    type BasicMeta: MetaDef = NoMeta;
+    type BlockMeta: MetaDef = NoMeta;
+    type ContinueMeta: MetaDef = NoMeta;
+    type BreakMeta: MetaDef = NoMeta;
+    type IfMeta: MetaDef = NoMeta;
+    type SwitchMeta: MetaDef = NoMeta;
+    type TryMeta: MetaDef = NoMeta;
     type CatchMeta: MetaDef = NoMeta;
 }
 

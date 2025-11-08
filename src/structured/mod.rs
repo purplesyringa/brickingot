@@ -4,7 +4,7 @@ mod solver;
 mod structurizer;
 
 pub use self::structurizer::structure_control_flow;
-use crate::ast::{IrDef, NoMeta, StmtList};
+use crate::ast::{IrDef, StmtList};
 use core::ops::Range;
 use displaydoc::Display;
 
@@ -12,12 +12,9 @@ pub struct Ir;
 
 impl IrDef for Ir {
     type BasicMeta = IndexMeta;
-    type BlockMeta = NoMeta;
     type ContinueMeta = IndexMeta;
     type BreakMeta = IndexMeta;
-    type IfMeta = NoMeta;
     type SwitchMeta = IndexMeta;
-    type TryMeta = NoMeta;
     type CatchMeta = CatchMeta;
 }
 
