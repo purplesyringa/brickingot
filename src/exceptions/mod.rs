@@ -4,6 +4,7 @@ mod parse;
 pub use self::parse::parse_try_blocks;
 use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str};
 use alloc::fmt;
+use core::ops::Range;
 use noak::MStr;
 
 #[derive(Debug)]
@@ -44,6 +45,7 @@ pub enum Statement<'code> {
 pub struct Catch<'code> {
     pub class: Option<Str<'code>>,
     pub children: Vec<Statement<'code>>,
+    active_index_ranges: Vec<Range<usize>>,
 }
 
 impl<'code> DebugIr<'code> for Program<'code> {
@@ -109,10 +111,11 @@ impl<'code> DebugIr<'code> for Statement<'code> {
                 for catch in catches {
                     writeln!(
                         f,
-                        "}} catch ({}) {{",
+                        "}} catch ({} in {:?}) {{",
                         catch
                             .class
                             .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
+                        catch.active_index_ranges,
                     )?;
                     for child in &catch.children {
                         writeln!(f, "{}", arena.debug(child))?;
