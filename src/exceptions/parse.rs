@@ -1,5 +1,5 @@
-use super::{CatchMeta, Ir, Program};
-use crate::ast::{Catch, Statement, StmtList};
+use super::{AnalysisBlockMeta, AnalysisIr, AnalysisMeta, Ir, Program};
+use crate::ast::{BasicStatement, Catch, Statement, StmtList, StmtMeta};
 use crate::structured;
 use core::cell::Cell;
 use rustc_hash::FxHashSet;
@@ -9,15 +9,15 @@ pub fn parse_try_blocks(ir: structured::Program) -> Program {
     // - Inline tails into `catch`.
     // - Recognize every `catch (...)` that looks like `finally`.
 
+    // Exits from `try` occur either on `return`, or on `break`/`continue` to a block outside `try`.
+    // `finally` statements directly precede this statement.
+
     let mut analyzer = Analyzer {
         blocks_with_breaks: FxHashSet::default(),
     };
-    analyzer.handle_stmt_list(&ir);
+    let ir = analyzer.handle_stmt_list(ir).0;
 
-    let catch_inliner = CatchInliner {
-        blocks_with_breaks: analyzer.blocks_with_breaks,
-    };
-    catch_inliner.handle_stmt_list(ir, None).0
+    Transformer.handle_stmt_list(ir, None, None, 0)
 }
 
 struct Analyzer {
@@ -25,160 +25,274 @@ struct Analyzer {
 }
 
 impl Analyzer {
-    fn handle_stmt_list(&mut self, stmts: &[Statement<structured::Ir>]) {
-        for stmt in stmts {
-            self.handle_stmt(stmt);
-        }
-    }
-
-    fn handle_stmt(&mut self, stmt: &Statement<structured::Ir>) {
-        match stmt {
-            Statement::Basic { .. } => {}
-            Statement::Block { children, .. } => self.handle_stmt_list(children),
-            Statement::Continue { .. } => {}
-            Statement::Break { block_id, .. } => {
-                self.blocks_with_breaks.insert(*block_id);
-            }
-            Statement::If { then_children, .. } => self.handle_stmt_list(then_children),
-            Statement::Switch { arms, .. } => {
-                for (_, children) in arms {
-                    self.handle_stmt_list(children);
-                }
-            }
-            Statement::Try {
-                try_children,
-                catches,
-                finally_children,
-                ..
-            } => {
-                self.handle_stmt_list(try_children);
-                for catch in catches {
-                    self.handle_stmt_list(&catch.children);
-                }
-                self.handle_stmt_list(finally_children);
-            }
-        }
-    }
-}
-
-struct CatchInliner {
-    blocks_with_breaks: FxHashSet<usize>,
-}
-
-/// A linked list of reversed vectors of statements that are known to be executed by fallthrough
-/// after the current statement, and *only* by that fallthrough. The statements always directly
-/// follow the current statement without skipping any statements.
-///
-/// This has a weird data structure, but it's forced by lifetimes.
-struct TailNode<'a> {
-    list: &'a Cell<StmtList<Ir>>,
-    is_divergent: bool,
-    next: Tail<'a>,
-}
-
-type Tail<'a> = Option<&'a TailNode<'a>>;
-
-struct Meta {
-    is_divergent: bool,
-}
-
-impl CatchInliner {
     fn handle_stmt_list(
-        &self,
+        &mut self,
         stmts: StmtList<structured::Ir>,
-        tail: Tail<'_>,
-    ) -> (StmtList<Ir>, Meta) {
-        let mut out = Vec::with_capacity(stmts.len());
-        let mut is_divergent = false;
-        for stmt in stmts.into_iter().rev() {
-            let (stmt, stmt_meta) = self.handle_stmt(
-                stmt,
-                Some(&TailNode {
-                    list: Cell::from_mut(&mut out),
-                    is_divergent,
-                    next: tail,
-                }),
-            );
-            // Adjust `is_divergent` after each iteration, since the recursive call could have
-            // consumed `out`.
-            if out.is_empty() {
-                is_divergent = stmt_meta.is_divergent;
-            }
-            out.push(stmt);
-        }
-        if out.is_empty() {
-            is_divergent = false;
-        }
-        out.reverse();
-        (out, Meta { is_divergent })
+    ) -> (StmtList<AnalysisIr>, AnalysisMeta) {
+        let mut meta = AnalysisMeta {
+            measure: 1,
+            is_divergent: false,
+        };
+        let out = stmts
+            .into_iter()
+            .map(|stmt| self.handle_stmt(stmt))
+            .inspect(|stmt_meta| {
+                meta.measure += stmt_meta.meta.measure;
+                meta.is_divergent = stmt_meta.meta.is_divergent;
+            })
+            .collect();
+        (out, meta)
     }
 
-    fn handle_stmt(
-        &self,
-        stmt: Statement<structured::Ir>,
-        tail: Tail<'_>,
-    ) -> (Statement<Ir>, Meta) {
+    fn handle_stmt(&mut self, stmt: Statement<structured::Ir>) -> StmtMeta<AnalysisIr> {
         match stmt {
             Statement::Basic { stmt, .. } => {
-                let is_divergent = stmt.is_divergent();
-                (Statement::basic(stmt), Meta { is_divergent })
+                let meta = AnalysisMeta {
+                    measure: 1,
+                    is_divergent: stmt.is_divergent(),
+                };
+                StmtMeta {
+                    stmt: Statement::basic(stmt),
+                    meta,
+                }
             }
 
             Statement::Block { id, children, .. } => {
-                let has_break = self.blocks_with_breaks.contains(&id);
-                let (children, meta) =
-                    self.handle_stmt_list(children, if has_break { None } else { tail });
-                (
-                    Statement::block(id, children),
-                    Meta {
-                        is_divergent: meta.is_divergent && !has_break,
+                let (children, mut meta) = self.handle_stmt_list(children);
+                let has_break = self.blocks_with_breaks.remove(&id);
+                meta.is_divergent &= !has_break;
+                StmtMeta {
+                    stmt: Statement::Block {
+                        id,
+                        children,
+                        meta: AnalysisBlockMeta { has_break },
                     },
-                )
+                    meta,
+                }
             }
 
-            Statement::Continue { block_id, .. } => {
-                (Statement::continue_(block_id), Meta { is_divergent: true })
-            }
+            Statement::Continue { block_id, .. } => StmtMeta {
+                stmt: Statement::continue_(block_id),
+                meta: AnalysisMeta {
+                    measure: 1,
+                    is_divergent: true,
+                },
+            },
 
             Statement::Break { block_id, .. } => {
-                (Statement::break_(block_id), Meta { is_divergent: true })
+                self.blocks_with_breaks.insert(block_id);
+                StmtMeta {
+                    stmt: Statement::break_(block_id),
+                    meta: AnalysisMeta {
+                        measure: 1,
+                        is_divergent: true,
+                    },
+                }
             }
 
             Statement::If {
                 condition,
                 then_children,
+                else_children,
                 ..
-            } => (
-                Statement::if_(
-                    condition,
-                    self.handle_stmt_list(then_children, None).0,
-                    Vec::new(),
+            } => {
+                let (then_children, mut meta) = self.handle_stmt_list(then_children);
+                assert!(
+                    else_children.is_empty(),
+                    "shouldn't have anything in else yet",
+                );
+                meta.is_divergent = false; // `else` is empty
+                StmtMeta {
+                    stmt: Statement::if_(condition, then_children, Vec::new()),
+                    meta,
+                }
+            }
+
+            Statement::Switch { id, key, arms, .. } => {
+                let mut meta = AnalysisMeta {
+                    measure: 1,
+                    is_divergent: false,
+                };
+                let arms = arms
+                    .into_iter()
+                    .map(|(value, children)| {
+                        let (arm_stmts, arm_meta) = self.handle_stmt_list(children);
+                        meta.measure += arm_meta.measure;
+                        meta.is_divergent = arm_meta.is_divergent;
+                        (value, arm_stmts)
+                    })
+                    .collect();
+                let has_break = self.blocks_with_breaks.remove(&id);
+                meta.is_divergent &= !has_break;
+                StmtMeta {
+                    stmt: Statement::switch(id, key, arms),
+                    meta,
+                }
+            }
+
+            Statement::Try {
+                try_children,
+                catches,
+                ..
+            } => {
+                let mut meta = AnalysisMeta {
+                    measure: 1,
+                    is_divergent: false,
+                };
+
+                let (try_children, try_meta) = self.handle_stmt_list(try_children);
+                meta.measure += try_meta.measure;
+                meta.is_divergent = try_meta.is_divergent;
+
+                let catches = catches
+                    .into_iter()
+                    .map(|catch| {
+                        let (catch_stmts, catch_meta) = self.handle_stmt_list(catch.children);
+                        meta.measure += catch_meta.measure;
+                        meta.is_divergent &= catch_meta.is_divergent;
+                        Catch {
+                            class: catch.class,
+                            children: catch_stmts,
+                            meta: catch.meta,
+                        }
+                    })
+                    .collect();
+
+                StmtMeta {
+                    stmt: Statement::try_(try_children, catches, Vec::new()),
+                    meta,
+                }
+            }
+        }
+    }
+}
+
+struct Transformer;
+
+// A linked list with stack-allocated nodes. This is admittedly a weird data structure, but we can't
+// use vectors without `unsafe` here if we want `T` to contain references to locals.
+type LinkedList<'a, T> = Option<&'a LinkedListNode<'a, T>>;
+struct LinkedListNode<'a, T> {
+    value: T,
+    next: LinkedList<'a, T>,
+}
+
+// A list of iterators over statements that are known to be executed by fallthrough after the
+// current statement, and *only* by that fallthrough. The statements always directly follow the
+// current statement without skipping any statements, but may cross `} block #n` boundaries as long
+// the block is never broken from.
+type Tail<'a> = LinkedList<'a, TailNode<'a>>;
+struct TailNode<'a> {
+    // Logically `&mut`, but covariance forces using `&Cell`.
+    list: &'a Cell<alloc::vec::IntoIter<StmtMeta<AnalysisIr>>>,
+}
+
+// A list of open `try` blocks with finalizers.
+type Finalizers<'a> = LinkedList<'a, Finalizer<'a>>;
+struct Finalizer<'a> {
+    nested_in_block_id: usize,
+    body: &'a [StmtMeta<Ir>],
+}
+
+impl Transformer {
+    fn handle_stmt_list(
+        &self,
+        stmts: StmtList<AnalysisIr>,
+        tail: Tail<'_>,
+        finalizers: Finalizers<'_>,
+        nested_in_block_id: usize,
+    ) -> StmtList<Ir> {
+        // Scan for anything that looks similar to a finalizer.
+        //
+        // This should be done before we recurse into `stmts`, so that we compare unprocessed
+        // finalizers within `try` to the unprocessed finalizer in `finally`. Swapping the order
+        // would lead to comparing apples to oranges: not only would the typing be weird, it could
+        // also break isomorphism because `catch` contents could be inlined in the haystack, but not
+        // in the needle, or vice versa.
+        //
+        // In addition, comparing pre-inlining finalizers is much simpler than comparing
+        // post-inlining finalizers, since a pre-inlining finalizer is guaranteed to be directly
+        // followed by a `break`/`continue`/`return`, whereas for a post-inlining finalizer it might
+        // be located deep within the last statement.
+
+        for (i, stmt_meta) in stmts.iter().enumerate() {
+            let block_id = match stmt_meta.stmt {
+                Statement::Basic {
+                    stmt: BasicStatement::Return { .. } | BasicStatement::ReturnVoid,
+                    ..
+                } => 0,
+                Statement::Continue { block_id, .. } | Statement::Break { block_id, .. } => {
+                    block_id
+                }
+                _ => continue,
+            };
+            // Quitting to `block_id` -- expect to run finalizers from each exitted `try` block.
+        }
+
+        // Map the statements and inline into `catch`es present within `stmts`.
+        let mut out = Vec::with_capacity(stmts.len());
+        let mut it = stmts.into_iter();
+        while let Some(stmt) = it.next() {
+            out.push(self.handle_stmt(
+                stmt,
+                Some(&LinkedListNode {
+                    value: TailNode {
+                        list: Cell::from_mut(&mut it),
+                    },
+                    next: tail,
+                }),
+                finalizers,
+                nested_in_block_id,
+            ));
+        }
+        out
+    }
+
+    fn handle_stmt(
+        &self,
+        stmt_meta: StmtMeta<AnalysisIr>,
+        tail: Tail<'_>,
+        finalizers: Finalizers<'_>,
+        nested_in_block_id: usize,
+    ) -> Statement<Ir> {
+        match stmt_meta.stmt {
+            Statement::Basic { stmt, .. } => Statement::basic(stmt),
+
+            Statement::Block { id, children, meta } => Statement::block(
+                id,
+                self.handle_stmt_list(
+                    children,
+                    if meta.has_break { None } else { tail },
+                    finalizers,
+                    id,
                 ),
-                Meta {
-                    is_divergent: false, // `else` is convergent
-                },
+            ),
+
+            Statement::Continue { block_id, .. } => Statement::continue_(block_id),
+
+            Statement::Break { block_id, .. } => Statement::break_(block_id),
+
+            Statement::If {
+                condition,
+                then_children,
+                ..
+            } => Statement::if_(
+                condition,
+                self.handle_stmt_list(then_children, None, finalizers, nested_in_block_id),
+                Vec::new(),
             ),
 
             Statement::Switch { id, key, arms, .. } => {
-                let has_break = self.blocks_with_breaks.contains(&id);
-                let mut is_divergent = false;
                 let arms = arms
                     .into_iter()
-                    // Strictly speaking, it might not be `None` for the last arm, but we never
-                    // generate `try` inside `switch` cases on the previous passes so it doesn't
-                    // matter.
                     .map(|(value, children)| {
-                        let (children, meta) = self.handle_stmt_list(children, None);
-                        is_divergent = meta.is_divergent; // normally divergent iff the last case is
-                        (value, children)
+                        // Strictly speaking, it might not be `None` for the last arm, but we never
+                        // generate `try` inside `switch` cases on the previous passes so it doesn't
+                        // matter.
+                        (value, self.handle_stmt_list(children, None, finalizers, id))
                     })
                     .collect();
-                (
-                    Statement::switch(id, key, arms),
-                    Meta {
-                        is_divergent: is_divergent && !has_break,
-                    },
-                )
+                Statement::switch(id, key, arms)
             }
 
             Statement::Try {
@@ -186,53 +300,57 @@ impl CatchInliner {
                 mut catches,
                 ..
             } => {
-                let (try_children, try_meta) = self.handle_stmt_list(try_children, None);
-
                 assert_eq!(catches.len(), 1, "must have a single catch");
-                let catch = catches.pop().unwrap();
+                let mut catch = catches.pop().unwrap();
 
-                let (mut catch_children, mut catch_meta) =
-                    self.handle_stmt_list(catch.children, None);
-
-                if try_meta.is_divergent {
-                    // Inline tail. This can inline more than just the `catch` body: it can also
-                    // inline e.g. the iteration statement of a `for` loop.
+                let try_body_is_divergent = try_children
+                    .last()
+                    .is_some_and(|stmt_meta| stmt_meta.meta.is_divergent);
+                if try_body_is_divergent {
+                    // Inline tail. This can inline more than just the `catch` body, since it can
+                    // also inline e.g. the iteration statement of a `for` loop.
                     //
-                    // This is somewhat confusing, but ultimatley does not break any invariant. We
-                    // need to preserve the invariant that every *block* either has a `break` to it
-                    // or ends with something containing a `continue` to it, but we're inlining into
-                    // `catch`, not into a block.
-                    //
-                    // The loop decoder is prepared to deal with this mess, since it has to deal
-                    // with overinlining into an `if`'s `else` branch anyway.
+                    // This is somewhat confusing, but ultimately does not break any invariant. We
+                    // need every block to either have a `break` to it or to end with something
+                    // containing a `continue` to it, but we're inlining into `catch`, not into
+                    // a block. The loop decoder is prepared to deal with this mess, since it has to
+                    // deal with overinlining into an `if`'s `else` branch anyway.
                     let mut it = tail;
-                    while let Some(&TailNode {
-                        list,
-                        is_divergent,
+                    while let Some(&LinkedListNode {
+                        value: TailNode { list },
                         next,
                     }) = it
                     {
-                        catch_children.extend(list.take().into_iter().rev());
-                        catch_meta.is_divergent = is_divergent;
+                        catch.children.extend(list.take().into_iter().rev());
+                        // XXX: this can invalidate `catch.meta`, oh no, what do I do??? -- stupid ass bitch
                         it = next;
                     }
                 }
 
-                (
-                    Statement::try_(
-                        try_children,
-                        vec![Catch {
-                            class: catch.class,
-                            children: catch_children,
-                            meta: CatchMeta {
-                                active_index_ranges: catch.meta.active_index_ranges,
-                            },
-                        }],
-                        Vec::new(),
-                    ),
-                    Meta {
-                        is_divergent: try_meta.is_divergent && catch_meta.is_divergent,
-                    },
+                let try_children = self.handle_stmt_list(
+                    try_children,
+                    None,
+                    Some(&LinkedListNode {
+                        value: Finalizer {
+                            nested_in_block_id,
+                            body: &[], // FIXME
+                        },
+                        next: finalizers,
+                    }),
+                    nested_in_block_id,
+                );
+
+                let catch_children =
+                    self.handle_stmt_list(catch.children, None, finalizers, nested_in_block_id);
+
+                Statement::try_(
+                    try_children,
+                    vec![Catch {
+                        class: catch.class,
+                        children: catch_children,
+                        meta: catch.meta,
+                    }],
+                    Vec::new(),
                 )
             }
         }
