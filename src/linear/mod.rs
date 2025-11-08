@@ -12,8 +12,8 @@ pub struct Program<'code> {
     pub catch_handlers: Vec<CatchHandler<'code>>,
 }
 
-impl<'code> DebugIr<'code> for Program<'code> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+impl DebugIr for Program<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         for (stmt_index, stmt) in self.statements.iter().enumerate() {
             writeln!(f, "{stmt_index}: {}", arena.debug(stmt))?;
         }

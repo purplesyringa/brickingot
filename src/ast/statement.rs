@@ -4,7 +4,7 @@ use derive_where::derive_where;
 use noak::MStr;
 
 pub trait MetaDef: fmt::Debug {
-    type WithStmt<Ir: IrDef<Meta = Self>>: fmt::Debug + for<'code> DebugIr<'code>;
+    type WithStmt<Ir: IrDef<Meta = Self>>: fmt::Debug + DebugIr;
     fn display(&self) -> impl fmt::Display;
 }
 
@@ -195,14 +195,14 @@ impl<Ir: IrDef> Catch<Ir> {
     }
 }
 
-impl<'code, Ir: IrDef> DebugIr<'code> for StmtMeta<Ir> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+impl<Ir: IrDef> DebugIr for StmtMeta<Ir> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         write!(f, "{}{}", self.meta.display(), arena.debug(&self.stmt))
     }
 }
 
-impl<'code, Ir: IrDef> DebugIr<'code> for Statement<Ir> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+impl<Ir: IrDef> DebugIr for Statement<Ir> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         match self {
             Self::Basic { stmt, meta } => write!(f, "{}{}", meta.display(), arena.debug(stmt)),
             Self::Block { id, children, meta } => {
@@ -281,8 +281,8 @@ impl<'code, Ir: IrDef> DebugIr<'code> for Statement<Ir> {
     }
 }
 
-impl<'code> DebugIr<'code> for BasicStatement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+impl DebugIr for BasicStatement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         match self {
             Self::Assign { target, value } => {
                 write!(f, "{} = {};", arena.debug(target), arena.debug(value))

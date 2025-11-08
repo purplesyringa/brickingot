@@ -6,7 +6,7 @@ use crate::ast::{
 use crate::exceptions;
 use rustc_hash::FxHashMap;
 
-pub fn optimize<'code>(arena: &mut Arena<'code>, eh_ir: exceptions::Program) -> Program {
+pub fn optimize(arena: &mut Arena<'_>, eh_ir: exceptions::Program) -> Program {
     // This is a bit sketchy, but there shouldn't be any dead variable uses in the arena at this
     // point, and a single linear iteration is better than yet another tree walk. This assumption is
     // a little tricky to support, e.g. `stackless::splitting` has some special handling for this.
@@ -39,7 +39,7 @@ struct BlockInfo {
     n_continue_uses: usize,
 }
 
-impl<'code> Optimizer<'_, 'code> {
+impl Optimizer<'_, '_> {
     fn handle_stmt(
         &mut self,
         stmt: Statement<exceptions::Ir>,

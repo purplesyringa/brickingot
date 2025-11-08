@@ -99,8 +99,8 @@ pub enum Expression<'code> {
     },
 }
 
-impl<'code> DebugIr<'code> for Expression<'code> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+impl DebugIr for Expression<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         match self {
             Self::This => write!(f, "this"),
             Self::Argument { index } => write!(f, "arg{index}"),

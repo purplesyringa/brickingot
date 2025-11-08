@@ -93,7 +93,7 @@ struct Structurizer<'arena, 'code> {
     selector_version: Version,
 }
 
-impl<'code> Structurizer<'_, 'code> {
+impl Structurizer<'_, '_> {
     fn emit_tree(&mut self, tree: Vec<Node>) -> StmtList<Ir> {
         // This does not need to be exact, but it turns out that computing the size is better than
         // using a rough estimate just because we're hammering the allocator too much otherwise.

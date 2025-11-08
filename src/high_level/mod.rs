@@ -54,10 +54,7 @@ impl fmt::Display for Meta {
     }
 }
 
-pub fn decompile_cf_constructs<'code>(
-    arena: &mut Arena<'code>,
-    eh_ir: exceptions::Program,
-) -> Program {
+pub fn decompile_cf_constructs(arena: &mut Arena<'_>, eh_ir: exceptions::Program) -> Program {
     // The general approach here is to consider a high-level Java control flow construct, find the
     // properties that all of its lowerings are guaranteed to have, and tweak them such that either
     // there are no false positive matches, or all false positives are documented and can be

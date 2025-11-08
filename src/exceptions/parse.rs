@@ -24,7 +24,7 @@ struct Analyzer {
     blocks_with_breaks: FxHashSet<usize>,
 }
 
-impl<'code> Analyzer {
+impl Analyzer {
     fn handle_stmt_list(&mut self, stmts: &[Statement<structured::Ir>]) {
         for stmt in stmts {
             self.handle_stmt(stmt);
@@ -82,7 +82,7 @@ struct Meta {
     is_divergent: bool,
 }
 
-impl<'code> CatchInliner {
+impl CatchInliner {
     fn handle_stmt_list(
         &self,
         stmts: StmtList<structured::Ir>,

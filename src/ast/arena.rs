@@ -155,13 +155,13 @@ impl<'code> Arena<'code> {
         Version(self.null().0)
     }
 
-    pub fn debug<'a, T: DebugIr<'code> + ?Sized>(&'a self, value: &'a T) -> impl Display {
+    pub fn debug<'a, T: DebugIr + ?Sized>(&'a self, value: &'a T) -> impl Display {
         struct IrDisplay<'a, 'code, T: ?Sized> {
             value: &'a T,
             arena: &'a Arena<'code>,
         }
 
-        impl<'a, 'code, T: DebugIr<'code> + ?Sized> Display for IrDisplay<'a, 'code, T> {
+        impl<'a, 'code, T: DebugIr + ?Sized> Display for IrDisplay<'a, 'code, T> {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 T::fmt(self.value, f, self.arena)
             }
@@ -198,7 +198,7 @@ impl<'code> Arena<'code> {
     }
 }
 
-impl<'code> Drop for Arena<'code> {
+impl Drop for Arena<'_> {
     fn drop(&mut self) {
         for chunk_id in 5..32 {
             let mut ptr = self.chunks[chunk_id as usize - 5].get();
@@ -229,7 +229,7 @@ impl<'code> Index<ExprId> for Arena<'code> {
     }
 }
 
-impl<'code> IndexMut<ExprId> for Arena<'code> {
+impl IndexMut<ExprId> for Arena<'_> {
     fn index_mut(&mut self, id: ExprId) -> &mut Self::Output {
         unsafe { &mut *self.get_raw(id) }
     }

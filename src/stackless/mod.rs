@@ -17,8 +17,8 @@ pub struct Program<'code> {
     pub catch_handlers: Vec<CatchHandler<'code>>,
 }
 
-impl<'code> DebugIr<'code> for Program<'code> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+impl DebugIr for Program<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         for (bb_id, bb) in self.basic_blocks.iter().enumerate() {
             writeln!(f, "bb{bb_id}:")?;
             for stmt in &bb.statements {
@@ -46,8 +46,8 @@ pub enum Statement {
     },
 }
 
-impl<'code> DebugIr<'code> for Statement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+impl DebugIr for Statement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         match self {
             Self::Basic(stmt) => write!(f, "{}", arena.debug(stmt)),
             Self::Jump { condition, target } => {
@@ -93,8 +93,8 @@ pub struct CatchBody {
     pub jump_target: usize,
 }
 
-impl<'code> DebugIr<'code> for CatchHandler<'code> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'code>) -> fmt::Result {
+impl DebugIr for CatchHandler<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         write!(
             f,
             "try {{ {:?} }} catch ({}",
