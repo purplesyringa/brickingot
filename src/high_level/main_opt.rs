@@ -1,15 +1,12 @@
-use super::inlining::Inliner;
-use super::{Catch, Meta, Program, Statement, StmtList, StmtMeta};
+use super::{IfMeta, Ir, Meta, Program, inlining::Inliner};
 use crate::ast::{
-    Arena, BasicStatement, BinOp, ExprId, Expression, UnaryOp, VariableNamespace, Version,
+    Arena, BasicStatement, BinOp, Catch, ExprId, Expression, Statement, StmtList, StmtMeta,
+    UnaryOp, VariableNamespace, Version,
 };
 use crate::exceptions;
 use rustc_hash::FxHashMap;
 
-pub fn optimize<'code>(
-    arena: &mut Arena<'code>,
-    eh_ir: exceptions::Program<'code>,
-) -> Program<'code> {
+pub fn optimize<'code>(arena: &mut Arena<'code>, eh_ir: exceptions::Program) -> Program {
     // This is a bit sketchy, but there shouldn't be any dead variable uses in the arena at this
     // point, and a single linear iteration is better than yet another tree walk. This assumption is
     // a little tricky to support, e.g. `stackless::splitting` has some special handling for this.
@@ -22,14 +19,13 @@ pub fn optimize<'code>(
         }
     }
 
-    let statements = Optimizer {
+    Optimizer {
         arena,
         n_var_mentions,
         block_info: FxHashMap::default(),
     }
-    .handle_stmt_list(eh_ir.statements, None)
-    .0;
-    Program { statements }
+    .handle_stmt_list(eh_ir, None)
+    .0
 }
 
 struct Optimizer<'arena, 'code> {
@@ -46,36 +42,38 @@ struct BlockInfo {
 impl<'code> Optimizer<'_, 'code> {
     fn handle_stmt(
         &mut self,
-        stmt: exceptions::Statement<'code>,
+        stmt: Statement<exceptions::Ir>,
         fallthrough_breaks_from: Option<usize>,
-        out: &mut StmtList<'code>,
+        out: &mut StmtList<Ir>,
     ) {
         match stmt {
-            exceptions::Statement::Basic(stmt) => self.handle_basic_stmt(stmt, out),
+            Statement::Basic { stmt, .. } => self.handle_basic_stmt(stmt, out),
 
-            exceptions::Statement::Block { id, children } => {
+            Statement::Block { id, children, .. } => {
                 self.handle_block(id, children, fallthrough_breaks_from, out);
             }
 
-            exceptions::Statement::Continue { block_id } => self.handle_continue(block_id, out),
+            Statement::Continue { block_id, .. } => self.handle_continue(block_id, out),
 
-            exceptions::Statement::Break { block_id } => self.handle_break(block_id, out),
+            Statement::Break { block_id, .. } => self.handle_break(block_id, out),
 
-            exceptions::Statement::If {
+            Statement::If {
                 condition,
                 then_children,
+                ..
             } => {
                 self.handle_if(condition, then_children, fallthrough_breaks_from, out);
             }
 
-            exceptions::Statement::Switch { id, key, arms } => {
+            Statement::Switch { id, key, arms, .. } => {
                 self.handle_switch(id, key, arms, fallthrough_breaks_from, out);
             }
 
-            exceptions::Statement::Try {
+            Statement::Try {
                 try_children,
                 catches,
                 finally_children,
+                ..
             } => {
                 self.handle_try(
                     try_children,
@@ -88,7 +86,7 @@ impl<'code> Optimizer<'_, 'code> {
         }
     }
 
-    fn handle_basic_stmt(&mut self, mut stmt: BasicStatement, out: &mut StmtList<'code>) {
+    fn handle_basic_stmt(&mut self, mut stmt: BasicStatement, out: &mut StmtList<Ir>) {
         // Replace dead `valueN` assignments with computations and drop no-op computations. Dead
         // stack assignments have already been removed in `splitting`, which means that dead
         // `valueN`s have no uses whatsoever (except for the definition itself), so we don't have to
@@ -148,7 +146,7 @@ impl<'code> Optimizer<'_, 'code> {
             ..Meta::default()
         };
         out.push(StmtMeta {
-            stmt: Statement::Basic(stmt),
+            stmt: Statement::basic(stmt),
             meta,
         });
     }
@@ -156,9 +154,9 @@ impl<'code> Optimizer<'_, 'code> {
     fn handle_block(
         &mut self,
         id: usize,
-        children: Vec<exceptions::Statement<'code>>,
+        children: StmtList<exceptions::Ir>,
         fallthrough_breaks_from: Option<usize>,
-        out: &mut StmtList<'code>,
+        out: &mut StmtList<Ir>,
     ) {
         self.block_info.insert(
             id,
@@ -282,7 +280,7 @@ impl<'code> Optimizer<'_, 'code> {
         }
 
         out.push(StmtMeta {
-            stmt: Statement::Block { id, children },
+            stmt: Statement::block(id, children),
             meta: Meta {
                 is_divergent: meta.is_divergent && block_info.n_break_uses == 0,
                 ..Meta::default()
@@ -290,13 +288,13 @@ impl<'code> Optimizer<'_, 'code> {
         });
     }
 
-    fn handle_continue(&mut self, block_id: usize, out: &mut StmtList<'code>) {
+    fn handle_continue(&mut self, block_id: usize, out: &mut StmtList<Ir>) {
         self.block_info
             .get_mut(&block_id)
             .expect("missing block")
             .n_continue_uses += 1;
         out.push(StmtMeta {
-            stmt: Statement::Continue { block_id },
+            stmt: Statement::continue_(block_id),
             meta: Meta {
                 is_divergent: true,
                 ..Meta::default()
@@ -304,13 +302,13 @@ impl<'code> Optimizer<'_, 'code> {
         });
     }
 
-    fn handle_break(&mut self, block_id: usize, out: &mut StmtList<'code>) {
+    fn handle_break(&mut self, block_id: usize, out: &mut StmtList<Ir>) {
         self.block_info
             .get_mut(&block_id)
             .expect("missing block")
             .n_break_uses += 1;
         out.push(StmtMeta {
-            stmt: Statement::Break { block_id },
+            stmt: Statement::break_(block_id),
             meta: Meta {
                 is_divergent: true,
                 ..Meta::default()
@@ -321,17 +319,19 @@ impl<'code> Optimizer<'_, 'code> {
     fn handle_if(
         &mut self,
         condition: ExprId,
-        then_children: Vec<exceptions::Statement<'code>>,
+        then_children: StmtList<exceptions::Ir>,
         fallthrough_breaks_from: Option<usize>,
-        out: &mut StmtList<'code>,
+        out: &mut StmtList<Ir>,
     ) {
         let (then_children, _) = self.handle_stmt_list(then_children, fallthrough_breaks_from);
         out.push(StmtMeta {
             stmt: Statement::If {
                 condition,
-                condition_inverted: false,
                 then_children,
                 else_children: Vec::new(),
+                meta: IfMeta {
+                    condition_inverted: false,
+                },
             },
             meta: Meta {
                 is_divergent: false, // since `else` is empty
@@ -344,9 +344,9 @@ impl<'code> Optimizer<'_, 'code> {
         &mut self,
         id: usize,
         key: ExprId,
-        arms: Vec<(Option<i32>, Vec<exceptions::Statement<'code>>)>,
+        arms: Vec<(Option<i32>, StmtList<exceptions::Ir>)>,
         fallthrough_breaks_from: Option<usize>,
-        out: &mut StmtList<'code>,
+        out: &mut StmtList<Ir>,
     ) {
         if arms.is_empty() {
             // Not sure how this can possibly happen, but I'm not certain the bytecode forbids it,
@@ -391,7 +391,7 @@ impl<'code> Optimizer<'_, 'code> {
             .expect("missing block for switch");
 
         out.push(StmtMeta {
-            stmt: Statement::Switch { id, key, arms },
+            stmt: Statement::switch(id, key, arms),
             meta: Meta {
                 is_divergent: last_arm_is_divergent && block_info.n_break_uses == 0,
                 first_uninlined_switch_arm: 0,
@@ -402,11 +402,11 @@ impl<'code> Optimizer<'_, 'code> {
 
     fn handle_try(
         &mut self,
-        try_children: Vec<exceptions::Statement<'code>>,
-        catches: Vec<exceptions::Catch<'code>>,
-        finally_children: Vec<exceptions::Statement<'code>>,
+        try_children: StmtList<exceptions::Ir>,
+        catches: Vec<Catch<exceptions::Ir>>,
+        finally_children: StmtList<exceptions::Ir>,
         fallthrough_breaks_from: Option<usize>,
-        out: &mut StmtList<'code>,
+        out: &mut StmtList<Ir>,
     ) {
         let (try_children, try_meta) = self.handle_stmt_list(try_children, fallthrough_breaks_from);
         let mut is_divergent = try_meta.is_divergent;
@@ -416,10 +416,7 @@ impl<'code> Optimizer<'_, 'code> {
                 let (children, catch_meta) =
                     self.handle_stmt_list(catch.children, fallthrough_breaks_from);
                 is_divergent &= catch_meta.is_divergent;
-                Catch {
-                    class: catch.class,
-                    children,
-                }
+                Catch::new(catch.class, children)
             })
             .collect();
         // `finally` is not really part of control flow: it can be entered from any point and it
@@ -430,11 +427,7 @@ impl<'code> Optimizer<'_, 'code> {
         // `finally` is executed on every exit path in sequence after the previous code.
         is_divergent |= finally_meta.is_divergent;
         out.push(StmtMeta {
-            stmt: Statement::Try {
-                try_children,
-                catches,
-                finally_children,
-            },
+            stmt: Statement::try_(try_children, catches, finally_children),
             meta: Meta {
                 is_divergent,
                 ..Meta::default()
@@ -444,9 +437,9 @@ impl<'code> Optimizer<'_, 'code> {
 
     fn handle_stmt_list(
         &mut self,
-        stmts: Vec<exceptions::Statement<'code>>,
+        stmts: StmtList<exceptions::Ir>,
         fallthrough_breaks_from: Option<usize>,
-    ) -> (StmtList<'code>, Meta) {
+    ) -> (StmtList<Ir>, Meta) {
         let mut out = Vec::with_capacity(stmts.len()); // only approximate, but that's fine
 
         let mut stmts = stmts.into_iter().peekable();
@@ -456,7 +449,7 @@ impl<'code> Optimizer<'_, 'code> {
                 if let Some(next_stmt) = stmts.peek() {
                     // This can happen in the middle of a `switch` if we `break` from a higher-level
                     // block.
-                    if let exceptions::Statement::Break { block_id } = next_stmt {
+                    if let Statement::Break { block_id, .. } = next_stmt {
                         Some(*block_id)
                     } else {
                         None
@@ -486,11 +479,7 @@ impl<'code> Optimizer<'_, 'code> {
         (out, meta)
     }
 
-    fn inline_tails(
-        &mut self,
-        stmts: &mut StmtList<'code>,
-        fallthrough_breaks_from: Option<usize>,
-    ) {
+    fn inline_tails(&mut self, stmts: &mut StmtList<Ir>, fallthrough_breaks_from: Option<usize>) {
         // If a statement with multiple children has a single non-divergent arm, it might make sense
         // to inline every statement after it into the arm. This is useful for decoding `if`,
         // `switch`, and `try`, which start with (almost) empty arms that are slowly populated by
@@ -571,7 +560,7 @@ impl<'code> Optimizer<'_, 'code> {
                 &mut stmts[i],
                 StmtMeta {
                     meta: Meta::default(),
-                    stmt: Statement::Basic(BasicStatement::ReturnVoid),
+                    stmt: Statement::basic(BasicStatement::ReturnVoid),
                 },
             );
 
@@ -595,15 +584,15 @@ impl<'code> Optimizer<'_, 'code> {
 
     fn inline_if(
         &mut self,
-        stmt_meta: &mut StmtMeta<'code>,
-        take_tail: impl FnOnce() -> StmtList<'code>,
+        stmt_meta: &mut StmtMeta<Ir>,
+        take_tail: impl FnOnce() -> StmtList<Ir>,
         tail_fallthrough_breaks_from: Option<usize>,
     ) {
         let Statement::If {
             condition,
-            condition_inverted,
             then_children,
             else_children,
+            meta: IfMeta { condition_inverted },
         } = &mut stmt_meta.stmt
         else {
             panic!("inline_if invoked on something other than if");
@@ -637,7 +626,7 @@ impl<'code> Optimizer<'_, 'code> {
                 .pop_if(|stmt| {
                     matches!(
                         stmt.stmt,
-                        Statement::Break { block_id }
+                        Statement::Break { block_id, .. }
                             if block_id == tail_fallthrough_breaks_from,
                     )
                 })
@@ -677,10 +666,13 @@ impl<'code> Optimizer<'_, 'code> {
         if let [
             StmtMeta {
                 stmt:
-                    Statement::Basic(BasicStatement::Assign {
-                        target: then_target,
-                        value: then_value,
-                    }),
+                    Statement::Basic {
+                        stmt: BasicStatement::Assign {
+                            target: then_target,
+                            value: then_value,
+                        },
+                        ..
+                    },
                 ..
             },
         ] = then_children[..]
@@ -690,13 +682,13 @@ impl<'code> Optimizer<'_, 'code> {
             && then_var.name.namespace == VariableNamespace::Stack
             && let [
                 StmtMeta {
-                    stmt:
-                        Statement::Basic(
-                                BasicStatement::Assign {
-                                    target: else_target,
-                                    value: else_value,
-                                },
-                        ),
+                    stmt: Statement::Basic {
+                        stmt: BasicStatement::Assign {
+                            target: else_target,
+                            value: else_value,
+                        },
+                        ..
+                    },
                     ..
                 },
             ] = else_children[..]
@@ -705,7 +697,7 @@ impl<'code> Optimizer<'_, 'code> {
         {
             let condition = self.invert_condition(*condition);
 
-            stmt_meta.stmt = Statement::Basic(BasicStatement::Assign {
+            stmt_meta.stmt = Statement::basic(BasicStatement::Assign {
                 target: then_target,
                 value: self.arena.alloc(Expression::Ternary {
                     condition,
@@ -760,8 +752,8 @@ impl<'code> Optimizer<'_, 'code> {
 
     fn inline_switch(
         &mut self,
-        stmt_meta: &mut StmtMeta<'code>,
-        take_tail: impl FnOnce() -> StmtList<'code>,
+        stmt_meta: &mut StmtMeta<Ir>,
+        take_tail: impl FnOnce() -> StmtList<Ir>,
         tail_fallthrough_breaks_from: Option<usize>,
     ) {
         let Some(arm_id) = self.find_switch_inline_target(stmt_meta) else {
@@ -798,7 +790,7 @@ impl<'code> Optimizer<'_, 'code> {
                 matches!(
                     next_arm.1[..],
                     [StmtMeta {
-                        stmt: Statement::Break { block_id },
+                        stmt: Statement::Break { block_id, .. },
                         ..
                     }] if block_id == break_id,
                 )
@@ -809,7 +801,7 @@ impl<'code> Optimizer<'_, 'code> {
 
         // `arm.push` would be nicer, but we've just invalidated the borrow.
         arms[arm_id].1.push(StmtMeta {
-            stmt: Statement::Break { block_id: break_id },
+            stmt: Statement::break_(break_id),
             meta: Meta {
                 is_divergent: true,
                 ..Meta::default()
@@ -827,7 +819,7 @@ impl<'code> Optimizer<'_, 'code> {
         }
     }
 
-    fn find_switch_inline_target(&mut self, stmt_meta: &mut StmtMeta<'code>) -> Option<usize> {
+    fn find_switch_inline_target(&mut self, stmt_meta: &mut StmtMeta<Ir>) -> Option<usize> {
         let Statement::Switch { id, arms, .. } = &mut stmt_meta.stmt else {
             panic!("find_switch_inline_target invoked on something other than switch");
         };
@@ -891,7 +883,7 @@ impl<'code> Optimizer<'_, 'code> {
                 let is_break = matches!(
                     arm[..],
                     [StmtMeta {
-                        stmt: Statement::Break { block_id },
+                        stmt: Statement::Break { block_id, .. },
                         ..
                     }] if block_id == *id,
                 );
@@ -916,6 +908,6 @@ impl<'code> Optimizer<'_, 'code> {
     }
 }
 
-fn list_is_divergent<'code>(stmts: &StmtList<'code>) -> bool {
+fn list_is_divergent(stmts: &StmtList<Ir>) -> bool {
     stmts.last().is_some_and(|stmt| stmt.meta.is_divergent)
 }

@@ -1,8 +1,7 @@
-use super::{Arena, DebugIr, ExprId};
+use super::{Arena, DebugIr, ExprId, Str};
 use core::fmt::{self, Display};
 use core::hash::{Hash, Hasher};
 use displaydoc::Display;
-use noak::MStr;
 use noak::reader::cpool::value::{Dynamic, MethodHandle};
 
 #[derive(Debug)]
@@ -414,13 +413,4 @@ macro_rules! var {
         $crate::var!(@muncher [$($parsed)* $head] $($tail)*)
     };
     ($($tt:tt)*) => { $crate::var!(@muncher [] $($tt)*) };
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Str<'code>(pub &'code MStr);
-
-impl Display for Str<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.display())
-    }
 }

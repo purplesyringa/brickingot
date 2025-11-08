@@ -1,23 +1,26 @@
 // This module is solely responsible for merging definitions into uses; it does not create any new
 // definitions, like `?:`. That's the responsibility of `Optimizer`.
 
-use super::{Statement, StmtList, StmtMeta};
-use crate::ast::{Arena, BasicStatement, ExprId, Expression, VariableNamespace, Version};
+use super::Ir;
+use crate::ast::{
+    Arena, BasicStatement, ExprId, Expression, Statement, StmtList, StmtMeta, VariableNamespace,
+    Version,
+};
 use rustc_hash::FxHashMap;
 
 pub struct Inliner<'a, 'code> {
     arena: &'a Arena<'code>,
     n_var_mentions: &'a FxHashMap<Version, usize>,
-    rev_stmts: core::iter::Peekable<core::iter::Rev<alloc::vec::IntoIter<StmtMeta<'code>>>>,
+    rev_stmts: core::iter::Peekable<core::iter::Rev<alloc::vec::IntoIter<StmtMeta<Ir>>>>,
     inlined_exprs: Vec<(ExprId, ExprId)>, // (use, value)
 }
 
 impl<'a, 'code> Inliner<'a, 'code> {
     pub fn inline_expressions(
-        stmts: StmtList<'code>,
+        stmts: StmtList<Ir>,
         arena: &mut Arena<'code>,
         n_var_mentions: &FxHashMap<Version, usize>,
-    ) -> StmtList<'code> {
+    ) -> StmtList<Ir> {
         let mut inliner = Inliner {
             arena,
             n_var_mentions,
@@ -39,7 +42,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
         out
     }
 
-    fn handle_stmt_list(&mut self) -> StmtList<'code> {
+    fn handle_stmt_list(&mut self) -> StmtList<Ir> {
         let mut out = Vec::new();
 
         while let Some(stmt_meta) = self.rev_stmts.next() {
@@ -50,7 +53,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
             // more information about why this matters.
             if self.rev_stmts.peek().is_some() {
                 let subexprs = match &stmt_meta.stmt {
-                    Statement::Basic(stmt) => stmt.subexprs(),
+                    Statement::Basic { stmt, .. } => stmt.subexprs(),
                     Statement::If { condition, .. } => {
                         BasicStatement::subexprs_from_single(*condition)
                     }
@@ -121,7 +124,10 @@ impl<'a, 'code> Inliner<'a, 'code> {
 
         // Is the previous statement a definition of this variable?
         if let Some(stmt_meta) = self.rev_stmts.peek()
-            && let Statement::Basic(BasicStatement::Assign { target, value }) = stmt_meta.stmt
+            && let Statement::Basic {
+                stmt: BasicStatement::Assign { target, value },
+                ..
+            } = stmt_meta.stmt
             && let Expression::Variable(def_var) = self.arena[target]
             && def_var.version == var.version
         {

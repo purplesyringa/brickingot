@@ -7,6 +7,7 @@ edition = "2024"
 
 [dependencies]
 bitvec = "1.0.1"
+derive-where = "1.6.0"
 displaydoc = "0.2.5"
 noak = { version = "0.6.3", git = "https://github.com/purplesyringa/noak" }
 rustc-hash = "2.1.1"

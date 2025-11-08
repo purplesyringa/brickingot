@@ -1,9 +1,10 @@
-use super::{Catch, Program, Statement};
+use super::{CatchMeta, Ir, Program};
+use crate::ast::{Catch, Statement, StmtList};
 use crate::structured;
 use core::cell::Cell;
 use rustc_hash::FxHashSet;
 
-pub fn parse_try_blocks<'code>(ir: structured::Program<'code>) -> Program<'code> {
+pub fn parse_try_blocks(ir: structured::Program) -> Program {
     // Our plan:
     // - Inline tails into `catch`.
     // - Recognize every `catch (...)` that looks like `finally`.
@@ -11,14 +12,12 @@ pub fn parse_try_blocks<'code>(ir: structured::Program<'code>) -> Program<'code>
     let mut analyzer = Analyzer {
         blocks_with_breaks: FxHashSet::default(),
     };
-    analyzer.handle_stmt_list(&ir.statements);
+    analyzer.handle_stmt_list(&ir);
 
     let catch_inliner = CatchInliner {
         blocks_with_breaks: analyzer.blocks_with_breaks,
     };
-    Program {
-        statements: catch_inliner.handle_stmt_list(ir.statements, None).0,
-    }
+    catch_inliner.handle_stmt_list(ir, None).0
 }
 
 struct Analyzer {
@@ -26,33 +25,37 @@ struct Analyzer {
 }
 
 impl<'code> Analyzer {
-    fn handle_stmt_list(&mut self, stmts: &[structured::Statement<'code>]) {
+    fn handle_stmt_list(&mut self, stmts: &[Statement<structured::Ir>]) {
         for stmt in stmts {
             self.handle_stmt(stmt);
         }
     }
 
-    fn handle_stmt(&mut self, stmt: &structured::Statement<'code>) {
+    fn handle_stmt(&mut self, stmt: &Statement<structured::Ir>) {
         match stmt {
-            structured::Statement::Basic { .. } => {}
-            structured::Statement::Block { children, .. } => self.handle_stmt_list(children),
-            structured::Statement::Continue { .. } => {}
-            structured::Statement::Break { block_id, .. } => {
+            Statement::Basic { .. } => {}
+            Statement::Block { children, .. } => self.handle_stmt_list(children),
+            Statement::Continue { .. } => {}
+            Statement::Break { block_id, .. } => {
                 self.blocks_with_breaks.insert(*block_id);
             }
-            structured::Statement::If { then_children, .. } => self.handle_stmt_list(then_children),
-            structured::Statement::Switch { arms, .. } => {
+            Statement::If { then_children, .. } => self.handle_stmt_list(then_children),
+            Statement::Switch { arms, .. } => {
                 for (_, children) in arms {
                     self.handle_stmt_list(children);
                 }
             }
-            structured::Statement::TryCatch {
+            Statement::Try {
                 try_children,
-                catch_children,
+                catches,
+                finally_children,
                 ..
             } => {
                 self.handle_stmt_list(try_children);
-                self.handle_stmt_list(catch_children);
+                for catch in catches {
+                    self.handle_stmt_list(&catch.children);
+                }
+                self.handle_stmt_list(finally_children);
             }
         }
     }
@@ -67,13 +70,13 @@ struct CatchInliner {
 /// follow the current statement without skipping any statements.
 ///
 /// This has a weird data structure, but it's forced by lifetimes.
-struct TailNode<'a, 'code> {
-    list: &'a Cell<Vec<Statement<'code>>>,
+struct TailNode<'a> {
+    list: &'a Cell<StmtList<Ir>>,
     is_divergent: bool,
-    next: Tail<'a, 'code>,
+    next: Tail<'a>,
 }
 
-type Tail<'a, 'code> = Option<&'a TailNode<'a, 'code>>;
+type Tail<'a> = Option<&'a TailNode<'a>>;
 
 struct Meta {
     is_divergent: bool,
@@ -82,9 +85,9 @@ struct Meta {
 impl<'code> CatchInliner {
     fn handle_stmt_list(
         &self,
-        stmts: Vec<structured::Statement<'code>>,
-        tail: Tail<'_, 'code>,
-    ) -> (Vec<Statement<'code>>, Meta) {
+        stmts: StmtList<structured::Ir>,
+        tail: Tail<'_>,
+    ) -> (StmtList<Ir>, Meta) {
         let mut out = Vec::with_capacity(stmts.len());
         let mut is_divergent = false;
         for stmt in stmts.into_iter().rev() {
@@ -112,50 +115,51 @@ impl<'code> CatchInliner {
 
     fn handle_stmt(
         &self,
-        stmt: structured::Statement<'code>,
-        tail: Tail<'_, 'code>,
-    ) -> (Statement<'code>, Meta) {
+        stmt: Statement<structured::Ir>,
+        tail: Tail<'_>,
+    ) -> (Statement<Ir>, Meta) {
         match stmt {
-            structured::Statement::Basic { stmt, .. } => {
+            Statement::Basic { stmt, .. } => {
                 let is_divergent = stmt.is_divergent();
-                (Statement::Basic(stmt), Meta { is_divergent })
+                (Statement::basic(stmt), Meta { is_divergent })
             }
 
-            structured::Statement::Block { id, children } => {
+            Statement::Block { id, children, .. } => {
                 let has_break = self.blocks_with_breaks.contains(&id);
                 let (children, meta) =
                     self.handle_stmt_list(children, if has_break { None } else { tail });
                 (
-                    Statement::Block { id, children },
+                    Statement::block(id, children),
                     Meta {
                         is_divergent: meta.is_divergent && !has_break,
                     },
                 )
             }
 
-            structured::Statement::Continue { block_id, .. } => (
-                Statement::Continue { block_id },
-                Meta { is_divergent: true },
-            ),
-
-            structured::Statement::Break { block_id, .. } => {
-                (Statement::Break { block_id }, Meta { is_divergent: true })
+            Statement::Continue { block_id, .. } => {
+                (Statement::continue_(block_id), Meta { is_divergent: true })
             }
 
-            structured::Statement::If {
+            Statement::Break { block_id, .. } => {
+                (Statement::break_(block_id), Meta { is_divergent: true })
+            }
+
+            Statement::If {
                 condition,
                 then_children,
+                ..
             } => (
-                Statement::If {
+                Statement::if_(
                     condition,
-                    then_children: self.handle_stmt_list(then_children, None).0,
-                },
+                    self.handle_stmt_list(then_children, None).0,
+                    Vec::new(),
+                ),
                 Meta {
                     is_divergent: false, // `else` is convergent
                 },
             ),
 
-            structured::Statement::Switch { id, key, arms, .. } => {
+            Statement::Switch { id, key, arms, .. } => {
                 let has_break = self.blocks_with_breaks.contains(&id);
                 let mut is_divergent = false;
                 let arms = arms
@@ -170,22 +174,25 @@ impl<'code> CatchInliner {
                     })
                     .collect();
                 (
-                    Statement::Switch { id, key, arms },
+                    Statement::switch(id, key, arms),
                     Meta {
                         is_divergent: is_divergent && !has_break,
                     },
                 )
             }
 
-            structured::Statement::TryCatch {
+            Statement::Try {
                 try_children,
-                active_index_ranges,
-                class,
-                catch_children,
+                mut catches,
+                ..
             } => {
                 let (try_children, try_meta) = self.handle_stmt_list(try_children, None);
+
+                assert_eq!(catches.len(), 1, "must have a single catch");
+                let catch = catches.pop().unwrap();
+
                 let (mut catch_children, mut catch_meta) =
-                    self.handle_stmt_list(catch_children, None);
+                    self.handle_stmt_list(catch.children, None);
 
                 if try_meta.is_divergent {
                     // Inline tail. This can inline more than just the `catch` body: it can also
@@ -212,15 +219,17 @@ impl<'code> CatchInliner {
                 }
 
                 (
-                    Statement::Try {
+                    Statement::try_(
                         try_children,
-                        catches: vec![Catch {
-                            class,
+                        vec![Catch {
+                            class: catch.class,
                             children: catch_children,
-                            active_index_ranges,
+                            meta: CatchMeta {
+                                active_index_ranges: catch.meta.active_index_ranges,
+                            },
                         }],
-                        finally_children: Vec::new(),
-                    },
+                        Vec::new(),
+                    ),
                     Meta {
                         is_divergent: try_meta.is_divergent && catch_meta.is_divergent,
                     },
