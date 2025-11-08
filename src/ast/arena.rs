@@ -1,7 +1,7 @@
 use super::{DebugIr, Expression, Variable, VariableName, Version};
 use alloc::alloc;
 use core::cell::Cell;
-use core::fmt::{self, Display};
+use core::fmt::Display;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::{Index, IndexMut};
 
@@ -156,18 +156,7 @@ impl<'code> Arena<'code> {
     }
 
     pub fn debug<'a, T: DebugIr + ?Sized>(&'a self, value: &'a T) -> impl Display {
-        struct IrDisplay<'a, 'code, T: ?Sized> {
-            value: &'a T,
-            arena: &'a Arena<'code>,
-        }
-
-        impl<'a, 'code, T: DebugIr + ?Sized> Display for IrDisplay<'a, 'code, T> {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                T::fmt(self.value, f, self.arena)
-            }
-        }
-
-        IrDisplay { value, arena: self }
+        core::fmt::from_fn(|f| value.fmt(f, self))
     }
 
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Expression<'code>> {
