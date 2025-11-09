@@ -1,7 +1,6 @@
 use super::{AnalysisBlockMeta, AnalysisIr, AnalysisMeta, Ir, Program};
 use crate::ast::{BasicStatement, Catch, Statement, StmtList, StmtMeta};
 use crate::structured;
-use core::cell::Cell;
 use rustc_hash::FxHashSet;
 
 pub fn parse_try_blocks(ir: structured::Program) -> Program {
@@ -18,7 +17,7 @@ pub fn parse_try_blocks(ir: structured::Program) -> Program {
     };
     let ir = analyzer.handle_stmt_list(ir).0;
 
-    Transformer.handle_stmt_list(ir, None, None, 0)
+    Transformer.handle_stmt_list(ir, &mut Vec::new(), &mut Vec::new(), 0)
 }
 
 struct Analyzer {
@@ -169,29 +168,17 @@ impl Analyzer {
     }
 }
 
-// A linked list with stack-allocated nodes. This is admittedly a weird data structure, but we can't
-// use vectors without `unsafe` here if we want `T` to contain references to locals.
-type LinkedList<'a, T> = Option<&'a LinkedListNode<'a, T>>; // have to use a covariant (shared) ref
-struct LinkedListNode<'a, T> {
-    value: T,
-    next: LinkedList<'a, T>,
-}
-
 // A list of iterators over statements that are known to be executed by fallthrough after the
 // current statement, and *only* by that fallthrough. The statements always directly follow the
 // current statement without skipping any statements, but may cross `} block #n` boundaries as long
 // the block is never broken from.
-type Tail<'a> = LinkedList<'a, TailNode<'a>>;
-struct TailNode<'a> {
-    // Logically `&mut`, but has to be `&Cell` since it's behind a shared reference in `LinkedList`.
-    list: &'a Cell<alloc::vec::IntoIter<StmtMeta<AnalysisIr>>>,
-}
+type Tail = Vec<alloc::vec::IntoIter<StmtMeta<AnalysisIr>>>;
 
-// A list of open `try` blocks with finalizers.
-type Finalizers<'a> = LinkedList<'a, Finalizer<'a>>;
-struct Finalizer<'a> {
+// A list of open `try` blocks with non-empty `finally` bodies.
+type Finalizers = Vec<Finalizer>;
+struct Finalizer {
     nested_in_block_id: usize,
-    body: &'a [StmtMeta<Ir>],
+    body: Vec<StmtMeta<AnalysisIr>>,
 }
 
 struct Transformer;
@@ -199,9 +186,9 @@ struct Transformer;
 impl Transformer {
     fn handle_stmt_list(
         &self,
-        stmts: StmtList<AnalysisIr>,
-        tail: Tail<'_>,
-        finalizers: Finalizers<'_>,
+        mut stmts: StmtList<AnalysisIr>,
+        tail: &mut Tail,
+        finalizers: &mut Finalizers,
         nested_in_block_id: usize,
     ) -> StmtList<Ir> {
         // Scan for anything that looks similar to a finalizer.
@@ -228,37 +215,43 @@ impl Transformer {
             _ => None,
         };
         if let Some(exits_block_id) = exits_block_id {
-            let mut i = stmts.len() - 1;
+            let start = finalizers
+                .partition_point(|finalizer| finalizer.nested_in_block_id < exits_block_id);
 
-            // Expect the suffix of `stmts` to match a finalizer.
-
-            //
-            // If an expected finalizer could not be matched, it's not a big deal: we can use what
-            // Vineflower calls "predicated finally block", i.e. wrap the `finally` contents in an `if`
-            // whose condition is set on "good" exits and reset on "bad" exits from `try` body.
+            // Try to match finalizers. If an expected finalizer could not be matched, it's not
+            // a big deal: we can use what Vineflower calls "predicated finally block", i.e. wrap
+            // the `finally` contents in an `if` whose condition is set on "good" exits and reset on
+            // "bad" exits from `try` body.
             //
             // If there are multiple expected finalizers, we find the longest matching suffix (i.e.
-            // resolve as many `try`s from outside in as possible). In principle, this is not the only
-            // valid approach: this is similar to a knapsack problem, and we could also use a greedy
-            // solution or look for an optimal one. Neither option is intuitive, and neither can really
-            // be implemented efficiently, so matching the suffix is probably the best idea.
+            // resolve as many `try`s from outside in as possible). In principle, this is not the
+            // only valid approach: this is similar to a knapsack problem, and we could also use
+            // a greedy solution or look for an optimal one. Neither option is intuitive, and
+            // neither can really be implemented efficiently, so matching the suffix is probably the
+            // best idea.
+            let mut i = stmts.len() - 1;
+            for finalizer in &finalizers[start..] {
+                if
+                /*compare_stmt_lists(
+                    &stmts[i.saturating_sub(finalizer.body.len())..i],
+                    &finalizer.body,
+                )*/
+                true {
+                    i -= finalizer.body.len();
+                } else {
+                    break;
+                }
+            }
+            stmts.drain(i..stmts.len() - 1);
         }
 
         // Map the statements and inline into `catch`es present within `stmts`.
         let mut out = Vec::with_capacity(stmts.len());
         let mut it = stmts.into_iter();
         while let Some(stmt) = it.next() {
-            out.push(self.handle_stmt(
-                stmt,
-                Some(&LinkedListNode {
-                    value: TailNode {
-                        list: Cell::from_mut(&mut it),
-                    },
-                    next: tail,
-                }),
-                finalizers,
-                nested_in_block_id,
-            ));
+            tail.push(it);
+            out.push(self.handle_stmt(stmt, tail, finalizers, nested_in_block_id));
+            it = tail.pop().unwrap();
         }
         out
     }
@@ -266,22 +259,29 @@ impl Transformer {
     fn handle_stmt(
         &self,
         stmt_meta: StmtMeta<AnalysisIr>,
-        tail: Tail<'_>,
-        finalizers: Finalizers<'_>,
+        tail: &mut Tail,
+        finalizers: &mut Finalizers,
         nested_in_block_id: usize,
     ) -> Statement<Ir> {
         match stmt_meta.stmt {
             Statement::Basic { stmt, .. } => Statement::basic(stmt),
 
-            Statement::Block { id, children, meta } => Statement::block(
-                id,
-                self.handle_stmt_list(
-                    children,
-                    if meta.has_break { None } else { tail },
-                    finalizers,
+            Statement::Block { id, children, meta } => {
+                let mut empty_tail = Vec::new();
+                Statement::block(
                     id,
-                ),
-            ),
+                    self.handle_stmt_list(
+                        children,
+                        if meta.has_break {
+                            &mut empty_tail
+                        } else {
+                            tail
+                        },
+                        finalizers,
+                        id,
+                    ),
+                )
+            }
 
             Statement::Continue { block_id, .. } => Statement::continue_(block_id),
 
@@ -293,7 +293,12 @@ impl Transformer {
                 ..
             } => Statement::if_(
                 condition,
-                self.handle_stmt_list(then_children, None, finalizers, nested_in_block_id),
+                self.handle_stmt_list(
+                    then_children,
+                    &mut Vec::new(),
+                    finalizers,
+                    nested_in_block_id,
+                ),
                 Vec::new(),
             ),
 
@@ -301,10 +306,13 @@ impl Transformer {
                 let arms = arms
                     .into_iter()
                     .map(|(value, children)| {
-                        // Strictly speaking, it might not be `None` for the last arm, but we never
-                        // generate `try` inside `switch` cases on the previous passes so it doesn't
-                        // matter.
-                        (value, self.handle_stmt_list(children, None, finalizers, id))
+                        // Strictly speaking, the tail might not be empty for the last arm, but we
+                        // never generate `try` inside `switch` cases on the previous passes so it
+                        // doesn't matter.
+                        (
+                            value,
+                            self.handle_stmt_list(children, &mut Vec::new(), finalizers, id),
+                        )
                     })
                     .collect();
                 Statement::switch(id, key, arms)
@@ -330,33 +338,30 @@ impl Transformer {
                     // containing a `continue` to it, but we're inlining into `catch`, not into
                     // a block. The loop decoder is prepared to deal with this mess, since it has to
                     // deal with overinlining into an `if`'s `else` branch anyway.
-                    let mut it = tail;
-                    while let Some(&LinkedListNode {
-                        value: TailNode { list },
-                        next,
-                    }) = it
-                    {
-                        catch.children.extend(list.take());
+                    for list in tail.iter_mut().rev() {
+                        catch.children.extend(list);
                         // XXX: this can invalidate `catch.meta`, oh no, what do I do??? -- stupid ass bitch
-                        it = next;
                     }
                 }
 
+                finalizers.push(Finalizer {
+                    nested_in_block_id,
+                    body: Vec::new(), // FIXME
+                });
                 let try_children = self.handle_stmt_list(
                     try_children,
-                    None,
-                    Some(&LinkedListNode {
-                        value: Finalizer {
-                            nested_in_block_id,
-                            body: &[], // FIXME
-                        },
-                        next: finalizers,
-                    }),
+                    &mut Vec::new(),
+                    finalizers,
                     nested_in_block_id,
                 );
+                finalizers.pop();
 
-                let catch_children =
-                    self.handle_stmt_list(catch.children, None, finalizers, nested_in_block_id);
+                let catch_children = self.handle_stmt_list(
+                    catch.children,
+                    &mut Vec::new(),
+                    finalizers,
+                    nested_in_block_id,
+                );
 
                 Statement::try_(
                     try_children,
