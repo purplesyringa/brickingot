@@ -1,4 +1,4 @@
-use super::{Arena, DebugIr, ExprId, Str};
+use super::{Arena, DebugIr, ExprId, Str, Variable};
 use core::fmt;
 use derive_where::derive_where;
 use noak::MStr;
@@ -178,17 +178,19 @@ pub enum BasicStatement {
 #[derive_where(Debug)]
 pub struct Catch<Ir: IrDef> {
     pub class: Option<super::String>, // don't want to pollute the types with lifetimes
+    pub value_var: Variable,
     pub children: StmtList<Ir>,
     pub meta: Ir::CatchMeta,
 }
 
 impl<Ir: IrDef> Catch<Ir> {
-    pub fn new(class: Option<super::String>, children: StmtList<Ir>) -> Self
+    pub fn new(class: Option<super::String>, value_var: Variable, children: StmtList<Ir>) -> Self
     where
         Ir: IrDef<CatchMeta = NoMeta>,
     {
         Self {
             class,
+            value_var,
             children,
             meta: NoMeta,
         }
@@ -261,13 +263,14 @@ impl<Ir: IrDef> DebugIr for Statement<Ir> {
                 for catch in catches {
                     writeln!(
                         f,
-                        "}} catch ({}{}) {{",
+                        "}} catch ({}{} {}) {{",
                         catch.meta.display(),
                         catch
                             .class
                             .as_ref()
                             .map(|s| Str(&s.0))
                             .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
+                        catch.value_var,
                     )?;
                     write!(f, "{}", arena.debug(&catch.children))?;
                 }

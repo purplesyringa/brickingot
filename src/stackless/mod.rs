@@ -6,7 +6,7 @@ mod splitting;
 
 use self::abstract_eval::SealedBlock;
 pub use self::build::{StacklessIrError, build_stackless_ir};
-use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str, Version};
+use crate::ast::{Arena, BasicStatement, DebugIr, ExprId, Str, Variable, Version};
 use core::fmt;
 use core::ops::Range;
 use noak::MStr;
@@ -75,20 +75,10 @@ pub struct BasicBlock {
 pub struct CatchHandler<'code> {
     pub active_ranges: Vec<Range<usize>>,
     pub class: Option<Str<'code>>,
-    pub body: CatchBody,
-}
-
-/// What to do on exception. Basically just the body of `catch`, but very limited structurally,
-/// since we still don't have structured control flow, but also don't want to create auxiliary BBs
-/// just for the `catch` body, so we can't create the logic we want. It'll be rewritten to normal
-/// code eventually.
-#[derive(Debug)]
-pub struct CatchBody {
-    /// The version of `exception0` available within this body. Note that it's not the `exception0`
-    /// expression itself, just the version that can be used to create it.
-    pub exception0_use: Version,
-    /// If present, the `stack0 = exception0` assignment in this body.
-    pub stack0_exception0_copy: Option<BasicStatement>,
+    /// The `valueN` variable the exception is stored in.
+    pub value_var: Variable,
+    /// If present, the `stack0 = valueN` assignment at the beginning of the body.
+    pub stack_value_copy: Option<BasicStatement>,
     /// Where to jump to.
     pub jump_target: usize,
 }
@@ -97,16 +87,16 @@ impl DebugIr for CatchHandler<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         write!(
             f,
-            "try {{ {:?} }} catch ({}",
+            "try {{ {:?} }} catch ({} {}) {{",
             self.active_ranges,
             self.class
                 .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
+            self.value_var,
         )?;
-        write!(f, ") {{ ")?;
-        if let Some(stmt) = &self.body.stack0_exception0_copy {
+        if let Some(stmt) = &self.stack_value_copy {
             write!(f, "{} ", arena.debug(stmt))?;
         }
-        write!(f, "goto {} }}", self.body.jump_target)
+        write!(f, "goto {} }}", self.jump_target)
     }
 }
 
@@ -120,9 +110,11 @@ struct InternalBasicBlock {
 struct ExceptionHandlerBlock {
     /// The ranges of basic blocks that can jump to the start of this BB on exception.
     eh_entry_for_bb_ranges: Vec<Range<usize>>,
-    /// Version of `stack0` in implicit `stack0 = exception0`.
-    stack0_def: Version,
-    /// Version of `exception0` in implicit `stack0 = exception0`.
-    exception0_use: Version,
-    stack0_exception0_copy_is_necessary: bool,
+    /// Version of `stack0`, shared among all implicit `stack0 = valueN` statements generated for
+    /// `catch` blocks that use this BB as a handler.
+    stack_version: Version,
+    /// `valueN` in implicit `stack0 = valueN`, if there's a unique `catch` using this BB as
+    /// a handler.
+    value_var: Option<Variable>,
+    stack_value_copy_is_necessary: bool,
 }

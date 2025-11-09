@@ -148,7 +148,7 @@ impl<'a> Merger<'a> {
         eh: &ExceptionHandlerBlock,
     ) {
         if name == var!(stack0) {
-            self.versions.merge(use_version, eh.stack0_def);
+            self.versions.merge(use_version, eh.stack_version);
             return;
         }
 
@@ -270,11 +270,10 @@ pub fn merge_versions_across_basic_blocks(
 
     for bb in basic_blocks {
         if let Some(eh) = &mut bb.eh {
-            eh.stack0_def = merged.resolve(eh.stack0_def);
-            eh.exception0_use = merged.resolve(eh.exception0_use);
-            // If the `stack0 = exception0` definition is directly used by anything and wasn't
-            // optimized out during linking, it needs to be present in the resulting IR.
-            eh.stack0_exception0_copy_is_necessary = !merged.is_unique(eh.stack0_def);
+            eh.stack_version = merged.resolve(eh.stack_version);
+            // If the `stack0 = valueN` definition is directly used by anything and wasn't optimized
+            // out during linking, it needs to be present in the resulting IR.
+            eh.stack_value_copy_is_necessary = !merged.is_unique(eh.stack_version);
         }
 
         // Remove dead stack stores, i.e. stack definitions that weren't merged with any use during

@@ -367,8 +367,6 @@ pub enum VariableNamespace {
     Stack,
     /// value
     Value,
-    /// exception
-    Exception,
     /// selector
     Selector,
     /// context
@@ -398,7 +396,6 @@ macro_rules! var {
     (stack $n:expr) => { $crate::var!(@impl Stack $n) };
     (stack0) => { $crate::var!(@impl Stack 0) };
     (value $n:expr) => { $crate::var!(@impl Value $n) };
-    (exception0) => { $crate::var!(@impl Exception 0) };
     (selector0) => { $crate::var!(@impl Selector 0) };
     (context0) => { $crate::var!(@impl Context 0) };
 

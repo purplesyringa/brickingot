@@ -133,7 +133,7 @@ impl Structurizer<'_, '_> {
                     .expect("missing `catch` handler");
 
                 let mut catch_children = Vec::new();
-                if let Some(stmt) = handler.body.stack0_exception0_copy {
+                if let Some(stmt) = handler.stack_value_copy {
                     catch_children.push(Statement::Basic {
                         stmt,
                         meta: IndexMeta::synthetic(),
@@ -148,6 +148,7 @@ impl Structurizer<'_, '_> {
                     self.emit_tree(children),
                     vec![Catch {
                         class: handler.class.map(|s| crate::ast::String(s.0.to_owned())),
+                        value_var: handler.value_var,
                         children: catch_children,
                         meta: CatchMeta {
                             active_index_ranges: handler.active_ranges,

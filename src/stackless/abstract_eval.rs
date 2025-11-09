@@ -42,7 +42,7 @@ pub struct Machine<'arena, 'code> {
     pub unresolved_uses: FxHashMap<(usize, Variable), UnresolvedUse>,
     pub bb_id: usize,
     pub statements: Vec<Statement>,
-    next_value_id: usize,
+    pub next_value_id: usize,
     pub address_to_bb_id: FxHashMap<u32, usize>,
 }
 

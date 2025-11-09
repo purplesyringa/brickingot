@@ -103,10 +103,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
             .n_var_mentions
             .get(&var.version)
             .expect("used variable not mentioned");
-        if var.name.namespace != VariableNamespace::Exception {
-            // XXX: let's handle exceptions in some other manner...
-            assert!(n_mentions > 1, "too low mention count");
-        }
+        assert!(n_mentions > 1, "too low mention count");
 
         // We can only inline a definition into a use if it's the only use capturing the definition.
         // XXX: There are minor exceptions to this rule, namely when we can insert the expressions

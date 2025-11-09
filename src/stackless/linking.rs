@@ -93,9 +93,10 @@ impl<'a> Linker<'a> {
         if position == 0
             && let Some(eh) = &self.basic_blocks[bb_id].eh
         {
-            state
-                .source
-                .merge(Source::Value(var!(exception0 v eh.exception0_use)));
+            state.source.merge(match eh.value_var {
+                Some(var) => Source::Value(var),
+                None => Source::Indeterminate,
+            });
         }
 
         for pred_bb_id in &self.basic_blocks[bb_id].predecessors {
@@ -191,8 +192,8 @@ pub fn link_stack_across_basic_blocks(
 
         match source {
             Source::Value(value_var) => {
-                // Versions haven't been merged yet, so the version matches the expression ID and we
-                // can just replace the expression.
+                // Versions haven't been merged yet, so the version of `var` matches its expression
+                // ID and we can just replace the expression.
                 let use_expr_id = ExprId(var.version.0);
                 arena[use_expr_id] = Expression::Variable(value_var);
                 // Uses in `unresolved_uses` are treated as GC roots. Drop the now-unused access to

@@ -64,20 +64,20 @@
 // a loop, but javac never accesses stack elements populated by the previous loop iteration, so this
 // doesn't need explicit handling in practice.
 //
-// A minor complication arises in exception handlers, which are populated with the exception object
-// in `stack0`. The exception is assumed to be stored in the synthetic variable `exception0`; but we
-// cannot really insert the statement `stack0 = exception0` anywhere in the IR, because EH BBs can
-// be also entered by fallthrough. We thus simulate this statement by storing it in the per-handler
-// `struct` and tuning passes to assume it's part of the CFG, as if it runs on the *edge* rather
-// than inside nodes. This allows many accesses to `stack0` (as well as copies in other stack
-// elements) to be optimized to use `exception0`, but still allows for sound handling of situations
+// A minor complication arises in exception handlers. Each `catch` statement is associated with
+// a `valueN` variable implicitly populated with the exception object when an exception is caught.
+// After this, `stack0 = valueN` should be executed; but we cannot insert this statement into the
+// IR at any location, since EH BBs can be also entered by fallthrough. We thus simulate this
+// statement by storing it in the per-handler `struct` and tuning passes to assume it's part of the
+// CFG, as if it runs on the *edge* rather than inside nodes. This enables correct handling of code
 // like:
 //     value0 = 1
 //     stack0 = value0
 //     // exception handler starts here
 //     stack1 = stack0
 // ...where `stack0` may refer either to the exception or another value depending on control flow.
-// The assignment will be inserted into the IR when we generate structured IR in this case.
+// In this case, the assignment `stack0 = valueN` is necessary, and will be inserted into the
+// structured IR later.
 //
 // On a higher level, linking can be seen as merging certain variables together. However, it's also
 // important to split identically named variables apart when they have non-intersecting uses. This
@@ -108,9 +108,7 @@ use super::abstract_eval::{Machine, SealedBlock};
 use super::insn_ir_import::{InsnIrImportError, import_insn_to_ir};
 use super::linking::link_stack_across_basic_blocks;
 use super::splitting::merge_versions_across_basic_blocks;
-use super::{
-    BasicBlock, CatchBody, CatchHandler, ExceptionHandlerBlock, InternalBasicBlock, Program,
-};
+use super::{BasicBlock, CatchHandler, ExceptionHandlerBlock, InternalBasicBlock, Program};
 use crate::ClassInfo;
 use crate::ast::{Arena, BasicStatement, Expression};
 use crate::preparse::{self, insn_stack_effect::type_descriptor_width};
@@ -208,39 +206,46 @@ pub fn build_stackless_ir<'code>(
     ir_basic_blocks[0].sealed_bb = machine.seal_basic_block();
     ir_basic_blocks[1].predecessors.push(0);
 
-    // Accumulate `try` ranges for exception handlers.
-    let mut eh_entry_for_bb_ranges = vec![Vec::new(); preparsed_program.basic_blocks.len()];
+    // Accumulate information for exception-handling basic blocks. Also generate expressions for
+    // implicit `valueN` variable definitions in `catch` statements.
+    let mut handler_value_vars = Vec::with_capacity(preparsed_program.catch_handlers.len());
     for handler in &preparsed_program.catch_handlers {
-        eh_entry_for_bb_ranges[handler.target].extend(handler.active_ranges.iter().cloned());
+        let value_var = arena.var_name(var!(value machine.next_value_id)).0;
+        machine.next_value_id += 1;
+        handler_value_vars.push(value_var);
+
+        let eh = match &mut ir_basic_blocks[handler.target].eh {
+            Some(eh) => {
+                eh.value_var = None;
+                eh
+            }
+            eh @ None => {
+                eh.insert(ExceptionHandlerBlock {
+                    eh_entry_for_bb_ranges: Vec::new(),
+                    // It doesn't make sense to allocate a variable here, since a single target address
+                    // may be used by multiple `catch` blocks (e.g. with different classes), so we'd
+                    // have to create new allocations.
+                    stack_version: arena.version(),
+                    value_var: Some(value_var),
+                    stack_value_copy_is_necessary: true, // populated by `splitting`
+                })
+            }
+        };
+        eh.eh_entry_for_bb_ranges
+            .extend(handler.active_ranges.iter().cloned());
     }
 
     // Iterate over BB instruction ranges instead of the whole code, as dead BBs may contain invalid
     // bytecode and we'd rather not worry about that.
-    for (bb_id, (preparsed_bb, eh_entry_for_bb_ranges)) in preparsed_program
+    for (bb_id, preparsed_bb) in preparsed_program
         .basic_blocks
         .iter_mut()
-        .zip(eh_entry_for_bb_ranges)
         .enumerate()
         // skip entry BB
         .skip(1)
     {
         machine.stack_size = preparsed_bb.stack_size_at_start;
         machine.bb_id = bb_id;
-
-        ir_basic_blocks[bb_id].eh = if eh_entry_for_bb_ranges.is_empty() {
-            None
-        } else {
-            Some(ExceptionHandlerBlock {
-                eh_entry_for_bb_ranges,
-                // It doesn't make sense to allocate variables here, since a single target address
-                // may be used by multiple `catch` blocks (e.g. with different classes), so we'd
-                // have to create new allocations. Using `null` here ensures we don't affect
-                // variable refcounts until we actually codegen assignments.
-                stack0_def: arena.version(),
-                exception0_use: arena.version(),
-                stack0_exception0_copy_is_necessary: true, // populated by `splitting`
-            })
-        };
 
         for succ_bb_id in &preparsed_bb.successors {
             ir_basic_blocks[*succ_bb_id].predecessors.push(bb_id);
@@ -291,30 +296,29 @@ pub fn build_stackless_ir<'code>(
     link_stack_across_basic_blocks(arena, &ir_basic_blocks, &mut unresolved_uses);
     merge_versions_across_basic_blocks(arena, &mut ir_basic_blocks, &unresolved_uses);
 
-    // Convert `catch` blocks and add `stack0 = exception0` to the body if necessary.
+    // Convert `catch` blocks and add `stack0 = valueN` to the body if necessary.
     let catch_handlers = preparsed_program
         .catch_handlers
         .into_iter()
-        .map(|handler| {
+        .zip(handler_value_vars)
+        .map(|(handler, value_var)| {
             let eh = ir_basic_blocks[handler.target].eh.as_ref().unwrap();
 
-            let stack0_exception0_copy = eh.stack0_exception0_copy_is_necessary.then(|| {
+            let stack_value_copy = eh.stack_value_copy_is_necessary.then(|| {
                 BasicStatement::Assign {
                     // Since multiple handlers can have the same target, these IDs are not unique
                     // and can only be used as versions, not as expression IDs.
-                    target: arena.var(var!(stack0 v eh.stack0_def)),
-                    value: arena.var(var!(exception0 v eh.exception0_use)),
+                    target: arena.var(var!(stack0 v eh.stack_version)),
+                    value: arena.var(value_var),
                 }
             });
 
             CatchHandler {
                 active_ranges: handler.active_ranges,
                 class: handler.class,
-                body: CatchBody {
-                    exception0_use: eh.exception0_use,
-                    stack0_exception0_copy,
-                    jump_target: handler.target,
-                },
+                value_var,
+                stack_value_copy,
+                jump_target: handler.target,
             }
         })
         .collect();

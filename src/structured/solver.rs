@@ -138,9 +138,9 @@ pub fn compute_block_requirements(
         .enumerate()
     {
         // The `end` of a syntactic range is always extended to `target`.
-        assert!(handler.body.jump_target <= syntactic_range.end);
+        assert!(handler.jump_target <= syntactic_range.end);
 
-        let with_backward_catch_jump = if syntactic_range.end == handler.body.jump_target {
+        let with_backward_catch_jump = if syntactic_range.end == handler.jump_target {
             None
         } else {
             // If the handler is located before or within the `try` block, we have to emit a jump.
@@ -160,7 +160,7 @@ pub fn compute_block_requirements(
             requirements.push((
                 RequirementKey::BackwardCatch { handler_index },
                 BlockRequirement {
-                    range: handler.body.jump_target..syntactic_range.end,
+                    range: handler.jump_target..syntactic_range.end,
                     kind: RequirementKind::BackwardJump,
                 },
             ));

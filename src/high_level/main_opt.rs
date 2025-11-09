@@ -416,7 +416,7 @@ impl Optimizer<'_, '_> {
                 let (children, catch_meta) =
                     self.handle_stmt_list(catch.children, fallthrough_breaks_from);
                 is_divergent &= catch_meta.is_divergent;
-                Catch::new(catch.class, children)
+                Catch::new(catch.class, catch.value_var, children)
             })
             .collect();
         // `finally` is not really part of control flow: it can be entered from any point and it

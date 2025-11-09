@@ -152,6 +152,7 @@ impl Analyzer {
                         meta.is_divergent &= catch_meta.is_divergent;
                         Catch {
                             class: catch.class,
+                            value_var: catch.value_var,
                             children: catch_stmts,
                             meta: catch.meta,
                         }
@@ -347,6 +348,7 @@ impl Transformer {
                     try_children,
                     vec![Catch {
                         class: catch.class,
+                        value_var: catch.value_var,
                         children: catch_children,
                         meta: catch.meta,
                     }],

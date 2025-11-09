@@ -18,8 +18,8 @@ pub fn compute_syntactic_eh_ranges(handlers: &[CatchHandler<'_>]) -> Vec<Range<u
             // `try`..`catch` block is to demonstrate that a) there has once been some code within
             // `try`, b) what the handler is. Placing an empty `try {}` just before the handler
             // sounds like a good approach.
-            syn_start = handler.body.jump_target;
-            syn_end = handler.body.jump_target;
+            syn_start = handler.jump_target;
+            syn_end = handler.jump_target;
         } else {
             syn_start = handler.active_ranges[0].start;
             // If `end < jump_target`, we have to either emit a forward jump or extend the `try`
@@ -31,7 +31,7 @@ pub fn compute_syntactic_eh_ranges(handlers: &[CatchHandler<'_>]) -> Vec<Range<u
                 .last()
                 .unwrap()
                 .end
-                .max(handler.body.jump_target);
+                .max(handler.jump_target);
         }
 
         // Find the subset of ranges intersecting `syn_start..syn_end`. Unfortunately, this has to

@@ -55,7 +55,7 @@ pub fn linearize_ir<'code>(mut stackless_ir: stackless::Program<'code>) -> Progr
             range.start = bb_stmt_starts[range.start];
             range.end = bb_stmt_starts[range.end];
         }
-        handler.body.jump_target = bb_stmt_starts[handler.body.jump_target];
+        handler.jump_target = bb_stmt_starts[handler.jump_target];
         // `start` and `end` may compare equal if all basic blocks covered by a given range are e.g.
         // `nop`s. Remove empty ranges and merge adjacent ones.
         merge_overlapping_ranges(&mut handler.active_ranges);
