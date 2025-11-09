@@ -1,7 +1,7 @@
 use super::{IfMeta, Ir, Meta, Program, inlining::Inliner};
 use crate::ast::{
-    Arena, BasicStatement, BinOp, Catch, ExprId, Expression, Statement, StmtList, StmtMeta,
-    UnaryOp, VariableNamespace, Version,
+    Arena, BasicStatement, BinOp, BlockId, Catch, ExprId, Expression, Statement, StmtList,
+    StmtMeta, UnaryOp, VariableNamespace, Version,
 };
 use crate::exceptions;
 use rustc_hash::FxHashMap;
@@ -31,7 +31,7 @@ pub fn optimize(arena: &mut Arena<'_>, eh_ir: exceptions::Program) -> Program {
 struct Optimizer<'arena, 'code> {
     arena: &'arena mut Arena<'code>,
     n_var_mentions: FxHashMap<Version, usize>,
-    block_info: FxHashMap<usize, BlockInfo>,
+    block_info: FxHashMap<BlockId, BlockInfo>,
 }
 
 struct BlockInfo {
@@ -43,7 +43,7 @@ impl Optimizer<'_, '_> {
     fn handle_stmt(
         &mut self,
         stmt: Statement<exceptions::Ir>,
-        fallthrough_breaks_from: Option<usize>,
+        fallthrough_breaks_from: Option<BlockId>,
         out: &mut StmtList<Ir>,
     ) {
         match stmt {
@@ -153,9 +153,9 @@ impl Optimizer<'_, '_> {
 
     fn handle_block(
         &mut self,
-        id: usize,
+        id: BlockId,
         children: StmtList<exceptions::Ir>,
-        fallthrough_breaks_from: Option<usize>,
+        fallthrough_breaks_from: Option<BlockId>,
         out: &mut StmtList<Ir>,
     ) {
         self.block_info.insert(
@@ -288,7 +288,7 @@ impl Optimizer<'_, '_> {
         });
     }
 
-    fn handle_continue(&mut self, block_id: usize, out: &mut StmtList<Ir>) {
+    fn handle_continue(&mut self, block_id: BlockId, out: &mut StmtList<Ir>) {
         self.block_info
             .get_mut(&block_id)
             .expect("missing block")
@@ -302,7 +302,7 @@ impl Optimizer<'_, '_> {
         });
     }
 
-    fn handle_break(&mut self, block_id: usize, out: &mut StmtList<Ir>) {
+    fn handle_break(&mut self, block_id: BlockId, out: &mut StmtList<Ir>) {
         self.block_info
             .get_mut(&block_id)
             .expect("missing block")
@@ -320,7 +320,7 @@ impl Optimizer<'_, '_> {
         &mut self,
         condition: ExprId,
         then_children: StmtList<exceptions::Ir>,
-        fallthrough_breaks_from: Option<usize>,
+        fallthrough_breaks_from: Option<BlockId>,
         out: &mut StmtList<Ir>,
     ) {
         let (then_children, _) = self.handle_stmt_list(then_children, fallthrough_breaks_from);
@@ -342,10 +342,10 @@ impl Optimizer<'_, '_> {
 
     fn handle_switch(
         &mut self,
-        id: usize,
+        id: BlockId,
         key: ExprId,
         arms: Vec<(Option<i32>, StmtList<exceptions::Ir>)>,
-        fallthrough_breaks_from: Option<usize>,
+        fallthrough_breaks_from: Option<BlockId>,
         out: &mut StmtList<Ir>,
     ) {
         if arms.is_empty() {
@@ -405,7 +405,7 @@ impl Optimizer<'_, '_> {
         try_children: StmtList<exceptions::Ir>,
         catches: Vec<Catch<exceptions::Ir>>,
         finally_children: StmtList<exceptions::Ir>,
-        fallthrough_breaks_from: Option<usize>,
+        fallthrough_breaks_from: Option<BlockId>,
         out: &mut StmtList<Ir>,
     ) {
         let (try_children, try_meta) = self.handle_stmt_list(try_children, fallthrough_breaks_from);
@@ -438,7 +438,7 @@ impl Optimizer<'_, '_> {
     fn handle_stmt_list(
         &mut self,
         stmts: StmtList<exceptions::Ir>,
-        fallthrough_breaks_from: Option<usize>,
+        fallthrough_breaks_from: Option<BlockId>,
     ) -> (StmtList<Ir>, Meta) {
         let mut out = Vec::with_capacity(stmts.len()); // only approximate, but that's fine
 
@@ -479,7 +479,7 @@ impl Optimizer<'_, '_> {
         (out, meta)
     }
 
-    fn inline_tails(&mut self, stmts: &mut StmtList<Ir>, fallthrough_breaks_from: Option<usize>) {
+    fn inline_tails(&mut self, stmts: &mut StmtList<Ir>, fallthrough_breaks_from: Option<BlockId>) {
         // If a statement with multiple children has a single non-divergent arm, it might make sense
         // to inline every statement after it into the arm. This is useful for decoding `if`,
         // `switch`, and `try`, which start with (almost) empty arms that are slowly populated by
@@ -586,7 +586,7 @@ impl Optimizer<'_, '_> {
         &mut self,
         stmt_meta: &mut StmtMeta<Ir>,
         take_tail: impl FnOnce() -> StmtList<Ir>,
-        tail_fallthrough_breaks_from: Option<usize>,
+        tail_fallthrough_breaks_from: Option<BlockId>,
     ) {
         let Statement::If {
             condition,
@@ -754,7 +754,7 @@ impl Optimizer<'_, '_> {
         &mut self,
         stmt_meta: &mut StmtMeta<Ir>,
         take_tail: impl FnOnce() -> StmtList<Ir>,
-        tail_fallthrough_breaks_from: Option<usize>,
+        tail_fallthrough_breaks_from: Option<BlockId>,
     ) {
         let Some(arm_id) = self.find_switch_inline_target(stmt_meta) else {
             return;

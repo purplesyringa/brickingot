@@ -1,5 +1,5 @@
 use super::{AnalysisBlockMeta, AnalysisIr, AnalysisMeta, Ir, Program};
-use crate::ast::{BasicStatement, Catch, Statement, StmtList, StmtMeta};
+use crate::ast::{BasicStatement, BlockId, Catch, Statement, StmtList, StmtMeta};
 use crate::structured;
 use rustc_hash::FxHashSet;
 
@@ -17,11 +17,11 @@ pub fn parse_try_blocks(ir: structured::Program) -> Program {
     };
     let ir = analyzer.handle_stmt_list(ir).0;
 
-    Transformer.handle_stmt_list(ir, &mut Vec::new(), &mut Vec::new(), 0)
+    Transformer.handle_stmt_list(ir, &mut Vec::new(), &mut Vec::new(), BlockId::ROOT)
 }
 
 struct Analyzer {
-    blocks_with_breaks: FxHashSet<usize>,
+    blocks_with_breaks: FxHashSet<BlockId>,
 }
 
 impl Analyzer {
@@ -177,7 +177,7 @@ type Tail = Vec<alloc::vec::IntoIter<StmtMeta<AnalysisIr>>>;
 // A list of open `try` blocks with non-empty `finally` bodies.
 type Finalizers = Vec<Finalizer>;
 struct Finalizer {
-    nested_in_block_id: usize,
+    nested_in_block_id: BlockId,
     body: Vec<StmtMeta<AnalysisIr>>,
 }
 
@@ -189,7 +189,7 @@ impl Transformer {
         mut stmts: StmtList<AnalysisIr>,
         tail: &mut Tail,
         finalizers: &mut Finalizers,
-        nested_in_block_id: usize,
+        nested_in_block_id: BlockId,
     ) -> StmtList<Ir> {
         // Scan for anything that looks similar to a finalizer.
         //
@@ -208,7 +208,7 @@ impl Transformer {
             Some(Statement::Basic {
                 stmt: BasicStatement::Return { .. } | BasicStatement::ReturnVoid,
                 ..
-            }) => Some(0),
+            }) => Some(BlockId::ROOT),
             Some(Statement::Continue { block_id, .. } | Statement::Break { block_id, .. }) => {
                 Some(*block_id)
             }
@@ -261,7 +261,7 @@ impl Transformer {
         stmt_meta: StmtMeta<AnalysisIr>,
         tail: &mut Tail,
         finalizers: &mut Finalizers,
-        nested_in_block_id: usize,
+        nested_in_block_id: BlockId,
     ) -> Statement<Ir> {
         match stmt_meta.stmt {
             Statement::Basic { stmt, .. } => Statement::basic(stmt),

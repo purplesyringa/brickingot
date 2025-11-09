@@ -5,7 +5,9 @@ use super::{
         satisfy_block_requirements,
     },
 };
-use crate::ast::{Arena, BasicStatement, Catch, ExprId, Expression, Statement, StmtList, Version};
+use crate::ast::{
+    Arena, BasicStatement, BlockId, Catch, ExprId, Expression, Statement, StmtList, Version,
+};
 use crate::{
     linear::{self, CatchHandler},
     var,
@@ -35,7 +37,7 @@ pub fn structure_control_flow<'code>(
         key
     });
 
-    let mut try_block_to_handler: FxHashMap<usize, usize> = FxHashMap::default();
+    let mut try_block_to_handler: FxHashMap<BlockId, usize> = FxHashMap::default();
     let mut jump_implementations = FxHashMap::default();
     let mut has_dispatch = false;
     for (key, imp) in req_keys.into_iter().zip(implementations) {
@@ -87,9 +89,9 @@ struct Structurizer<'arena, 'code> {
     arena: &'arena Arena<'code>,
     statements: Vec<linear::Statement>,
     catch_handlers: Vec<Option<CatchHandler<'code>>>,
-    try_block_to_handler: FxHashMap<usize, usize>,
+    try_block_to_handler: FxHashMap<BlockId, usize>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
-    next_block_id: usize,
+    next_block_id: BlockId,
     selector_version: Version,
 }
 
@@ -162,7 +164,7 @@ impl Structurizer<'_, '_> {
                 // Dispatch targets can never point to the statement after the switch, since such
                 // jumps would be trivially lowered to a normal, non-dispatch jump to this `switch`.
                 let id = self.next_block_id;
-                self.next_block_id += 1;
+                self.next_block_id.0 += 1;
                 out.push(Statement::Switch {
                     id,
                     key: self.selector(),
@@ -228,7 +230,7 @@ impl Structurizer<'_, '_> {
                 arms.sort_unstable_by_key(|(_, target)| *target);
 
                 let id = self.next_block_id;
-                self.next_block_id += 1;
+                self.next_block_id.0 += 1;
                 out.push(Statement::Switch {
                     id,
                     key,

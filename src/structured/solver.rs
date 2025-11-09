@@ -1,9 +1,9 @@
-use rustc_hash::FxHashMap;
-
 use super::{exceptions::compute_syntactic_eh_ranges, gap_tracker::GapTracker};
+use crate::ast::BlockId;
 use crate::linear;
 use crate::utils::IntervalTree;
 use core::ops::Range;
+use rustc_hash::FxHashMap;
 
 #[derive(Debug)]
 pub enum Node {
@@ -11,11 +11,11 @@ pub enum Node {
         stmt_range: Range<usize>,
     },
     Block {
-        id: usize,
+        id: BlockId,
         children: Vec<Node>,
     },
     Try {
-        id: usize,
+        id: BlockId,
         children: Vec<Node>,
     },
     DispatchSwitch {
@@ -66,10 +66,10 @@ pub enum RequirementKey {
 
 #[derive(Clone)]
 pub enum RequirementImplementation {
-    Break { block_id: usize },
-    Continue { block_id: usize },
-    ContinueToDispatcher { block_id: usize, selector: i32 },
-    Try { block_id: usize },
+    Break { block_id: BlockId },
+    Continue { block_id: BlockId },
+    ContinueToDispatcher { block_id: BlockId, selector: i32 },
+    Try { block_id: BlockId },
 }
 
 pub fn compute_block_requirements(
@@ -184,7 +184,7 @@ pub fn compute_block_requirements(
 pub fn satisfy_block_requirements(
     program_len: usize,
     mut block_requirements: Vec<BlockRequirement>,
-) -> (Vec<Node>, Vec<RequirementImplementation>, usize) {
+) -> (Vec<Node>, Vec<RequirementImplementation>, BlockId) {
     if block_requirements.is_empty() {
         // Helps to reduce the constant factor a bit in the common case.
         return (
@@ -192,7 +192,7 @@ pub fn satisfy_block_requirements(
                 stmt_range: 0..program_len,
             }],
             Vec::new(),
-            1,
+            BlockId(1),
         );
     }
 
@@ -287,7 +287,7 @@ pub fn satisfy_block_requirements(
         forward_jumps_to,
         tries_to,
         imps,
-        next_block_id: 1,
+        next_block_id: BlockId(1),
         dispatcher_at_stmt: FxHashMap::default(),
         used_indices,
     };
@@ -314,7 +314,7 @@ struct Treeificator {
     forward_jumps_to: Vec<Vec<usize>>,
     tries_to: Vec<Vec<usize>>,
     imps: Vec<Option<RequirementImplementation>>,
-    next_block_id: usize,
+    next_block_id: BlockId,
     dispatcher_at_stmt: FxHashMap<usize, Dispatcher>,
     used_indices: Vec<usize>,
 }
@@ -449,7 +449,7 @@ impl Treeificator {
         assert_eq!(try_range.end, range.end, "unexpected try end");
 
         let block_id = self.next_block_id;
-        self.next_block_id += 1;
+        self.next_block_id.0 += 1;
 
         // We want to generate a `try` block here. If `catch` wants to perform a backward jump, this
         // is the last chance to generate a block for that.
@@ -506,7 +506,7 @@ impl Treeificator {
 
     fn add_normal_block(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
         let block_id = self.next_block_id;
-        self.next_block_id += 1;
+        self.next_block_id.0 += 1;
 
         out.push(Node::Block {
             id: block_id,
@@ -597,7 +597,7 @@ impl Treeificator {
 
     fn add_dispatch(
         &mut self,
-        block_id: usize,
+        block_id: BlockId,
         dispatcher: usize,
         target: usize,
     ) -> RequirementImplementation {

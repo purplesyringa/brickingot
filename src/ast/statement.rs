@@ -1,6 +1,7 @@
 use super::{Arena, DebugIr, ExprId, Str, Variable};
 use core::fmt;
 use derive_where::derive_where;
+use displaydoc::Display;
 use noak::MStr;
 
 pub trait MetaDef: fmt::Debug {
@@ -50,16 +51,16 @@ pub enum Statement<Ir: IrDef> {
         meta: Ir::BasicMeta,
     },
     Block {
-        id: usize,
+        id: BlockId,
         children: StmtList<Ir>,
         meta: Ir::BlockMeta,
     },
     Continue {
-        block_id: usize,
+        block_id: BlockId,
         meta: Ir::ContinueMeta,
     },
     Break {
-        block_id: usize,
+        block_id: BlockId,
         meta: Ir::BreakMeta,
     },
     If {
@@ -69,7 +70,7 @@ pub enum Statement<Ir: IrDef> {
         meta: Ir::IfMeta,
     },
     Switch {
-        id: usize,
+        id: BlockId,
         key: ExprId,
         arms: Vec<(Option<i32>, StmtList<Ir>)>,
         meta: Ir::SwitchMeta,
@@ -90,7 +91,7 @@ impl<Ir: IrDef> Statement<Ir> {
         Self::Basic { stmt, meta: NoMeta }
     }
 
-    pub fn block(id: usize, children: StmtList<Ir>) -> Self
+    pub fn block(id: BlockId, children: StmtList<Ir>) -> Self
     where
         Ir: IrDef<BlockMeta = NoMeta>,
     {
@@ -101,7 +102,7 @@ impl<Ir: IrDef> Statement<Ir> {
         }
     }
 
-    pub fn continue_(block_id: usize) -> Self
+    pub fn continue_(block_id: BlockId) -> Self
     where
         Ir: IrDef<ContinueMeta = NoMeta>,
     {
@@ -111,7 +112,7 @@ impl<Ir: IrDef> Statement<Ir> {
         }
     }
 
-    pub fn break_(block_id: usize) -> Self
+    pub fn break_(block_id: BlockId) -> Self
     where
         Ir: IrDef<BreakMeta = NoMeta>,
     {
@@ -133,7 +134,7 @@ impl<Ir: IrDef> Statement<Ir> {
         }
     }
 
-    pub fn switch(id: usize, key: ExprId, arms: Vec<(Option<i32>, StmtList<Ir>)>) -> Self
+    pub fn switch(id: BlockId, key: ExprId, arms: Vec<(Option<i32>, StmtList<Ir>)>) -> Self
     where
         Ir: IrDef<SwitchMeta = NoMeta>,
     {
@@ -160,6 +161,14 @@ impl<Ir: IrDef> Statement<Ir> {
             meta: NoMeta,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Display, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// {0}
+pub struct BlockId(pub u32);
+
+impl BlockId {
+    pub const ROOT: BlockId = BlockId(0);
 }
 
 pub type StmtList<Ir> = Vec<<<Ir as IrDef>::Meta as MetaDef>::WithStmt<Ir>>;
