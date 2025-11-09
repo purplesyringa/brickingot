@@ -322,7 +322,7 @@ impl Transformer {
                         next,
                     }) = it
                     {
-                        catch.children.extend(list.take().into_iter().rev());
+                        catch.children.extend(list.take());
                         // XXX: this can invalidate `catch.meta`, oh no, what do I do??? -- stupid ass bitch
                         it = next;
                     }
