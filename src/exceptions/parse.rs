@@ -8,6 +8,7 @@ pub fn parse_try_blocks(ir: structured::Program) -> Program {
     // Our plan:
     // - Inline tails into `catch`.
     // - Recognize every `catch (...)` that looks like `finally`.
+    // - Find patterns that exactly match such `finally`s inside `try` bodies.
 
     // Exits from `try` occur either on `return`, or on `break`/`continue` to a block outside `try`.
     // `finally` statements directly precede this statement.
@@ -168,11 +169,9 @@ impl Analyzer {
     }
 }
 
-struct Transformer;
-
 // A linked list with stack-allocated nodes. This is admittedly a weird data structure, but we can't
 // use vectors without `unsafe` here if we want `T` to contain references to locals.
-type LinkedList<'a, T> = Option<&'a LinkedListNode<'a, T>>;
+type LinkedList<'a, T> = Option<&'a LinkedListNode<'a, T>>; // have to use a covariant (shared) ref
 struct LinkedListNode<'a, T> {
     value: T,
     next: LinkedList<'a, T>,
@@ -184,7 +183,7 @@ struct LinkedListNode<'a, T> {
 // the block is never broken from.
 type Tail<'a> = LinkedList<'a, TailNode<'a>>;
 struct TailNode<'a> {
-    // Logically `&mut`, but covariance forces using `&Cell`.
+    // Logically `&mut`, but has to be `&Cell` since it's behind a shared reference in `LinkedList`.
     list: &'a Cell<alloc::vec::IntoIter<StmtMeta<AnalysisIr>>>,
 }
 
@@ -194,6 +193,8 @@ struct Finalizer<'a> {
     nested_in_block_id: usize,
     body: &'a [StmtMeta<Ir>],
 }
+
+struct Transformer;
 
 impl Transformer {
     fn handle_stmt_list(
@@ -215,19 +216,32 @@ impl Transformer {
         // post-inlining finalizers, since a pre-inlining finalizer is guaranteed to be directly
         // followed by a `break`/`continue`/`return`, whereas for a post-inlining finalizer it might
         // be located deep within the last statement.
+        let last_stmt = stmts.last().map(|stmt_meta| &stmt_meta.stmt);
+        let exits_block_id = match last_stmt {
+            Some(Statement::Basic {
+                stmt: BasicStatement::Return { .. } | BasicStatement::ReturnVoid,
+                ..
+            }) => Some(0),
+            Some(Statement::Continue { block_id, .. } | Statement::Break { block_id, .. }) => {
+                Some(*block_id)
+            }
+            _ => None,
+        };
+        if let Some(exits_block_id) = exits_block_id {
+            let mut i = stmts.len() - 1;
 
-        for (i, stmt_meta) in stmts.iter().enumerate() {
-            let block_id = match stmt_meta.stmt {
-                Statement::Basic {
-                    stmt: BasicStatement::Return { .. } | BasicStatement::ReturnVoid,
-                    ..
-                } => 0,
-                Statement::Continue { block_id, .. } | Statement::Break { block_id, .. } => {
-                    block_id
-                }
-                _ => continue,
-            };
-            // Quitting to `block_id` -- expect to run finalizers from each exitted `try` block.
+            // Expect the suffix of `stmts` to match a finalizer.
+
+            //
+            // If an expected finalizer could not be matched, it's not a big deal: we can use what
+            // Vineflower calls "predicated finally block", i.e. wrap the `finally` contents in an `if`
+            // whose condition is set on "good" exits and reset on "bad" exits from `try` body.
+            //
+            // If there are multiple expected finalizers, we find the longest matching suffix (i.e.
+            // resolve as many `try`s from outside in as possible). In principle, this is not the only
+            // valid approach: this is similar to a knapsack problem, and we could also use a greedy
+            // solution or look for an optimal one. Neither option is intuitive, and neither can really
+            // be implemented efficiently, so matching the suffix is probably the best idea.
         }
 
         // Map the statements and inline into `catch`es present within `stmts`.
