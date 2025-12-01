@@ -1,6 +1,7 @@
 mod arena;
 mod debug;
 mod expression;
+pub mod isomorphism;
 mod iterate;
 mod statement;
 mod str;

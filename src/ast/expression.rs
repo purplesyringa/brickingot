@@ -1,10 +1,12 @@
-use super::{Arena, DebugIr, ExprId, Str};
+use super::{Arena, DebugIr, ExprId, Str, isomorphism::derive_deftly_template_Isomorphic};
 use core::fmt::{self, Display};
 use core::hash::{Hash, Hasher};
+use derive_deftly::Deftly;
 use displaydoc::Display;
 use noak::reader::cpool::value::{Dynamic, MethodHandle};
 
-#[derive(Debug)]
+#[derive(Debug, Deftly)]
+#[derive_deftly(Isomorphic)]
 pub enum Expression<'code> {
     This,
     Argument {
@@ -205,7 +207,8 @@ impl DebugIr for Expression<'_> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deftly)]
+#[derive_deftly(Isomorphic)]
 pub enum CallKind<'code> {
     Static {
         class_or_interface: Str<'code>,
@@ -220,7 +223,8 @@ pub enum CallKind<'code> {
     },
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, Display, Deftly)]
+#[derive_deftly(Isomorphic)]
 pub enum Type<'code> {
     /// {0}
     Reference(Str<'code>),
@@ -228,7 +232,8 @@ pub enum Type<'code> {
     Primitive(PrimitiveType),
 }
 
-#[derive(Clone, Copy, Debug, Display)]
+#[derive(Clone, Copy, Debug, Display, Deftly)]
+#[derive_deftly(Isomorphic)]
 pub enum PrimitiveType {
     /// byte
     Byte,
@@ -256,7 +261,8 @@ impl PrimitiveType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deftly)]
+#[derive_deftly(Isomorphic)]
 pub enum BinOp {
     Add,
     Sub,
@@ -310,7 +316,8 @@ impl Display for BinOp {
     }
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, Deftly, Display)]
+#[derive_deftly(Isomorphic)]
 pub enum UnaryOp {
     /// -
     Neg,
@@ -318,7 +325,8 @@ pub enum UnaryOp {
     Not,
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, Deftly, Display)]
+#[derive_deftly(Isomorphic)]
 pub enum LogicalOp {
     /// &&
     And,

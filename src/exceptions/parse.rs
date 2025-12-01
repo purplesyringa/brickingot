@@ -1,9 +1,11 @@
 use super::{AnalysisBlockMeta, AnalysisIr, AnalysisMeta, Ir, Program};
-use crate::ast::{BasicStatement, Catch, GroupId, Statement, StmtGroup, StmtMeta};
+use crate::ast::{
+    Arena, BasicStatement, Catch, GroupId, Statement, StmtGroup, StmtMeta, isomorphism,
+};
 use crate::structured;
 use rustc_hash::FxHashSet;
 
-pub fn parse_try_blocks(ir: structured::Program) -> Program {
+pub fn parse_try_blocks(arena: &Arena<'_>, ir: structured::Program) -> Program {
     // Our plan:
     // - Inline tails into `catch`.
     // - Recognize every `catch (...)` that looks like `finally`.
@@ -17,7 +19,8 @@ pub fn parse_try_blocks(ir: structured::Program) -> Program {
     };
     let ir = analyzer.handle_group(ir).0;
 
-    Transformer.handle_group(ir, &mut Vec::new(), &mut Vec::new())
+    let transformer = Transformer { arena };
+    transformer.handle_group(ir, &mut Vec::new(), &mut Vec::new())
 }
 
 struct Analyzer {
@@ -201,9 +204,11 @@ struct Finalizer {
     body: Vec<StmtMeta<AnalysisIr>>,
 }
 
-struct Transformer;
+struct Transformer<'arena, 'code> {
+    arena: &'arena Arena<'code>,
+}
 
-impl Transformer {
+impl Transformer<'_, '_> {
     fn handle_group(
         &self,
         mut group: StmtGroup<AnalysisIr>,
@@ -249,12 +254,10 @@ impl Transformer {
             // best idea.
             let mut i = group.children.len() - 1;
             for finalizer in &finalizers[start..] {
-                if
-                /*compare_stmt_lists(
+                if self.compare_stmt_lists(
                     &group.children[i.saturating_sub(finalizer.body.len())..i],
                     &finalizer.body,
-                )*/
-                true {
+                ) {
                     i -= finalizer.body.len();
                 } else {
                     break;
@@ -263,7 +266,7 @@ impl Transformer {
             group.children.drain(i..group.children.len() - 1);
         }
 
-        // Map the statements and inline into `catch`es present within `stmts`.
+        // Map the statements and inline into `catch`es present within `group.children`.
         let mut children = Vec::with_capacity(group.children.len());
         let mut it = group.children.into_iter();
         while let Some(stmt) = it.next() {
@@ -384,6 +387,13 @@ impl Transformer {
                 )
             }
         }
+    }
+
+    fn compare_stmt_lists(&self, xs: &[StmtMeta<AnalysisIr>], ys: &[StmtMeta<AnalysisIr>]) -> bool {
+        // The implementation details of this isomorphism check significantly affect the time
+        // complexity guarantees of the EH pass. The guarantee sufficient for overall linear time
+        // is: if we decide to recurse into `xs`, we never recurse into subtrees of `xs`.
+        isomorphism::compare(self.arena, xs, ys)
     }
 }
 

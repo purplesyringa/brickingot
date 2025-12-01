@@ -1,11 +1,15 @@
-use super::{Arena, DebugIr, ExprId, Str, Variable};
+use super::{
+    Arena, DebugIr, ExprId, Str, Variable,
+    isomorphism::{Isomorphic, derive_deftly_template_Isomorphic},
+};
 use core::fmt;
+use derive_deftly::Deftly;
 use derive_where::derive_where;
 use displaydoc::Display;
 use noak::MStr;
 
 pub trait MetaDef: fmt::Debug {
-    type WithStmt<Ir: IrDef<Meta = Self>>: fmt::Debug + DebugIr;
+    type WithStmt<Ir: IrDef<Meta = Self>>: fmt::Debug + DebugIr + Isomorphic;
     fn display(&self) -> impl fmt::Display;
 }
 
@@ -17,8 +21,11 @@ impl<T: fmt::Display + fmt::Debug> MetaDef for T {
 }
 
 #[derive_where(Debug)]
+#[derive(Deftly)]
+#[derive_deftly(Isomorphic)]
 pub struct StmtMeta<Ir: IrDef> {
     pub stmt: Statement<Ir>,
+    #[deftly(ignore)]
     pub meta: Ir::Meta,
 }
 
@@ -45,39 +52,48 @@ pub trait IrDef {
 }
 
 #[derive_where(Debug)]
+#[derive(Deftly)]
+#[derive_deftly(Isomorphic)]
 pub enum Statement<Ir: IrDef> {
     Basic {
         stmt: BasicStatement,
+        #[deftly(ignore)]
         meta: Ir::BasicMeta,
     },
     Block {
         body: StmtGroup<Ir>,
+        #[deftly(ignore)]
         meta: Ir::BlockMeta,
     },
     Continue {
         group_id: GroupId,
+        #[deftly(ignore)]
         meta: Ir::ContinueMeta,
     },
     Break {
         group_id: GroupId,
+        #[deftly(ignore)]
         meta: Ir::BreakMeta,
     },
     If {
         condition: ExprId,
         then: StmtGroup<Ir>,
         else_: StmtGroup<Ir>,
+        #[deftly(ignore)]
         meta: Ir::IfMeta,
     },
     Switch {
         id: GroupId,
         key: ExprId,
         arms: Vec<(Option<i32>, StmtGroup<Ir>)>,
+        #[deftly(ignore)]
         meta: Ir::SwitchMeta,
     },
     Try {
         try_: StmtGroup<Ir>,
         catches: Vec<Catch<Ir>>,
         finally: StmtGroup<Ir>,
+        #[deftly(ignore)]
         meta: Ir::TryMeta,
     },
 }
@@ -164,13 +180,17 @@ impl GroupId {
 
 pub type StmtList<Ir> = Vec<<<Ir as IrDef>::Meta as MetaDef>::WithStmt<Ir>>;
 
+#[derive(Deftly)]
 #[derive_where(Debug)]
+#[derive_deftly(Isomorphic)]
 pub struct StmtGroup<Ir: IrDef> {
+    #[deftly(definition)]
     pub id: GroupId,
     pub children: StmtList<Ir>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deftly)]
+#[derive_deftly(Isomorphic)]
 pub enum BasicStatement {
     Assign { target: ExprId, value: ExprId },
     Return { value: ExprId },
@@ -181,11 +201,14 @@ pub enum BasicStatement {
     MonitorExit { object: ExprId },
 }
 
+#[derive(Deftly)]
 #[derive_where(Debug)]
+#[derive_deftly(Isomorphic)]
 pub struct Catch<Ir: IrDef> {
     pub class: Option<super::String>, // don't want to pollute the types with lifetimes
     pub value_var: Variable,
     pub body: StmtGroup<Ir>,
+    #[deftly(ignore)]
     pub meta: Ir::CatchMeta,
 }
 

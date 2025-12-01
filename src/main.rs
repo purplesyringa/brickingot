@@ -193,7 +193,7 @@ fn decompile_method<'code>(
     // local, which means that inlining can change the behavior of the code if statements are
     // inlined across different EH contexts. This forces us to dedicate a separate pass just to
     // handling `try` blocks.
-    let eh_ir = parse_try_blocks(structured_ir);
+    let eh_ir = parse_try_blocks(&arena, structured_ir);
 
     // println!("{}", arena.debug(&eh_ir));
 
