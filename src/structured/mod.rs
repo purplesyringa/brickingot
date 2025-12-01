@@ -4,7 +4,7 @@ mod solver;
 mod structurizer;
 
 pub use self::structurizer::structure_control_flow;
-use crate::ast::{IrDef, StmtList};
+use crate::ast::{IrDef, StmtGroup};
 use core::ops::Range;
 use displaydoc::Display;
 
@@ -18,7 +18,7 @@ impl IrDef for Ir {
     type CatchMeta = CatchMeta;
 }
 
-pub type Program = StmtList<Ir>;
+pub type Program = StmtGroup<Ir>;
 
 #[derive(Clone, Copy, Debug, Display)]
 /// {index}

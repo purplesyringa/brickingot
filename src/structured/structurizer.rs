@@ -1,12 +1,13 @@
 use super::{
     CatchMeta, Index, IndexMeta, Ir, Program,
     solver::{
-        Node, RequirementImplementation, RequirementKey, compute_block_requirements,
-        satisfy_block_requirements,
+        Node, RequirementImplementation, RequirementKey, compute_group_requirements,
+        satisfy_group_requirements,
     },
 };
 use crate::ast::{
-    Arena, BasicStatement, BlockId, Catch, ExprId, Expression, Statement, StmtList, Version,
+    Arena, BasicStatement, Catch, ExprId, Expression, GroupId, Statement, StmtGroup, StmtList,
+    Version,
 };
 use crate::{
     linear::{self, CatchHandler},
@@ -21,13 +22,13 @@ pub fn structure_control_flow<'code>(
     // If you're confused as to what's happening here, read this first:
     // https://purplesyringa.moe/blog/recovering-control-flow-structures-without-cfgs/. The post
     // does not cover this implementation in its entirety, but it's pretty close.
-    // `compute_block_requirements` effectively generates the arrows, `satisfy_block_requirements`
+    // `compute_group_requirements` effectively generates the arrows, `satisfy_group_requirements`
     // effectively builds a tree, and everything else is glue and exception handling logic.
-    let requirements = compute_block_requirements(&linear_ir);
+    let requirements = compute_group_requirements(&linear_ir);
     let (mut req_keys, req_values): (Vec<_>, _) = requirements.into_iter().unzip();
 
-    let (tree, implementations, next_block_id) =
-        satisfy_block_requirements(linear_ir.statements.len(), req_values);
+    let (tree, implementations, next_group_id) =
+        satisfy_group_requirements(linear_ir.statements.len(), req_values);
 
     // Add keys for dynamically created dispatch jumps.
     let mut id = req_keys.len();
@@ -37,17 +38,17 @@ pub fn structure_control_flow<'code>(
         key
     });
 
-    let mut try_block_to_handler: FxHashMap<BlockId, usize> = FxHashMap::default();
+    let mut try_block_to_handler: FxHashMap<GroupId, usize> = FxHashMap::default();
     let mut jump_implementations = FxHashMap::default();
     let mut has_dispatch = false;
     for (key, imp) in req_keys.into_iter().zip(implementations) {
-        if let RequirementImplementation::Try { block_id } = imp {
+        if let RequirementImplementation::Try { group_id } = imp {
             let RequirementKey::Try { handler_index } = key else {
                 panic!("unexpected key for try implementation");
             };
             assert!(
                 try_block_to_handler
-                    .insert(block_id, handler_index)
+                    .insert(group_id, handler_index)
                     .is_none(),
                 "multiple handlers per try block"
             );
@@ -65,13 +66,13 @@ pub fn structure_control_flow<'code>(
         catch_handlers: linear_ir.catch_handlers.into_iter().map(Some).collect(),
         try_block_to_handler,
         jump_implementations,
-        next_block_id,
+        next_group_id,
         selector_version: arena.version(),
     };
 
-    let mut statements = structurizer.emit_tree(tree);
+    let mut children = structurizer.emit_tree(tree);
     if has_dispatch {
-        statements.insert(
+        children.insert(
             0,
             Statement::Basic {
                 stmt: BasicStatement::Assign {
@@ -82,16 +83,19 @@ pub fn structure_control_flow<'code>(
             },
         );
     }
-    statements
+    StmtGroup {
+        children,
+        id: GroupId::ROOT,
+    }
 }
 
 struct Structurizer<'arena, 'code> {
     arena: &'arena Arena<'code>,
     statements: Vec<linear::Statement>,
     catch_handlers: Vec<Option<CatchHandler<'code>>>,
-    try_block_to_handler: FxHashMap<BlockId, usize>,
+    try_block_to_handler: FxHashMap<GroupId, usize>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
-    next_block_id: BlockId,
+    next_group_id: GroupId,
     selector_version: Version,
 }
 
@@ -122,10 +126,15 @@ impl Structurizer<'_, '_> {
             }
 
             Node::Block { id, children } => {
-                out.push(Statement::block(id, self.emit_tree(children)));
+                out.push(Statement::block(StmtGroup {
+                    id,
+                    children: self.emit_tree(children),
+                }));
             }
 
             Node::Try { id, children } => {
+                let children = self.emit_tree(children);
+
                 let handler_index = self
                     .try_block_to_handler
                     .remove(&id)
@@ -147,31 +156,31 @@ impl Structurizer<'_, '_> {
                 }
 
                 out.push(Statement::try_(
-                    self.emit_tree(children),
+                    self.new_group(children),
                     vec![Catch {
                         class: handler.class.map(|s| crate::ast::String(s.0.to_owned())),
                         value_var: handler.value_var,
-                        children: catch_children,
+                        body: self.new_group(catch_children),
                         meta: CatchMeta {
                             active_index_ranges: handler.active_ranges,
                         },
                     }],
-                    Vec::new(),
+                    self.new_group(Vec::new()),
                 ));
             }
 
             Node::DispatchSwitch { dispatch_targets } => {
                 // Dispatch targets can never point to the statement after the switch, since such
                 // jumps would be trivially lowered to a normal, non-dispatch jump to this `switch`.
-                let id = self.next_block_id;
-                self.next_block_id.0 += 1;
+                let id = self.next_group_id;
+                self.next_group_id.0 += 1;
                 out.push(Statement::Switch {
                     id,
                     key: self.selector(),
                     arms: dispatch_targets
                         .into_iter()
                         .map(|target| {
-                            let mut stmts = vec![Statement::Basic {
+                            let mut children = vec![Statement::Basic {
                                 stmt: BasicStatement::Assign {
                                     target: self.selector(),
                                     value: self.arena.int(0),
@@ -183,9 +192,9 @@ impl Structurizer<'_, '_> {
                                     req_id: target.jump_req_id,
                                 },
                                 Index::Synthetic,
-                                &mut stmts,
+                                &mut children,
                             );
-                            (Some(target.selector), stmts)
+                            (Some(target.selector), self.new_group(children))
                         })
                         .collect(),
                     meta: IndexMeta::synthetic(),
@@ -212,11 +221,15 @@ impl Structurizer<'_, '_> {
                 let out = if let Expression::ConstInt(1) = self.arena[condition] {
                     out
                 } else {
-                    out.push(Statement::if_(condition, Vec::new(), Vec::new()));
-                    let Some(Statement::If { then_children, .. }) = out.last_mut() else {
+                    out.push(Statement::if_(
+                        condition,
+                        self.new_group(Vec::new()),
+                        self.new_group(Vec::new()),
+                    ));
+                    let Some(Statement::If { then, .. }) = out.last_mut() else {
                         unreachable!()
                     };
-                    then_children
+                    &mut then.children
                 };
                 self.emit_jump(RequirementKey::Jump { stmt_index }, index, out);
             }
@@ -229,8 +242,8 @@ impl Structurizer<'_, '_> {
                     .collect();
                 arms.sort_unstable_by_key(|(_, target)| *target);
 
-                let id = self.next_block_id;
-                self.next_block_id.0 += 1;
+                let id = self.next_group_id;
+                self.next_group_id.0 += 1;
                 out.push(Statement::Switch {
                     id,
                     key,
@@ -251,7 +264,7 @@ impl Structurizer<'_, '_> {
                                 // breaking from the switch itself. Breaks from the last arm don't
                                 // have to be emitted.
                                 if i != arms.len() - 1 {
-                                    children.push(Statement::Break { block_id: id, meta });
+                                    children.push(Statement::Break { group_id: id, meta });
                                 }
                             } else {
                                 self.emit_jump(
@@ -260,7 +273,7 @@ impl Structurizer<'_, '_> {
                                     &mut children,
                                 );
                             }
-                            (key, children)
+                            (key, self.new_group(children))
                         })
                         .collect(),
                     meta,
@@ -277,10 +290,16 @@ impl Structurizer<'_, '_> {
 
         match *imp {
             RequirementImplementation::Break { block_id } => {
-                out.push(Statement::Break { block_id, meta });
+                out.push(Statement::Break {
+                    group_id: block_id,
+                    meta,
+                });
             }
             RequirementImplementation::Continue { block_id } => {
-                out.push(Statement::Continue { block_id, meta });
+                out.push(Statement::Continue {
+                    group_id: block_id,
+                    meta,
+                });
             }
             RequirementImplementation::ContinueToDispatcher { block_id, selector } => {
                 out.push(Statement::Basic {
@@ -290,7 +309,10 @@ impl Structurizer<'_, '_> {
                     },
                     meta,
                 });
-                out.push(Statement::Continue { block_id, meta });
+                out.push(Statement::Continue {
+                    group_id: block_id,
+                    meta,
+                });
             }
             RequirementImplementation::Try { .. } => {
                 panic!("jump cannot be implemented with try");
@@ -303,5 +325,11 @@ impl Structurizer<'_, '_> {
         // for all selectors. That's not *quite* correct in the sense that this can merge
         // independent selectors, but later passes are prepared to deal with that.
         self.arena.var(var!(selector0 v self.selector_version))
+    }
+
+    fn new_group(&mut self, children: StmtList<Ir>) -> StmtGroup<Ir> {
+        let id = self.next_group_id;
+        self.next_group_id.0 += 1;
+        StmtGroup { id, children }
     }
 }

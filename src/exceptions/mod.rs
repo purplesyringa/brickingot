@@ -2,7 +2,7 @@ mod contexts;
 mod parse;
 
 pub use self::parse::parse_try_blocks;
-use crate::ast::{IrDef, StmtList};
+use crate::ast::{IrDef, StmtGroup};
 pub use crate::structured::CatchMeta;
 use core::fmt;
 
@@ -12,7 +12,7 @@ impl IrDef for Ir {
     type CatchMeta = CatchMeta;
 }
 
-pub type Program = StmtList<Ir>;
+pub type Program = StmtGroup<Ir>;
 
 struct AnalysisIr;
 

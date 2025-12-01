@@ -1,5 +1,5 @@
 use super::{AnalysisBlockMeta, AnalysisIr, AnalysisMeta, Ir, Program};
-use crate::ast::{BasicStatement, BlockId, Catch, Statement, StmtList, StmtMeta};
+use crate::ast::{BasicStatement, Catch, GroupId, Statement, StmtGroup, StmtMeta};
 use crate::structured;
 use rustc_hash::FxHashSet;
 
@@ -13,27 +13,28 @@ pub fn parse_try_blocks(ir: structured::Program) -> Program {
     // `finally` statements directly precede this statement.
 
     let mut analyzer = Analyzer {
-        blocks_with_breaks: FxHashSet::default(),
+        groups_with_breaks: FxHashSet::default(),
     };
-    let ir = analyzer.handle_stmt_list(ir).0;
+    let ir = analyzer.handle_group(ir).0;
 
-    Transformer.handle_stmt_list(ir, &mut Vec::new(), &mut Vec::new(), BlockId::ROOT)
+    Transformer.handle_group(ir, &mut Vec::new(), &mut Vec::new())
 }
 
 struct Analyzer {
-    blocks_with_breaks: FxHashSet<BlockId>,
+    groups_with_breaks: FxHashSet<GroupId>,
 }
 
 impl Analyzer {
-    fn handle_stmt_list(
+    fn handle_group(
         &mut self,
-        stmts: StmtList<structured::Ir>,
-    ) -> (StmtList<AnalysisIr>, AnalysisMeta) {
+        group: StmtGroup<structured::Ir>,
+    ) -> (StmtGroup<AnalysisIr>, AnalysisMeta) {
         let mut meta = AnalysisMeta {
             measure: 1,
             is_divergent: false,
         };
-        let out = stmts
+        let children = group
+            .children
             .into_iter()
             .map(|stmt| self.handle_stmt(stmt))
             .inspect(|stmt_meta| {
@@ -41,7 +42,13 @@ impl Analyzer {
                 meta.is_divergent = stmt_meta.meta.is_divergent;
             })
             .collect();
-        (out, meta)
+        (
+            StmtGroup {
+                id: group.id,
+                children,
+            },
+            meta,
+        )
     }
 
     fn handle_stmt(&mut self, stmt: Statement<structured::Ir>) -> StmtMeta<AnalysisIr> {
@@ -57,32 +64,31 @@ impl Analyzer {
                 }
             }
 
-            Statement::Block { id, children, .. } => {
-                let (children, mut meta) = self.handle_stmt_list(children);
-                let has_break = self.blocks_with_breaks.remove(&id);
+            Statement::Block { body, .. } => {
+                let (body, mut meta) = self.handle_group(body);
+                let has_break = self.groups_with_breaks.remove(&body.id);
                 meta.is_divergent &= !has_break;
                 StmtMeta {
                     stmt: Statement::Block {
-                        id,
-                        children,
+                        body,
                         meta: AnalysisBlockMeta { has_break },
                     },
                     meta,
                 }
             }
 
-            Statement::Continue { block_id, .. } => StmtMeta {
-                stmt: Statement::continue_(block_id),
+            Statement::Continue { group_id, .. } => StmtMeta {
+                stmt: Statement::continue_(group_id),
                 meta: AnalysisMeta {
                     measure: 1,
                     is_divergent: true,
                 },
             },
 
-            Statement::Break { block_id, .. } => {
-                self.blocks_with_breaks.insert(block_id);
+            Statement::Break { group_id, .. } => {
+                self.groups_with_breaks.insert(group_id);
                 StmtMeta {
-                    stmt: Statement::break_(block_id),
+                    stmt: Statement::break_(group_id),
                     meta: AnalysisMeta {
                         measure: 1,
                         is_divergent: true,
@@ -92,18 +98,22 @@ impl Analyzer {
 
             Statement::If {
                 condition,
-                then_children,
-                else_children,
+                then,
+                else_,
                 ..
             } => {
-                let (then_children, mut meta) = self.handle_stmt_list(then_children);
+                let (then, mut meta) = self.handle_group(then);
                 assert!(
-                    else_children.is_empty(),
+                    else_.children.is_empty(),
                     "shouldn't have anything in else yet",
                 );
+                let else_ = StmtGroup {
+                    id: else_.id,
+                    children: Vec::new(),
+                };
                 meta.is_divergent = false; // `else` is empty
                 StmtMeta {
-                    stmt: Statement::if_(condition, then_children, Vec::new()),
+                    stmt: Statement::if_(condition, then, else_),
                     meta,
                 }
             }
@@ -115,14 +125,14 @@ impl Analyzer {
                 };
                 let arms = arms
                     .into_iter()
-                    .map(|(value, children)| {
-                        let (arm_stmts, arm_meta) = self.handle_stmt_list(children);
+                    .map(|(value, body)| {
+                        let (arm_body, arm_meta) = self.handle_group(body);
                         meta.measure += arm_meta.measure;
                         meta.is_divergent = arm_meta.is_divergent;
-                        (value, arm_stmts)
+                        (value, arm_body)
                     })
                     .collect();
-                let has_break = self.blocks_with_breaks.remove(&id);
+                let has_break = self.groups_with_breaks.remove(&id);
                 meta.is_divergent &= !has_break;
                 StmtMeta {
                     stmt: Statement::switch(id, key, arms),
@@ -131,8 +141,9 @@ impl Analyzer {
             }
 
             Statement::Try {
-                try_children,
+                try_,
                 catches,
+                finally,
                 ..
             } => {
                 let mut meta = AnalysisMeta {
@@ -140,27 +151,36 @@ impl Analyzer {
                     is_divergent: false,
                 };
 
-                let (try_children, try_meta) = self.handle_stmt_list(try_children);
+                let (try_, try_meta) = self.handle_group(try_);
                 meta.measure += try_meta.measure;
                 meta.is_divergent = try_meta.is_divergent;
 
                 let catches = catches
                     .into_iter()
                     .map(|catch| {
-                        let (catch_stmts, catch_meta) = self.handle_stmt_list(catch.children);
+                        let (catch_body, catch_meta) = self.handle_group(catch.body);
                         meta.measure += catch_meta.measure;
                         meta.is_divergent &= catch_meta.is_divergent;
                         Catch {
                             class: catch.class,
                             value_var: catch.value_var,
-                            children: catch_stmts,
+                            body: catch_body,
                             meta: catch.meta,
                         }
                     })
                     .collect();
 
+                assert!(
+                    finally.children.is_empty(),
+                    "shouldn't have anything in finally yet",
+                );
+                let finally = StmtGroup {
+                    id: finally.id,
+                    children: Vec::new(),
+                };
+
                 StmtMeta {
-                    stmt: Statement::try_(try_children, catches, Vec::new()),
+                    stmt: Statement::try_(try_, catches, finally),
                     meta,
                 }
             }
@@ -170,27 +190,26 @@ impl Analyzer {
 
 // A list of iterators over statements that are known to be executed by fallthrough after the
 // current statement, and *only* by that fallthrough. The statements always directly follow the
-// current statement without skipping any statements, but may cross `} block #n` boundaries as long
-// the block is never broken from.
+// current statement without skipping any statements, but may cross `} #n` boundaries as long the
+// group is never broken from.
 type Tail = Vec<alloc::vec::IntoIter<StmtMeta<AnalysisIr>>>;
 
 // A list of open `try` blocks with non-empty `finally` bodies.
 type Finalizers = Vec<Finalizer>;
 struct Finalizer {
-    nested_in_block_id: BlockId,
+    try_id: GroupId,
     body: Vec<StmtMeta<AnalysisIr>>,
 }
 
 struct Transformer;
 
 impl Transformer {
-    fn handle_stmt_list(
+    fn handle_group(
         &self,
-        mut stmts: StmtList<AnalysisIr>,
+        mut group: StmtGroup<AnalysisIr>,
         tail: &mut Tail,
         finalizers: &mut Finalizers,
-        nested_in_block_id: BlockId,
-    ) -> StmtList<Ir> {
+    ) -> StmtGroup<Ir> {
         // Scan for anything that looks similar to a finalizer.
         //
         // This should be done before we recurse into `stmts`, so that we compare unprocessed
@@ -203,20 +222,19 @@ impl Transformer {
         // post-inlining finalizers, since a pre-inlining finalizer is guaranteed to be directly
         // followed by a `break`/`continue`/`return`, whereas for a post-inlining finalizer it might
         // be located deep within the last statement.
-        let last_stmt = stmts.last().map(|stmt_meta| &stmt_meta.stmt);
-        let exits_block_id = match last_stmt {
+        let last_stmt = group.children.last().map(|stmt_meta| &stmt_meta.stmt);
+        let exits_group_id = match last_stmt {
             Some(Statement::Basic {
                 stmt: BasicStatement::Return { .. } | BasicStatement::ReturnVoid,
                 ..
-            }) => Some(BlockId::ROOT),
-            Some(Statement::Continue { block_id, .. } | Statement::Break { block_id, .. }) => {
-                Some(*block_id)
+            }) => Some(GroupId::ROOT),
+            Some(Statement::Continue { group_id, .. } | Statement::Break { group_id, .. }) => {
+                Some(*group_id)
             }
             _ => None,
         };
-        if let Some(exits_block_id) = exits_block_id {
-            let start = finalizers
-                .partition_point(|finalizer| finalizer.nested_in_block_id < exits_block_id);
+        if let Some(exits_group_id) = exits_group_id {
+            let start = finalizers.partition_point(|finalizer| finalizer.try_id < exits_group_id);
 
             // Try to match finalizers. If an expected finalizer could not be matched, it's not
             // a big deal: we can use what Vineflower calls "predicated finally block", i.e. wrap
@@ -229,11 +247,11 @@ impl Transformer {
             // a greedy solution or look for an optimal one. Neither option is intuitive, and
             // neither can really be implemented efficiently, so matching the suffix is probably the
             // best idea.
-            let mut i = stmts.len() - 1;
+            let mut i = group.children.len() - 1;
             for finalizer in &finalizers[start..] {
                 if
                 /*compare_stmt_lists(
-                    &stmts[i.saturating_sub(finalizer.body.len())..i],
+                    &group.children[i.saturating_sub(finalizer.body.len())..i],
                     &finalizer.body,
                 )*/
                 true {
@@ -242,18 +260,21 @@ impl Transformer {
                     break;
                 }
             }
-            stmts.drain(i..stmts.len() - 1);
+            group.children.drain(i..group.children.len() - 1);
         }
 
         // Map the statements and inline into `catch`es present within `stmts`.
-        let mut out = Vec::with_capacity(stmts.len());
-        let mut it = stmts.into_iter();
+        let mut children = Vec::with_capacity(group.children.len());
+        let mut it = group.children.into_iter();
         while let Some(stmt) = it.next() {
             tail.push(it);
-            out.push(self.handle_stmt(stmt, tail, finalizers, nested_in_block_id));
+            children.push(self.handle_stmt(stmt, tail, finalizers));
             it = tail.pop().unwrap();
         }
-        out
+        StmtGroup {
+            id: group.id,
+            children,
+        }
     }
 
     fn handle_stmt(
@@ -261,72 +282,65 @@ impl Transformer {
         stmt_meta: StmtMeta<AnalysisIr>,
         tail: &mut Tail,
         finalizers: &mut Finalizers,
-        nested_in_block_id: BlockId,
     ) -> Statement<Ir> {
         match stmt_meta.stmt {
             Statement::Basic { stmt, .. } => Statement::basic(stmt),
 
-            Statement::Block { id, children, meta } => {
+            Statement::Block { body, meta } => {
                 let mut empty_tail = Vec::new();
-                Statement::block(
-                    id,
-                    self.handle_stmt_list(
-                        children,
-                        if meta.has_break {
-                            &mut empty_tail
-                        } else {
-                            tail
-                        },
-                        finalizers,
-                        id,
-                    ),
-                )
+                Statement::block(self.handle_group(
+                    body,
+                    if meta.has_break {
+                        &mut empty_tail
+                    } else {
+                        tail
+                    },
+                    finalizers,
+                ))
             }
 
-            Statement::Continue { block_id, .. } => Statement::continue_(block_id),
+            Statement::Continue { group_id, .. } => Statement::continue_(group_id),
 
-            Statement::Break { block_id, .. } => Statement::break_(block_id),
+            Statement::Break { group_id, .. } => Statement::break_(group_id),
 
             Statement::If {
                 condition,
-                then_children,
+                then,
+                else_,
                 ..
             } => Statement::if_(
                 condition,
-                self.handle_stmt_list(
-                    then_children,
-                    &mut Vec::new(),
-                    finalizers,
-                    nested_in_block_id,
-                ),
-                Vec::new(),
+                self.handle_group(then, &mut Vec::new(), finalizers),
+                StmtGroup {
+                    id: else_.id,
+                    children: Vec::new(),
+                },
             ),
 
             Statement::Switch { id, key, arms, .. } => {
                 let arms = arms
                     .into_iter()
-                    .map(|(value, children)| {
+                    .map(|(value, body)| {
                         // Strictly speaking, the tail might not be empty for the last arm, but we
                         // never generate `try` inside `switch` cases on the previous passes so it
                         // doesn't matter.
-                        (
-                            value,
-                            self.handle_stmt_list(children, &mut Vec::new(), finalizers, id),
-                        )
+                        (value, self.handle_group(body, &mut Vec::new(), finalizers))
                     })
                     .collect();
                 Statement::switch(id, key, arms)
             }
 
             Statement::Try {
-                try_children,
+                try_,
                 mut catches,
+                finally,
                 ..
             } => {
                 assert_eq!(catches.len(), 1, "must have a single catch");
                 let mut catch = catches.pop().unwrap();
 
-                let try_body_is_divergent = try_children
+                let try_body_is_divergent = try_
+                    .children
                     .last()
                     .is_some_and(|stmt_meta| stmt_meta.meta.is_divergent);
                 if try_body_is_divergent {
@@ -339,39 +353,34 @@ impl Transformer {
                     // a block. The loop decoder is prepared to deal with this mess, since it has to
                     // deal with overinlining into an `if`'s `else` branch anyway.
                     for list in tail.iter_mut().rev() {
-                        catch.children.extend(list);
+                        catch.body.children.extend(list);
                         // XXX: this can invalidate `catch.meta`, oh no, what do I do??? -- stupid ass bitch
                     }
                 }
 
                 finalizers.push(Finalizer {
-                    nested_in_block_id,
+                    try_id: try_.id,
                     body: Vec::new(), // FIXME
                 });
-                let try_children = self.handle_stmt_list(
-                    try_children,
-                    &mut Vec::new(),
-                    finalizers,
-                    nested_in_block_id,
-                );
+                let try_ = self.handle_group(try_, &mut Vec::new(), finalizers);
                 finalizers.pop();
 
-                let catch_children = self.handle_stmt_list(
-                    catch.children,
-                    &mut Vec::new(),
-                    finalizers,
-                    nested_in_block_id,
-                );
+                let catch_body = self.handle_group(catch.body, &mut Vec::new(), finalizers);
+
+                let finally = StmtGroup {
+                    id: finally.id,
+                    children: Vec::new(),
+                };
 
                 Statement::try_(
-                    try_children,
+                    try_,
                     vec![Catch {
                         class: catch.class,
                         value_var: catch.value_var,
-                        children: catch_children,
+                        body: catch_body,
                         meta: catch.meta,
                     }],
-                    Vec::new(),
+                    finally,
                 )
             }
         }

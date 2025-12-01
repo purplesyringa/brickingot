@@ -2,7 +2,7 @@ mod inlining;
 mod main_opt;
 
 use self::main_opt::optimize;
-use crate::ast::{Arena, IrDef, StmtList};
+use crate::ast::{Arena, IrDef, StmtGroup};
 use crate::exceptions;
 use alloc::fmt;
 
@@ -13,7 +13,7 @@ impl IrDef for Ir {
     type IfMeta = IfMeta;
 }
 
-pub type Program = StmtList<Ir>;
+pub type Program = StmtGroup<Ir>;
 
 #[derive(Debug, Default)]
 pub struct Meta {

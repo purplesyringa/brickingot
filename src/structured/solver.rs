@@ -1,5 +1,5 @@
 use super::{exceptions::compute_syntactic_eh_ranges, gap_tracker::GapTracker};
-use crate::ast::BlockId;
+use crate::ast::GroupId;
 use crate::linear;
 use crate::utils::IntervalTree;
 use core::ops::Range;
@@ -11,11 +11,11 @@ pub enum Node {
         stmt_range: Range<usize>,
     },
     Block {
-        id: BlockId,
+        id: GroupId,
         children: Vec<Node>,
     },
     Try {
-        id: BlockId,
+        id: GroupId,
         children: Vec<Node>,
     },
     DispatchSwitch {
@@ -29,21 +29,21 @@ pub struct DispatchTarget {
     pub jump_req_id: usize,
 }
 
-/// Represents that there must exist a block covering at least the given statement region and
+/// Represents that there must exist a group covering at least the given statement region and
 /// capable of implementing the given behavior.
 #[derive(Clone, Debug)]
-pub struct BlockRequirement {
+pub struct GroupRequirement {
     pub range: Range<usize>,
     pub kind: RequirementKind,
 }
 
 #[derive(Clone, Debug)]
 pub enum RequirementKind {
-    /// The block must allow jumps to `range.start` via `break`.
+    /// The group must allow jumps to `range.start` via `break`.
     BackwardJump,
-    /// The block must allow jumps to `range.end` via `continue`.
+    /// The group must allow jumps to `range.end` via `continue`.
     ForwardJump,
-    /// The block must catch exceptions.
+    /// The group must catch exceptions.
     Try {
         /// ...and jump from `catch` to the exception handler according to this requirement.
         with_backward_catch_jump: Option<usize>,
@@ -66,25 +66,25 @@ pub enum RequirementKey {
 
 #[derive(Clone)]
 pub enum RequirementImplementation {
-    Break { block_id: BlockId },
-    Continue { block_id: BlockId },
-    ContinueToDispatcher { block_id: BlockId, selector: i32 },
-    Try { block_id: BlockId },
+    Break { block_id: GroupId },
+    Continue { block_id: GroupId },
+    ContinueToDispatcher { block_id: GroupId, selector: i32 },
+    Try { group_id: GroupId },
 }
 
-pub fn compute_block_requirements(
+pub fn compute_group_requirements(
     linear_ir: &linear::Program<'_>,
-) -> Vec<(RequirementKey, BlockRequirement)> {
+) -> Vec<(RequirementKey, GroupRequirement)> {
     let jump = |from: usize, to: usize| {
         if from < to {
-            // There must be a block covering instruction `from` and ending at `to`.
-            BlockRequirement {
+            // There must be a group covering instruction `from` and ending at `to`.
+            GroupRequirement {
                 range: from..to,
                 kind: RequirementKind::ForwardJump,
             }
         } else {
-            // There must be a block covering instruction `from` and beginning at `to`.
-            BlockRequirement {
+            // There must be a group covering instruction `from` and beginning at `to`.
+            GroupRequirement {
                 range: to..from + 1,
                 kind: RequirementKind::BackwardJump,
             }
@@ -93,7 +93,7 @@ pub fn compute_block_requirements(
 
     let mut requirements = Vec::new();
 
-    // Jumps are satisfied by normal blocks.
+    // Jumps are satisfied by blocks.
     for (stmt_index, stmt) in linear_ir.statements.iter().enumerate() {
         match stmt {
             linear::Statement::Basic(_) => {}
@@ -159,7 +159,7 @@ pub fn compute_block_requirements(
             let jump_req_id = requirements.len();
             requirements.push((
                 RequirementKey::BackwardCatch { handler_index },
-                BlockRequirement {
+                GroupRequirement {
                     range: handler.jump_target..syntactic_range.end,
                     kind: RequirementKind::BackwardJump,
                 },
@@ -169,7 +169,7 @@ pub fn compute_block_requirements(
 
         requirements.push((
             RequirementKey::Try { handler_index },
-            BlockRequirement {
+            GroupRequirement {
                 range: syntactic_range,
                 kind: RequirementKind::Try {
                     with_backward_catch_jump,
@@ -181,18 +181,18 @@ pub fn compute_block_requirements(
     requirements
 }
 
-pub fn satisfy_block_requirements(
+pub fn satisfy_group_requirements(
     program_len: usize,
-    mut block_requirements: Vec<BlockRequirement>,
-) -> (Vec<Node>, Vec<RequirementImplementation>, BlockId) {
-    if block_requirements.is_empty() {
+    mut group_requirements: Vec<GroupRequirement>,
+) -> (Vec<Node>, Vec<RequirementImplementation>, GroupId) {
+    if group_requirements.is_empty() {
         // Helps to reduce the constant factor a bit in the common case.
         return (
             vec![Node::Linear {
                 stmt_range: 0..program_len,
             }],
             Vec::new(),
-            BlockId(1),
+            GroupId(1),
         );
     }
 
@@ -226,19 +226,19 @@ pub fn satisfy_block_requirements(
 
     // Many data structures here are indexed by statement ID, and we don't want to waste cache on
     // whitespace. Unfortunately, we can't utilize basic blocks for this at this point, since we
-    // might want to make blocks that cover the terminators of a basic block, but not the basic
+    // might want to make groups that cover the terminators of a basic block, but not the basic
     // block in its entirety, and operating on BB granularity does not allow that.
     let mut used_indices: Vec<usize> = [0, program_len]
         .into_iter()
         .chain(
-            block_requirements
+            group_requirements
                 .iter()
                 .flat_map(|req| [req.range.start, req.range.end]),
         )
         .collect();
     used_indices.sort_unstable();
     used_indices.dedup();
-    for req in &mut block_requirements {
+    for req in &mut group_requirements {
         req.range.start = used_indices.binary_search(&req.range.start).unwrap();
         req.range.end = used_indices.binary_search(&req.range.end).unwrap();
     }
@@ -254,7 +254,7 @@ pub fn satisfy_block_requirements(
     let mut forward_jumps_to = vec![Vec::new(); n_statements + 1];
     let mut tries_to = vec![Vec::new(); n_statements + 1];
 
-    for (i, req) in block_requirements.iter().enumerate() {
+    for (i, req) in group_requirements.iter().enumerate() {
         req_cover.add_segment(req.range.clone());
         match req.kind {
             RequirementKind::BackwardJump => {
@@ -276,10 +276,10 @@ pub fn satisfy_block_requirements(
         }
     }
     let backward_jumps = IntervalTree::new(n_statements, backward_jumps.into_iter());
-    let imps = vec![None; block_requirements.len()];
+    let imps = vec![None; group_requirements.len()];
 
     let mut treeificator = Treeificator {
-        reqs: block_requirements,
+        reqs: group_requirements,
         req_cover,
         backward_jumps_to,
         backward_jumps,
@@ -287,7 +287,7 @@ pub fn satisfy_block_requirements(
         forward_jumps_to,
         tries_to,
         imps,
-        next_block_id: BlockId(1),
+        next_group_id: GroupId(1),
         dispatcher_at_stmt: FxHashMap::default(),
         used_indices,
     };
@@ -299,14 +299,14 @@ pub fn satisfy_block_requirements(
         treeificator
             .imps
             .into_iter()
-            .map(|imp| imp.expect("unimplemented block requirement"))
+            .map(|imp| imp.expect("unimplemented group requirement"))
             .collect(),
-        treeificator.next_block_id,
+        treeificator.next_group_id,
     )
 }
 
 struct Treeificator {
-    reqs: Vec<BlockRequirement>,
+    reqs: Vec<GroupRequirement>,
     req_cover: GapTracker,
     backward_jumps: IntervalTree,
     backward_jumps_to: Vec<Vec<usize>>,
@@ -314,7 +314,7 @@ struct Treeificator {
     forward_jumps_to: Vec<Vec<usize>>,
     tries_to: Vec<Vec<usize>>,
     imps: Vec<Option<RequirementImplementation>>,
-    next_block_id: BlockId,
+    next_group_id: GroupId,
     dispatcher_at_stmt: FxHashMap<usize, Dispatcher>,
     used_indices: Vec<usize>,
 }
@@ -329,14 +329,14 @@ impl Treeificator {
         let mut prev_gap = range.start;
         let mut nodes = Vec::new();
         while let Some(gap) = self.req_cover.first_gap(prev_gap..range.end) {
-            self.build_single_block(prev_gap..gap, &mut nodes);
+            self.build_single_group(prev_gap..gap, &mut nodes);
             prev_gap = gap;
         }
-        self.build_single_block(prev_gap..range.end, &mut nodes);
+        self.build_single_group(prev_gap..range.end, &mut nodes);
         nodes
     }
 
-    fn build_single_block(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
+    fn build_single_group(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
         // By the time this function is entered, no jumps or `try` regions cover the range strictly.
 
         // The goal here is to handle enough requirements to let a new gap appear within the range.
@@ -381,7 +381,7 @@ impl Treeificator {
         if found_jumps && try_range_start.is_some() {
             // Notably, we still shouldn't resolve forward jumps even if we're creating a block,
             // since those are logically located inside `try`.
-            self.add_normal_block(range, out);
+            self.add_block(range, out);
             return;
         }
 
@@ -411,7 +411,7 @@ impl Treeificator {
         //
         // Note that, despite our best attempts, this does not guarantee that `catch` will be easy
         // to inline. Since the bounds of a `catch` block are not stored in the bytecode, it's
-        // entirely possible that some blocks that were opened earlier get closed within the `catch`
+        // entirely possible that some groups that were opened earlier get closed within the `catch`
         // body, e.g. if `catch` contains a `continue` of an outer loop whose bounds are not
         // otherwise represented, i.e. if it ends with `break`:
         //     while (true) {
@@ -433,7 +433,7 @@ impl Treeificator {
         found_jumps |= self.resolve_forward_jumps(range.end);
         found_jumps |= self.resolve_head_to_head_collisions(range.clone());
         if found_jumps {
-            self.add_normal_block(range, out);
+            self.add_block(range, out);
             return;
         }
 
@@ -448,8 +448,8 @@ impl Treeificator {
         let try_range = &self.reqs[req_id].range;
         assert_eq!(try_range.end, range.end, "unexpected try end");
 
-        let block_id = self.next_block_id;
-        self.next_block_id.0 += 1;
+        let group_id = self.next_group_id;
+        self.next_group_id.0 += 1;
 
         // We want to generate a `try` block here. If `catch` wants to perform a backward jump, this
         // is the last chance to generate a block for that.
@@ -461,7 +461,7 @@ impl Treeificator {
         } = self.reqs[req_id].kind
             && self.imps[jump_req_id].is_none()
         {
-            let BlockRequirement {
+            let GroupRequirement {
                 range: jump_range,
                 kind: RequirementKind::BackwardJump,
             } = self.reqs[jump_req_id].clone()
@@ -478,16 +478,16 @@ impl Treeificator {
 
             let imp = if target == range.start {
                 // Jump directly to the beginning of the block, can be a normal backward jump.
-                RequirementImplementation::Continue { block_id }
+                RequirementImplementation::Continue { block_id: group_id }
             } else {
                 // Jump via dispatcher.
                 assert!(target > range.start);
-                self.add_dispatch(block_id, range.start, target)
+                self.add_dispatch(group_id, range.start, target)
             };
             self.imps[jump_req_id] = Some(imp);
 
             out.push(Node::Block {
-                id: block_id,
+                id: group_id,
                 children: self.build_list(range),
             });
             return;
@@ -497,19 +497,19 @@ impl Treeificator {
         self.req_cover.remove_segment(try_range.clone());
         self.forward_or_try_req_cover
             .remove_segment(try_range.clone());
-        self.imps[req_id] = Some(RequirementImplementation::Try { block_id });
+        self.imps[req_id] = Some(RequirementImplementation::Try { group_id });
         out.push(Node::Try {
-            id: block_id,
+            id: group_id,
             children: self.build_list(range),
         });
     }
 
-    fn add_normal_block(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
-        let block_id = self.next_block_id;
-        self.next_block_id.0 += 1;
+    fn add_block(&mut self, range: Range<usize>, out: &mut Vec<Node>) {
+        let group_id = self.next_group_id;
+        self.next_group_id.0 += 1;
 
         out.push(Node::Block {
-            id: block_id,
+            id: group_id,
             children: self.build_list(range),
         });
     }
@@ -524,7 +524,7 @@ impl Treeificator {
             self.req_cover
                 .remove_segment(self.reqs[req_id].range.clone());
             self.imps[req_id] = Some(RequirementImplementation::Continue {
-                block_id: self.next_block_id,
+                block_id: self.next_group_id,
             });
             found_jumps = true;
         }
@@ -538,7 +538,7 @@ impl Treeificator {
             self.req_cover.remove_segment(range.clone());
             self.forward_or_try_req_cover.remove_segment(range);
             self.imps[req_id] = Some(RequirementImplementation::Break {
-                block_id: self.next_block_id,
+                block_id: self.next_group_id,
             });
             found_jumps = true;
         }
@@ -564,7 +564,7 @@ impl Treeificator {
             self.req_cover
                 .remove_segment(self.reqs[req_id].range.clone());
             self.imps[req_id] = Some(self.add_dispatch(
-                self.next_block_id,
+                self.next_group_id,
                 range.start,
                 self.reqs[req_id].range.start,
             ));
@@ -597,7 +597,7 @@ impl Treeificator {
 
     fn add_dispatch(
         &mut self,
-        block_id: BlockId,
+        block_id: GroupId,
         dispatcher: usize,
         target: usize,
     ) -> RequirementImplementation {
@@ -611,7 +611,7 @@ impl Treeificator {
             .entry(target)
             .or_insert_with(|| {
                 // Create a new dispatch forward jump.
-                let jump_req = BlockRequirement {
+                let jump_req = GroupRequirement {
                     range: dispatcher..target,
                     kind: RequirementKind::ForwardJump,
                 };

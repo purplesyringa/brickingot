@@ -51,34 +51,33 @@ pub enum Statement<Ir: IrDef> {
         meta: Ir::BasicMeta,
     },
     Block {
-        id: BlockId,
-        children: StmtList<Ir>,
+        body: StmtGroup<Ir>,
         meta: Ir::BlockMeta,
     },
     Continue {
-        block_id: BlockId,
+        group_id: GroupId,
         meta: Ir::ContinueMeta,
     },
     Break {
-        block_id: BlockId,
+        group_id: GroupId,
         meta: Ir::BreakMeta,
     },
     If {
         condition: ExprId,
-        then_children: StmtList<Ir>,
-        else_children: StmtList<Ir>,
+        then: StmtGroup<Ir>,
+        else_: StmtGroup<Ir>,
         meta: Ir::IfMeta,
     },
     Switch {
-        id: BlockId,
+        id: GroupId,
         key: ExprId,
-        arms: Vec<(Option<i32>, StmtList<Ir>)>,
+        arms: Vec<(Option<i32>, StmtGroup<Ir>)>,
         meta: Ir::SwitchMeta,
     },
     Try {
-        try_children: StmtList<Ir>,
+        try_: StmtGroup<Ir>,
         catches: Vec<Catch<Ir>>,
-        finally_children: StmtList<Ir>,
+        finally: StmtGroup<Ir>,
         meta: Ir::TryMeta,
     },
 }
@@ -91,50 +90,46 @@ impl<Ir: IrDef> Statement<Ir> {
         Self::Basic { stmt, meta: NoMeta }
     }
 
-    pub fn block(id: BlockId, children: StmtList<Ir>) -> Self
+    pub fn block(body: StmtGroup<Ir>) -> Self
     where
         Ir: IrDef<BlockMeta = NoMeta>,
     {
-        Self::Block {
-            id,
-            children,
-            meta: NoMeta,
-        }
+        Self::Block { body, meta: NoMeta }
     }
 
-    pub fn continue_(block_id: BlockId) -> Self
+    pub fn continue_(group_id: GroupId) -> Self
     where
         Ir: IrDef<ContinueMeta = NoMeta>,
     {
         Self::Continue {
-            block_id,
+            group_id,
             meta: NoMeta,
         }
     }
 
-    pub fn break_(block_id: BlockId) -> Self
+    pub fn break_(group_id: GroupId) -> Self
     where
         Ir: IrDef<BreakMeta = NoMeta>,
     {
         Self::Break {
-            block_id,
+            group_id,
             meta: NoMeta,
         }
     }
 
-    pub fn if_(condition: ExprId, then_children: StmtList<Ir>, else_children: StmtList<Ir>) -> Self
+    pub fn if_(condition: ExprId, then: StmtGroup<Ir>, else_: StmtGroup<Ir>) -> Self
     where
         Ir: IrDef<IfMeta = NoMeta>,
     {
         Self::If {
             condition,
-            then_children,
-            else_children,
+            then,
+            else_,
             meta: NoMeta,
         }
     }
 
-    pub fn switch(id: BlockId, key: ExprId, arms: Vec<(Option<i32>, StmtList<Ir>)>) -> Self
+    pub fn switch(id: GroupId, key: ExprId, arms: Vec<(Option<i32>, StmtGroup<Ir>)>) -> Self
     where
         Ir: IrDef<SwitchMeta = NoMeta>,
     {
@@ -146,18 +141,14 @@ impl<Ir: IrDef> Statement<Ir> {
         }
     }
 
-    pub fn try_(
-        try_children: StmtList<Ir>,
-        catches: Vec<Catch<Ir>>,
-        finally_children: StmtList<Ir>,
-    ) -> Self
+    pub fn try_(try_: StmtGroup<Ir>, catches: Vec<Catch<Ir>>, finally: StmtGroup<Ir>) -> Self
     where
         Ir: IrDef<TryMeta = NoMeta>,
     {
         Self::Try {
-            try_children,
+            try_,
             catches,
-            finally_children,
+            finally,
             meta: NoMeta,
         }
     }
@@ -165,13 +156,19 @@ impl<Ir: IrDef> Statement<Ir> {
 
 #[derive(Clone, Copy, Debug, Display, PartialEq, Eq, PartialOrd, Ord, Hash)]
 /// {0}
-pub struct BlockId(pub u32);
+pub struct GroupId(pub u32);
 
-impl BlockId {
-    pub const ROOT: BlockId = BlockId(0);
+impl GroupId {
+    pub const ROOT: GroupId = GroupId(0);
 }
 
 pub type StmtList<Ir> = Vec<<<Ir as IrDef>::Meta as MetaDef>::WithStmt<Ir>>;
+
+#[derive_where(Debug)]
+pub struct StmtGroup<Ir: IrDef> {
+    pub id: GroupId,
+    pub children: StmtList<Ir>,
+}
 
 #[derive(Debug)]
 pub enum BasicStatement {
@@ -188,19 +185,19 @@ pub enum BasicStatement {
 pub struct Catch<Ir: IrDef> {
     pub class: Option<super::String>, // don't want to pollute the types with lifetimes
     pub value_var: Variable,
-    pub children: StmtList<Ir>,
+    pub body: StmtGroup<Ir>,
     pub meta: Ir::CatchMeta,
 }
 
 impl<Ir: IrDef> Catch<Ir> {
-    pub fn new(class: Option<super::String>, value_var: Variable, children: StmtList<Ir>) -> Self
+    pub fn new(class: Option<super::String>, value_var: Variable, body: StmtGroup<Ir>) -> Self
     where
         Ir: IrDef<CatchMeta = NoMeta>,
     {
         Self {
             class,
             value_var,
-            children,
+            body,
             meta: NoMeta,
         }
     }
@@ -216,28 +213,30 @@ impl<Ir: IrDef> DebugIr for Statement<Ir> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         match self {
             Self::Basic { stmt, meta } => write!(f, "{}{}", meta.display(), arena.debug(stmt)),
-            Self::Block { id, children, meta } => {
-                writeln!(f, "{}block #{id} {{", meta.display())?;
-                write!(f, "{}", arena.debug(&children))?;
-                write!(f, "}} block #{id}")
+            Self::Block { body, meta } => {
+                write!(f, "{}block {}", meta.display(), arena.debug(body))
             }
-            Self::Continue { block_id, meta } => {
-                write!(f, "{}continue #{block_id};", meta.display())
+            Self::Continue { group_id, meta } => {
+                write!(f, "{}continue #{group_id};", meta.display())
             }
-            Self::Break { block_id, meta } => write!(f, "{}break #{block_id};", meta.display()),
+            Self::Break { group_id, meta } => write!(f, "{}break #{group_id};", meta.display()),
             Self::If {
                 condition,
-                then_children,
-                else_children,
+                then,
+                else_,
                 meta,
             } => {
-                writeln!(f, "{}if ({}) {{", meta.display(), arena.debug(condition))?;
-                write!(f, "{}", arena.debug(&then_children))?;
-                if !else_children.is_empty() {
-                    writeln!(f, "}} else {{")?;
-                    write!(f, "{}", arena.debug(&else_children))?;
+                write!(
+                    f,
+                    "{}if ({}) {}",
+                    meta.display(),
+                    arena.debug(condition),
+                    arena.debug(then),
+                )?;
+                if !else_.children.is_empty() {
+                    write!(f, " else {}", arena.debug(else_))?;
                 }
-                write!(f, "}}")
+                Ok(())
             }
             Self::Switch {
                 id,
@@ -249,30 +248,29 @@ impl<Ir: IrDef> DebugIr for Statement<Ir> {
                     f,
                     "{}switch #{id} ({}) {{",
                     meta.display(),
-                    arena.debug(key)
+                    arena.debug(key),
                 )?;
-                for (value, children) in arms {
+                for (value, body) in arms {
                     match value {
-                        Some(value) => writeln!(f, "case {value}:")?,
-                        None => writeln!(f, "default:")?,
+                        Some(value) => write!(f, "case {value}: ")?,
+                        None => write!(f, "default: ")?,
                     }
-                    write!(f, "{}", arena.debug(&children))?;
+                    writeln!(f, "{}", arena.debug(&body))?;
                 }
                 write!(f, "}} switch #{id};")
             }
 
             Self::Try {
-                try_children,
+                try_,
                 catches,
-                finally_children,
+                finally,
                 meta,
             } => {
-                writeln!(f, "{}try {{", meta.display())?;
-                write!(f, "{}", arena.debug(&try_children))?;
+                write!(f, "{}try {}", meta.display(), arena.debug(try_))?;
                 for catch in catches {
-                    writeln!(
+                    write!(
                         f,
-                        "}} catch ({}{} {}) {{",
+                        " catch ({}{} {}) {}",
                         catch.meta.display(),
                         catch
                             .class
@@ -280,16 +278,25 @@ impl<Ir: IrDef> DebugIr for Statement<Ir> {
                             .map(|s| Str(&s.0))
                             .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),
                         catch.value_var,
+                        arena.debug(&catch.body),
                     )?;
-                    write!(f, "{}", arena.debug(&catch.children))?;
                 }
-                if !finally_children.is_empty() {
-                    writeln!(f, "}} finally {{")?;
-                    write!(f, "{}", arena.debug(&finally_children))?;
+                if !finally.children.is_empty() {
+                    write!(f, " finally {}", arena.debug(finally))?;
                 }
-                write!(f, "}}")
+                Ok(())
             }
         }
+    }
+}
+
+impl<Ir: IrDef> DebugIr for StmtGroup<Ir> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
+        writeln!(f, "#{} {{", self.id)?;
+        for stmt in &self.children {
+            writeln!(f, "{}", arena.debug(stmt))?;
+        }
+        write!(f, "}} #{}", self.id)
     }
 }
 

@@ -3,8 +3,7 @@
 
 use super::Ir;
 use crate::ast::{
-    Arena, BasicStatement, ExprId, Expression, Statement, StmtList, StmtMeta, VariableNamespace,
-    Version,
+    Arena, BasicStatement, ExprId, Expression, Statement, StmtMeta, VariableNamespace, Version,
 };
 use rustc_hash::FxHashMap;
 
@@ -17,10 +16,10 @@ pub struct Inliner<'a, 'code> {
 
 impl<'a, 'code> Inliner<'a, 'code> {
     pub fn inline_expressions(
-        stmts: StmtList<Ir>,
+        stmts: Vec<StmtMeta<Ir>>,
         arena: &mut Arena<'code>,
         n_var_mentions: &FxHashMap<Version, usize>,
-    ) -> StmtList<Ir> {
+    ) -> Vec<StmtMeta<Ir>> {
         let mut inliner = Inliner {
             arena,
             n_var_mentions,
@@ -42,7 +41,7 @@ impl<'a, 'code> Inliner<'a, 'code> {
         out
     }
 
-    fn handle_stmt_list(&mut self) -> StmtList<Ir> {
+    fn handle_stmt_list(&mut self) -> Vec<StmtMeta<Ir>> {
         let mut out = Vec::new();
 
         while let Some(stmt_meta) = self.rev_stmts.next() {

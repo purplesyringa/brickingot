@@ -11,15 +11,6 @@ impl<T: DebugIr + ?Sized> DebugIr for &T {
     }
 }
 
-impl<T: DebugIr> DebugIr for Vec<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
-        for stmt in self {
-            writeln!(f, "{}", arena.debug(stmt))?;
-        }
-        Ok(())
-    }
-}
-
 impl DebugIr for ExprId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         DebugIr::fmt(&arena[*self], f, arena)
