@@ -222,9 +222,9 @@ pub fn build_stackless_ir<'code>(
             eh @ None => {
                 eh.insert(ExceptionHandlerBlock {
                     eh_entry_for_bb_ranges: Vec::new(),
-                    // It doesn't make sense to allocate a variable here, since a single target address
-                    // may be used by multiple `catch` blocks (e.g. with different classes), so we'd
-                    // have to create new allocations.
+                    // It doesn't make sense to allocate a variable here, since a single target
+                    // address may be used by multiple `catch` blocks (e.g. with different classes),
+                    // so we'd have to create new allocations.
                     stack_version: arena.version(),
                     value_var: Some(value_var),
                     stack_value_copy_is_necessary: true, // populated by `splitting`
