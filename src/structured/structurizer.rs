@@ -1,8 +1,8 @@
 use super::{
     CatchMeta, Index, IndexMeta, Ir, Program,
     solver::{
-        Node, RequirementImplementation, RequirementKey, compute_group_requirements,
-        satisfy_group_requirements,
+        Node, NodeId, RequirementImplementation, RequirementKey, compute_node_requirements,
+        satisfy_node_requirements,
     },
 };
 use crate::ast::{
@@ -24,11 +24,11 @@ pub fn structure_control_flow<'code>(
     // does not cover this implementation in its entirety, but it's pretty close.
     // `compute_group_requirements` effectively generates the arrows, `satisfy_group_requirements`
     // effectively builds a tree, and everything else is glue and exception handling logic.
-    let requirements = compute_group_requirements(&linear_ir);
+    let requirements = compute_node_requirements(&linear_ir);
     let (mut req_keys, req_values): (Vec<_>, _) = requirements.into_iter().unzip();
 
-    let (tree, implementations, next_group_id) =
-        satisfy_group_requirements(linear_ir.statements.len(), req_values);
+    let (tree, implementations, n_node_ids) =
+        satisfy_node_requirements(linear_ir.statements.len(), req_values);
 
     // Add keys for dynamically created dispatch jumps.
     let mut id = req_keys.len();
@@ -38,18 +38,16 @@ pub fn structure_control_flow<'code>(
         key
     });
 
-    let mut try_block_to_handler: FxHashMap<GroupId, usize> = FxHashMap::default();
+    let mut try_node_to_handler: FxHashMap<NodeId, usize> = FxHashMap::default();
     let mut jump_implementations = FxHashMap::default();
     let mut has_dispatch = false;
     for (key, imp) in req_keys.into_iter().zip(implementations) {
-        if let RequirementImplementation::Try { group_id } = imp {
+        if let RequirementImplementation::Try { node_id } = imp {
             let RequirementKey::Try { handler_index } = key else {
                 panic!("unexpected key for try implementation");
             };
             assert!(
-                try_block_to_handler
-                    .insert(group_id, handler_index)
-                    .is_none(),
+                try_node_to_handler.insert(node_id, handler_index).is_none(),
                 "multiple handlers per try block"
             );
         } else {
@@ -64,15 +62,16 @@ pub fn structure_control_flow<'code>(
         arena,
         statements: linear_ir.statements,
         catch_handlers: linear_ir.catch_handlers.into_iter().map(Some).collect(),
-        try_block_to_handler,
+        node_id_to_group_id: vec![GroupId(u32::MAX); n_node_ids],
+        try_node_to_handler,
         jump_implementations,
-        next_group_id,
+        next_group_id: GroupId::ROOT,
         selector_version: arena.version(),
     };
 
-    let mut children = structurizer.emit_tree(tree);
+    let mut root = structurizer.emit_group(None, tree);
     if has_dispatch {
-        children.insert(
+        root.children.insert(
             0,
             Statement::Basic {
                 stmt: BasicStatement::Assign {
@@ -83,27 +82,39 @@ pub fn structure_control_flow<'code>(
             },
         );
     }
-    StmtGroup {
-        children,
-        id: GroupId::ROOT,
-    }
+    root
 }
 
 struct Structurizer<'arena, 'code> {
     arena: &'arena Arena<'code>,
     statements: Vec<linear::Statement>,
     catch_handlers: Vec<Option<CatchHandler<'code>>>,
-    try_block_to_handler: FxHashMap<GroupId, usize>,
+    node_id_to_group_id: Vec<GroupId>,
+    try_node_to_handler: FxHashMap<NodeId, usize>,
     jump_implementations: FxHashMap<RequirementKey, RequirementImplementation>,
     next_group_id: GroupId,
     selector_version: Version,
 }
 
 impl Structurizer<'_, '_> {
-    fn emit_tree(&mut self, tree: Vec<Node>) -> StmtList<Ir> {
+    fn emit_group(&mut self, node_id: Option<NodeId>, children: Vec<Node>) -> StmtGroup<Ir> {
+        let group_id = self.alloc_group_id();
+        if let Some(node_id) = node_id {
+            // Allocate a new group ID instead of reusing the node ID, since we require group IDs to
+            // be ordered according to preorder traversal and want to insert new groups between node
+            // IDs.
+            self.node_id_to_group_id[node_id.0 as usize] = group_id;
+        }
+        StmtGroup {
+            id: group_id,
+            children: self.emit_list(children),
+        }
+    }
+
+    fn emit_list(&mut self, list: Vec<Node>) -> StmtList<Ir> {
         // This does not need to be exact, but it turns out that computing the size is better than
         // using a rough estimate just because we're hammering the allocator too much otherwise.
-        let capacity = tree
+        let capacity = list
             .iter()
             .map(|node| match node {
                 Node::Linear { stmt_range } => stmt_range.len(),
@@ -111,7 +122,7 @@ impl Structurizer<'_, '_> {
             })
             .sum();
         let mut stmts = Vec::with_capacity(capacity);
-        for node in tree {
+        for node in list {
             self.emit_node(node, &mut stmts);
         }
         stmts
@@ -125,76 +136,76 @@ impl Structurizer<'_, '_> {
                 }
             }
 
-            Node::Block { id, children } => {
-                out.push(Statement::block(StmtGroup {
-                    id,
-                    children: self.emit_tree(children),
-                }));
+            Node::Block {
+                id: node_id,
+                children,
+            } => {
+                out.push(Statement::block(self.emit_group(Some(node_id), children)));
             }
 
             Node::Try { id, children } => {
-                let children = self.emit_tree(children);
+                let try_ = self.emit_group(None, children);
 
                 let handler_index = self
-                    .try_block_to_handler
+                    .try_node_to_handler
                     .remove(&id)
                     .expect("try block without catch");
                 let handler = self.catch_handlers[handler_index]
                     .take()
                     .expect("missing `catch` handler");
 
-                let mut catch_children = Vec::new();
+                let mut catch = self.empty_group();
                 if let Some(stmt) = handler.stack_value_copy {
-                    catch_children.push(Statement::Basic {
+                    catch.children.push(Statement::Basic {
                         stmt,
                         meta: IndexMeta::synthetic(),
                     });
                 }
                 let key = RequirementKey::BackwardCatch { handler_index };
                 if self.jump_implementations.contains_key(&key) {
-                    self.emit_jump(key, Index::Synthetic, &mut catch_children);
+                    self.emit_jump(key, Index::Synthetic, &mut catch.children);
                 }
 
                 out.push(Statement::try_(
-                    self.new_group(children),
+                    try_,
                     vec![Catch {
                         class: handler.class.map(|s| crate::ast::String(s.0.to_owned())),
                         value_var: handler.value_var,
-                        body: self.new_group(catch_children),
+                        body: catch,
                         meta: CatchMeta {
                             active_index_ranges: handler.active_ranges,
                         },
                     }],
-                    self.new_group(Vec::new()),
+                    self.empty_group(),
                 ));
             }
 
             Node::DispatchSwitch { dispatch_targets } => {
                 // Dispatch targets can never point to the statement after the switch, since such
                 // jumps would be trivially lowered to a normal, non-dispatch jump to this `switch`.
-                let id = self.next_group_id;
-                self.next_group_id.0 += 1;
+                let group_id = self.alloc_group_id();
                 out.push(Statement::Switch {
-                    id,
+                    id: group_id,
                     key: self.selector(),
                     arms: dispatch_targets
                         .into_iter()
                         .map(|target| {
-                            let mut children = vec![Statement::Basic {
+                            let mut body = self.empty_group();
+                            body.children.push(Statement::Basic {
                                 stmt: BasicStatement::Assign {
                                     target: self.selector(),
                                     value: self.arena.int(0),
                                 },
                                 meta: IndexMeta::synthetic(),
-                            }];
+                            });
                             self.emit_jump(
                                 RequirementKey::Dispatch {
                                     req_id: target.jump_req_id,
                                 },
                                 Index::Synthetic,
-                                &mut children,
+                                &mut body.children,
                             );
-                            (Some(target.selector), self.new_group(children))
+                            (Some(target.selector), body)
                         })
                         .collect(),
                     meta: IndexMeta::synthetic(),
@@ -223,8 +234,8 @@ impl Structurizer<'_, '_> {
                 } else {
                     out.push(Statement::if_(
                         condition,
-                        self.new_group(Vec::new()),
-                        self.new_group(Vec::new()),
+                        self.empty_group(),
+                        self.empty_group(),
                     ));
                     let Some(Statement::If { then, .. }) = out.last_mut() else {
                         unreachable!()
@@ -242,16 +253,15 @@ impl Structurizer<'_, '_> {
                     .collect();
                 arms.sort_unstable_by_key(|(_, target)| *target);
 
-                let id = self.next_group_id;
-                self.next_group_id.0 += 1;
+                let group_id = self.alloc_group_id();
                 out.push(Statement::Switch {
-                    id,
+                    id: group_id,
                     key,
                     arms: arms
                         .iter()
                         .enumerate()
                         .map(|(i, &(key, target))| {
-                            let mut children = Vec::new();
+                            let mut body = self.empty_group();
                             if let Some((_, next_target)) = arms.get(i + 1)
                                 && target == *next_target
                             {
@@ -264,16 +274,16 @@ impl Structurizer<'_, '_> {
                                 // breaking from the switch itself. Breaks from the last arm don't
                                 // have to be emitted.
                                 if i != arms.len() - 1 {
-                                    children.push(Statement::Break { group_id: id, meta });
+                                    body.children.push(Statement::Break { group_id, meta });
                                 }
                             } else {
                                 self.emit_jump(
                                     RequirementKey::Switch { stmt_index, key },
                                     index,
-                                    &mut children,
+                                    &mut body.children,
                                 );
                             }
-                            (key, self.new_group(children))
+                            (key, body)
                         })
                         .collect(),
                     meta,
@@ -289,19 +299,19 @@ impl Structurizer<'_, '_> {
         let meta = IndexMeta { index };
 
         match *imp {
-            RequirementImplementation::Break { block_id } => {
+            RequirementImplementation::Break { node_id } => {
                 out.push(Statement::Break {
-                    group_id: block_id,
+                    group_id: self.node_id_to_group_id[node_id.0 as usize],
                     meta,
                 });
             }
-            RequirementImplementation::Continue { block_id } => {
+            RequirementImplementation::Continue { node_id } => {
                 out.push(Statement::Continue {
-                    group_id: block_id,
+                    group_id: self.node_id_to_group_id[node_id.0 as usize],
                     meta,
                 });
             }
-            RequirementImplementation::ContinueToDispatcher { block_id, selector } => {
+            RequirementImplementation::ContinueToDispatcher { node_id, selector } => {
                 out.push(Statement::Basic {
                     stmt: BasicStatement::Assign {
                         target: self.selector(),
@@ -310,7 +320,7 @@ impl Structurizer<'_, '_> {
                     meta,
                 });
                 out.push(Statement::Continue {
-                    group_id: block_id,
+                    group_id: self.node_id_to_group_id[node_id.0 as usize],
                     meta,
                 });
             }
@@ -327,9 +337,16 @@ impl Structurizer<'_, '_> {
         self.arena.var(var!(selector0 v self.selector_version))
     }
 
-    fn new_group(&mut self, children: StmtList<Ir>) -> StmtGroup<Ir> {
+    fn alloc_group_id(&mut self) -> GroupId {
         let id = self.next_group_id;
         self.next_group_id.0 += 1;
-        StmtGroup { id, children }
+        id
+    }
+
+    fn empty_group(&mut self) -> StmtGroup<Ir> {
+        StmtGroup {
+            id: self.alloc_group_id(),
+            children: Vec::new(),
+        }
     }
 }
