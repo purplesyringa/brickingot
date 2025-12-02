@@ -1,9 +1,11 @@
 use super::{AnalysisBlockMeta, AnalysisIr, AnalysisMeta, Ir, Program};
 use crate::ast::{
-    Arena, BasicStatement, Catch, GroupId, Statement, StmtGroup, StmtMeta, isomorphism,
+    Arena, BasicStatement, Catch, ExprId, Expression, GroupId, Statement, StmtGroup, StmtList,
+    StmtMeta, Version, isomorphism,
 };
 use crate::structured;
-use rustc_hash::FxHashSet;
+use core::ops::Range;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub fn parse_try_blocks(arena: &Arena<'_>, ir: structured::Program) -> Program {
     // Our plan:
@@ -15,25 +17,35 @@ pub fn parse_try_blocks(arena: &Arena<'_>, ir: structured::Program) -> Program {
     // `finally` statements directly precede this statement.
 
     let mut analyzer = Analyzer {
+        arena,
         groups_with_breaks: FxHashSet::default(),
+        next_access_id: 0,
+        var_use_range: FxHashMap::default(),
     };
     let ir = analyzer.handle_group(ir).0;
 
-    let transformer = Transformer { arena };
+    let transformer = Transformer {
+        arena,
+        var_use_range: analyzer.var_use_range,
+    };
     transformer.handle_group(ir, &mut Vec::new(), &mut Vec::new())
 }
 
-struct Analyzer {
+struct Analyzer<'arena, 'code> {
+    arena: &'arena Arena<'code>,
     groups_with_breaks: FxHashSet<GroupId>,
+    next_access_id: usize,
+    var_use_range: FxHashMap<Version, Range<usize>>,
 }
 
-impl Analyzer {
+impl Analyzer<'_, '_> {
     fn handle_group(
         &mut self,
         group: StmtGroup<structured::Ir>,
     ) -> (StmtGroup<AnalysisIr>, AnalysisMeta) {
         let mut meta = AnalysisMeta {
             measure: 1,
+            access_range: self.next_access_id..0,
             is_divergent: false,
         };
         let children = group
@@ -45,6 +57,7 @@ impl Analyzer {
                 meta.is_divergent = stmt_meta.meta.is_divergent;
             })
             .collect();
+        meta.access_range.end = self.next_access_id;
         (
             StmtGroup {
                 id: group.id,
@@ -57,10 +70,15 @@ impl Analyzer {
     fn handle_stmt(&mut self, stmt: Statement<structured::Ir>) -> StmtMeta<AnalysisIr> {
         match stmt {
             Statement::Basic { stmt, .. } => {
-                let meta = AnalysisMeta {
+                let mut meta = AnalysisMeta {
                     measure: 1,
+                    access_range: self.next_access_id..0,
                     is_divergent: stmt.is_divergent(),
                 };
+                for expr in stmt.subexprs() {
+                    self.handle_expr(expr);
+                }
+                meta.access_range.end = self.next_access_id;
                 StmtMeta {
                     stmt: Statement::basic(stmt),
                     meta,
@@ -84,6 +102,7 @@ impl Analyzer {
                 stmt: Statement::continue_(group_id),
                 meta: AnalysisMeta {
                     measure: 1,
+                    access_range: self.next_access_id..self.next_access_id,
                     is_divergent: true,
                 },
             },
@@ -94,6 +113,7 @@ impl Analyzer {
                     stmt: Statement::break_(group_id),
                     meta: AnalysisMeta {
                         measure: 1,
+                        access_range: self.next_access_id..self.next_access_id,
                         is_divergent: true,
                     },
                 }
@@ -105,7 +125,10 @@ impl Analyzer {
                 else_,
                 ..
             } => {
-                let (then, mut meta) = self.handle_group(then);
+                let mut access_range = self.next_access_id..0;
+                self.handle_expr(condition);
+                access_range.end = self.next_access_id;
+                let (then, then_meta) = self.handle_group(then);
                 assert!(
                     else_.children.is_empty(),
                     "shouldn't have anything in else yet",
@@ -114,18 +137,23 @@ impl Analyzer {
                     id: else_.id,
                     children: Vec::new(),
                 };
-                meta.is_divergent = false; // `else` is empty
                 StmtMeta {
                     stmt: Statement::if_(condition, then, else_),
-                    meta,
+                    meta: AnalysisMeta {
+                        measure: then_meta.measure,
+                        access_range,
+                        is_divergent: false, // `else` is empty
+                    },
                 }
             }
 
             Statement::Switch { id, key, arms, .. } => {
                 let mut meta = AnalysisMeta {
                     measure: 1,
+                    access_range: self.next_access_id..0,
                     is_divergent: false,
                 };
+                self.handle_expr(key);
                 let arms = arms
                     .into_iter()
                     .map(|(value, body)| {
@@ -135,6 +163,7 @@ impl Analyzer {
                         (value, arm_body)
                     })
                     .collect();
+                meta.access_range.end = self.next_access_id;
                 let has_break = self.groups_with_breaks.remove(&id);
                 meta.is_divergent &= !has_break;
                 StmtMeta {
@@ -151,6 +180,7 @@ impl Analyzer {
             } => {
                 let mut meta = AnalysisMeta {
                     measure: 1,
+                    access_range: self.next_access_id..0,
                     is_divergent: false,
                 };
 
@@ -182,11 +212,26 @@ impl Analyzer {
                     children: Vec::new(),
                 };
 
+                meta.access_range.end = self.next_access_id;
+
                 StmtMeta {
                     stmt: Statement::try_(try_, catches, finally),
                     meta,
                 }
             }
+        }
+    }
+
+    fn handle_expr(&mut self, expr_id: ExprId) {
+        if let Expression::Variable(var) = self.arena[expr_id] {
+            self.var_use_range
+                .entry(var.version)
+                .or_insert(self.next_access_id..0)
+                .end = self.next_access_id + 1;
+            self.next_access_id += 1;
+        }
+        for sub_expr_id in self.arena[expr_id].subexprs() {
+            self.handle_expr(sub_expr_id);
         }
     }
 }
@@ -201,11 +246,35 @@ type Tail = Vec<alloc::vec::IntoIter<StmtMeta<AnalysisIr>>>;
 type Finalizers = Vec<Finalizer>;
 struct Finalizer {
     try_id: GroupId,
-    body: Vec<StmtMeta<AnalysisIr>>,
+    body: StmtList<AnalysisIr>,
+    measure: usize,
+    access_range: Range<usize>,
+}
+
+impl Finalizer {
+    fn compare(
+        &self,
+        arena: &Arena<'_>,
+        var_use_range: &FxHashMap<Version, Range<usize>>,
+        body: &[StmtMeta<AnalysisIr>],
+    ) -> bool {
+        let body_measure = body.iter().map(|stmt_meta| stmt_meta.meta.measure).sum();
+        // Comparing the measure is necessary to guarantee overall linear time, see the comment in
+        // `handle_group` below.
+        self.measure == body_measure
+            && isomorphism::compare(
+                arena,
+                var_use_range,
+                &*self.body,
+                body,
+                self.access_range.clone(),
+            )
+    }
 }
 
 struct Transformer<'arena, 'code> {
     arena: &'arena Arena<'code>,
+    var_use_range: FxHashMap<Version, Range<usize>>,
 }
 
 impl Transformer<'_, '_> {
@@ -239,11 +308,12 @@ impl Transformer<'_, '_> {
             _ => None,
         };
         if let Some(exits_group_id) = exits_group_id {
+            // Logarithmic, but it's fine.
             let start = finalizers.partition_point(|finalizer| finalizer.try_id < exits_group_id);
 
             // Try to match finalizers. If an expected finalizer could not be matched, it's not
-            // a big deal: we can use what Vineflower calls "predicated finally block", i.e. wrap
-            // the `finally` contents in an `if` whose condition is set on "good" exits and reset on
+            // a big deal: we can use what Vineflower calls a "predicated finally block", i.e. wrap
+            // the `finally` contents in an `if` whose condition is set on "good" exits and unset on
             // "bad" exits from `try` body.
             //
             // If there are multiple expected finalizers, we find the longest matching suffix (i.e.
@@ -254,9 +324,21 @@ impl Transformer<'_, '_> {
             // best idea.
             let mut i = group.children.len() - 1;
             for finalizer in &finalizers[start..] {
-                if self.compare_stmt_lists(
+                // This comparison iterates over each node in the subtree, but as far as I can tell,
+                // the total runtime is still linear thanks to the check for `measure`.
+                //
+                // The proof sketch goes something like this. Suppose there is a nested sequence of
+                // finalizers of lengths a_1, a_2, ..., a_k. If a_1...a_{k-1} match and a_k fails to
+                // match, we'll recurse into what we thought was a copy of the k'th finalizer.
+                // A term of size a_k can only contain subterms of strictly smaller sizes, so in the
+                // worst-case scenario, `a_k > a_1 + ... + a_{k-1}` so that as many nodes are
+                // recompared as possible. This implies that `a_k` grows exponentially, and so for
+                // the total time we have:
+                //     a_1 + (a_1 + a_2) + ... + (a_1 + ... + a_k) = O(a_1 + ... + a_k) = O(n)
+                if finalizer.compare(
+                    self.arena,
+                    &self.var_use_range,
                     &group.children[i.saturating_sub(finalizer.body.len())..i],
-                    &finalizer.body,
                 ) {
                     i -= finalizer.body.len();
                 } else {
@@ -363,7 +445,9 @@ impl Transformer<'_, '_> {
 
                 finalizers.push(Finalizer {
                     try_id: try_.id,
-                    body: Vec::new(), // FIXME
+                    body: Vec::new(),   // FIXME
+                    measure: 0,         // FIXME
+                    access_range: 0..0, // FIXME
                 });
                 let try_ = self.handle_group(try_, &mut Vec::new(), finalizers);
                 finalizers.pop();
@@ -387,13 +471,6 @@ impl Transformer<'_, '_> {
                 )
             }
         }
-    }
-
-    fn compare_stmt_lists(&self, xs: &[StmtMeta<AnalysisIr>], ys: &[StmtMeta<AnalysisIr>]) -> bool {
-        // The implementation details of this isomorphism check significantly affect the time
-        // complexity guarantees of the EH pass. The guarantee sufficient for overall linear time
-        // is: if we decide to recurse into `xs`, we never recurse into subtrees of `xs`.
-        isomorphism::compare(self.arena, xs, ys)
     }
 }
 

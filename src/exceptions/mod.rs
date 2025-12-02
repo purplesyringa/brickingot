@@ -5,6 +5,7 @@ pub use self::parse::parse_try_blocks;
 use crate::ast::{IrDef, StmtGroup};
 pub use crate::structured::CatchMeta;
 use core::fmt;
+use core::ops::Range;
 
 pub struct Ir;
 
@@ -33,6 +34,8 @@ pub struct AnalysisMeta {
     // Ideally, different random trees should also have different measures. Used as an asymptotic
     // optimization for locating `finally` blocks.
     measure: usize,
+    // Range of variable accesses located entirely within this statement.
+    access_range: Range<usize>,
     is_divergent: bool,
 }
 
