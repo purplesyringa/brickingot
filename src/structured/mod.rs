@@ -23,7 +23,7 @@ pub type Program = StmtGroup<Ir>;
 #[derive(Clone, Copy, Debug, Display)]
 /// {index}.
 pub struct IndexMeta {
-    index: Index,
+    pub index: Index,
 }
 
 impl IndexMeta {
