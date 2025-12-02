@@ -1,11 +1,14 @@
-use super::{AnalysisBlockMeta, AnalysisIr, AnalysisMeta, Ir, Program};
+use super::{
+    Ir, Program,
+    analysis::{self, VariableInfo},
+};
 use crate::ast::{
-    Arena, BasicStatement, Catch, ExprId, Expression, GroupId, Statement, StmtGroup, StmtList,
-    StmtMeta, Variable, VariableNamespace, Version, isomorphism,
+    Arena, BasicStatement, Catch, Expression, GroupId, Statement, StmtGroup, StmtList, StmtMeta,
+    VariableNamespace, Version, isomorphism,
 };
 use crate::structured;
 use core::ops::Range;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 pub fn parse_try_blocks(arena: &Arena<'_>, ir: structured::Program) -> Program {
     // Our plan:
@@ -13,249 +16,25 @@ pub fn parse_try_blocks(arena: &Arena<'_>, ir: structured::Program) -> Program {
     // - Recognize every `catch (...)` that looks like `finally`.
     // - Find patterns that exactly match such `finally`s inside `try` bodies.
 
-    let mut analyzer = Analyzer {
-        arena,
-        groups_with_breaks: FxHashSet::default(),
-        next_access_id: 0,
-        var_info: FxHashMap::default(),
-    };
-    let ir = analyzer.handle_group(ir).0;
-
+    let analyzed = analysis::analyze(arena, ir);
     let transformer = Transformer {
         arena,
-        var_info: analyzer.var_info,
+        var_info: analyzed.var_info,
     };
-    transformer.handle_group(ir, &mut Vec::new(), &mut Vec::new())
-}
-
-struct VariableInfo {
-    use_range: Range<usize>,
-    use_count: usize,
-}
-
-struct Analyzer<'arena, 'code> {
-    arena: &'arena Arena<'code>,
-    groups_with_breaks: FxHashSet<GroupId>,
-    next_access_id: usize,
-    var_info: FxHashMap<Version, VariableInfo>,
-}
-
-impl Analyzer<'_, '_> {
-    fn handle_group(
-        &mut self,
-        group: StmtGroup<structured::Ir>,
-    ) -> (StmtGroup<AnalysisIr>, AnalysisMeta) {
-        let mut meta = AnalysisMeta {
-            measure: 1,
-            access_range: self.next_access_id..0,
-            is_divergent: false,
-        };
-        let children = group
-            .children
-            .into_iter()
-            .map(|stmt| self.handle_stmt(stmt))
-            .inspect(|stmt_meta| {
-                meta.measure += stmt_meta.meta.measure;
-                meta.is_divergent = stmt_meta.meta.is_divergent;
-            })
-            .collect();
-        meta.access_range.end = self.next_access_id;
-        (
-            StmtGroup {
-                id: group.id,
-                children,
-            },
-            meta,
-        )
-    }
-
-    fn handle_stmt(&mut self, stmt: Statement<structured::Ir>) -> StmtMeta<AnalysisIr> {
-        match stmt {
-            Statement::Basic { stmt, .. } => {
-                let mut meta = AnalysisMeta {
-                    measure: 1,
-                    access_range: self.next_access_id..0,
-                    is_divergent: stmt.is_divergent(),
-                };
-                for expr in stmt.subexprs() {
-                    self.handle_expr(expr);
-                }
-                meta.access_range.end = self.next_access_id;
-                StmtMeta {
-                    stmt: Statement::basic(stmt),
-                    meta,
-                }
-            }
-
-            Statement::Block { body, .. } => {
-                let (body, mut meta) = self.handle_group(body);
-                let has_break = self.groups_with_breaks.remove(&body.id);
-                meta.is_divergent &= !has_break;
-                StmtMeta {
-                    stmt: Statement::Block {
-                        body,
-                        meta: AnalysisBlockMeta { has_break },
-                    },
-                    meta,
-                }
-            }
-
-            Statement::Continue { group_id, .. } => StmtMeta {
-                stmt: Statement::continue_(group_id),
-                meta: AnalysisMeta {
-                    measure: 1,
-                    access_range: self.next_access_id..self.next_access_id,
-                    is_divergent: true,
-                },
-            },
-
-            Statement::Break { group_id, .. } => {
-                self.groups_with_breaks.insert(group_id);
-                StmtMeta {
-                    stmt: Statement::break_(group_id),
-                    meta: AnalysisMeta {
-                        measure: 1,
-                        access_range: self.next_access_id..self.next_access_id,
-                        is_divergent: true,
-                    },
-                }
-            }
-
-            Statement::If {
-                condition,
-                then,
-                else_,
-                ..
-            } => {
-                let mut access_range = self.next_access_id..0;
-                self.handle_expr(condition);
-                access_range.end = self.next_access_id;
-                let (then, then_meta) = self.handle_group(then);
-                assert!(
-                    else_.children.is_empty(),
-                    "shouldn't have anything in else yet",
-                );
-                let else_ = StmtGroup {
-                    id: else_.id,
-                    children: Vec::new(),
-                };
-                StmtMeta {
-                    stmt: Statement::if_(condition, then, else_),
-                    meta: AnalysisMeta {
-                        measure: then_meta.measure,
-                        access_range,
-                        is_divergent: false, // `else` is empty
-                    },
-                }
-            }
-
-            Statement::Switch { id, key, arms, .. } => {
-                let mut meta = AnalysisMeta {
-                    measure: 1,
-                    access_range: self.next_access_id..0,
-                    is_divergent: false,
-                };
-                self.handle_expr(key);
-                let arms = arms
-                    .into_iter()
-                    .map(|(value, body)| {
-                        let (arm_body, arm_meta) = self.handle_group(body);
-                        meta.measure += arm_meta.measure;
-                        meta.is_divergent = arm_meta.is_divergent;
-                        (value, arm_body)
-                    })
-                    .collect();
-                meta.access_range.end = self.next_access_id;
-                let has_break = self.groups_with_breaks.remove(&id);
-                meta.is_divergent &= !has_break;
-                StmtMeta {
-                    stmt: Statement::switch(id, key, arms),
-                    meta,
-                }
-            }
-
-            Statement::Try {
-                try_,
-                catches,
-                finally,
-                ..
-            } => {
-                let mut meta = AnalysisMeta {
-                    measure: 1,
-                    access_range: self.next_access_id..0,
-                    is_divergent: false,
-                };
-
-                let (try_, try_meta) = self.handle_group(try_);
-                meta.measure += try_meta.measure;
-                meta.is_divergent = try_meta.is_divergent;
-
-                let catches = catches
-                    .into_iter()
-                    .map(|catch| {
-                        let (catch_body, catch_meta) = self.handle_group(catch.body);
-                        meta.measure += catch_meta.measure;
-                        meta.is_divergent &= catch_meta.is_divergent;
-                        self.handle_var(catch.value_var);
-                        Catch {
-                            class: catch.class,
-                            value_var: catch.value_var,
-                            body: catch_body,
-                            meta: catch.meta,
-                        }
-                    })
-                    .collect();
-
-                assert!(
-                    finally.children.is_empty(),
-                    "shouldn't have anything in finally yet",
-                );
-                let finally = StmtGroup {
-                    id: finally.id,
-                    children: Vec::new(),
-                };
-
-                meta.access_range.end = self.next_access_id;
-
-                StmtMeta {
-                    stmt: Statement::try_(try_, catches, finally),
-                    meta,
-                }
-            }
-        }
-    }
-
-    fn handle_expr(&mut self, expr_id: ExprId) {
-        if let Expression::Variable(var) = self.arena[expr_id] {
-            self.handle_var(var);
-        }
-        for sub_expr_id in self.arena[expr_id].subexprs() {
-            self.handle_expr(sub_expr_id);
-        }
-    }
-
-    fn handle_var(&mut self, var: Variable) {
-        let var_info = self.var_info.entry(var.version).or_insert(VariableInfo {
-            use_range: self.next_access_id..0,
-            use_count: 0,
-        });
-        var_info.use_range.end = self.next_access_id + 1;
-        self.next_access_id += 1;
-        var_info.use_count += 1;
-    }
+    transformer.handle_group(analyzed.program, &mut Vec::new(), &mut Vec::new())
 }
 
 // A list of iterators over statements that are known to be executed by fallthrough after the
 // current statement, and *only* by that fallthrough. The statements always directly follow the
 // current statement without skipping any statements, but may cross `} #n` boundaries as long the
 // group is never broken from.
-type Tail = Vec<alloc::vec::IntoIter<StmtMeta<AnalysisIr>>>;
+type Tail = Vec<alloc::vec::IntoIter<StmtMeta<analysis::Ir>>>;
 
 // A list of open `try` blocks with non-empty `finally` bodies.
 type Finalizers = Vec<Finalizer>;
 struct Finalizer {
     try_id: GroupId,
-    body: StmtList<AnalysisIr>,
+    body: StmtList<analysis::Ir>,
     measure: usize,
     access_range: Range<usize>,
 }
@@ -265,7 +44,7 @@ impl Finalizer {
         &self,
         arena: &Arena<'_>,
         var_info: &FxHashMap<Version, VariableInfo>,
-        body: &[StmtMeta<AnalysisIr>],
+        body: &[StmtMeta<analysis::Ir>],
     ) -> bool {
         let body_measure = body.iter().map(|stmt_meta| stmt_meta.meta.measure).sum();
         // Comparing the measure is necessary to guarantee overall linear time, see the comment in
@@ -289,7 +68,7 @@ struct Transformer<'arena, 'code> {
 impl Transformer<'_, '_> {
     fn handle_group(
         &self,
-        mut group: StmtGroup<AnalysisIr>,
+        mut group: StmtGroup<analysis::Ir>,
         tail: &mut Tail,
         finalizers: &mut Finalizers,
     ) -> StmtGroup<Ir> {
@@ -373,7 +152,7 @@ impl Transformer<'_, '_> {
 
     fn handle_stmt(
         &self,
-        stmt_meta: StmtMeta<AnalysisIr>,
+        stmt_meta: StmtMeta<analysis::Ir>,
         tail: &mut Tail,
         finalizers: &mut Finalizers,
     ) -> Statement<Ir> {
@@ -426,133 +205,140 @@ impl Transformer<'_, '_> {
 
             Statement::Try {
                 try_,
-                mut catches,
+                catches,
                 finally,
                 ..
-            } => {
-                assert_eq!(catches.len(), 1, "must have a single catch");
-                let mut catch = catches.pop().unwrap();
+            } => self.handle_try(try_, catches, finally, tail, finalizers),
+        }
+    }
 
-                let try_body_is_divergent = try_
-                    .children
-                    .last()
-                    .is_some_and(|stmt_meta| stmt_meta.meta.is_divergent);
-                if try_body_is_divergent {
-                    // Inline tail. This can inline more than just the `catch` body, since it can
-                    // also inline e.g. the iteration statement of a `for` loop.
-                    //
-                    // This is somewhat confusing, but ultimately does not break any invariant. We
-                    // need every block to either have a `break` to it or to end with something
-                    // containing a `continue` to it, but we're inlining into `catch`, not into
-                    // a block. The loop decoder is prepared to deal with this mess, since it has to
-                    // deal with overinlining into an `if`'s `else` branch anyway.
-                    for list in tail.iter_mut().rev() {
-                        catch.body.children.extend(list);
-                    }
-                }
+    fn handle_try(
+        &self,
+        try_: StmtGroup<analysis::Ir>,
+        mut catches: Vec<Catch<analysis::Ir>>,
+        finally: StmtGroup<analysis::Ir>,
+        tail: &mut Tail,
+        finalizers: &mut Finalizers,
+    ) -> Statement<Ir> {
+        assert_eq!(catches.len(), 1, "must have a single catch");
+        let mut catch = catches.pop().unwrap();
 
-                // Catch bodies typically begin by moving the exception value to stack, but we don't
-                // want to fixup `value_var` to `slotN` right now because `slotN` might be used
-                // outside `catch` and this would lead to shadowing. We play safe and delay this
-                // until a later pass.
-
-                // `finally` blocks typically translate to `catch` bodies as:
-                //     slotN = valueM
-                //     <body>
-                //     valueK = slotN
-                //     throw valueK
-                // Match this pattern exactly.
-                if catch.class.is_none()
-                    && catch.body.children.len() >= 3
-                    // `slotN = valueM`
-                    && let Statement::Basic {
-                        stmt:
-                            BasicStatement::Assign {
-                                target: store_target,
-                                value: store_source,
-                            },
-                        ..
-                    } = catch.body.children[0].stmt
-                    && let Expression::Variable(store_target) = self.arena[store_target]
-                    && store_target.name.namespace == VariableNamespace::Slot
-                    && let Expression::Variable(store_source) = self.arena[store_source]
-                    && store_source == catch.value_var
-                    // `valueK = slotN`
-                    && let Statement::Basic {
-                        stmt:
-                            BasicStatement::Assign {
-                                target: load_target,
-                                value: load_source,
-                            },
-                        ..
-                    } = catch.body.children[catch.body.children.len() - 2].stmt
-                    && let Expression::Variable(load_target) = self.arena[load_target]
-                    && load_target.name.namespace == VariableNamespace::Value
-                    && let Expression::Variable(load_source) = self.arena[load_source]
-                    && load_source == store_target
-                    // `throw valueK`
-                    && let Statement::Basic {
-                        stmt:
-                            BasicStatement::Throw { exception },
-                        ..
-                    } = catch.body.children.last().unwrap().stmt
-                    && let Expression::Variable(exception) = self.arena[exception]
-                    && exception == load_target
-                    // Ensure the variables are not used anywhere else.
-                    && [store_target, catch.value_var, exception].iter().all(|var| {
-                        self.var_info.get(&var.version).expect("missing var").use_count == 2
-                    })
-                {
-                    let mut finally_children = catch.body.children;
-                    // `access_range` is computed before poping elements so that we don't have to
-                    // handle the empty `finally` case in a special way. It doesn't affect anyhing
-                    // else.
-                    let finally_access_range = finally_children[0].meta.access_range.start
-                        ..finally_children.last().unwrap().meta.access_range.end;
-                    finally_children.pop();
-                    finally_children.pop();
-                    finally_children.remove(0);
-                    let finally_measure = finally_children
-                        .iter()
-                        .map(|stmt_meta| stmt_meta.meta.measure)
-                        .sum();
-
-                    catch.meta.active_index_ranges; // TODO
-
-                    finalizers.push(Finalizer {
-                        try_id: try_.id,
-                        body: finally_children,
-                        measure: finally_measure,
-                        access_range: finally_access_range,
-                    });
-                    let try_ = self.handle_group(try_, &mut Vec::new(), finalizers);
-                    let finally = self.handle_group(
-                        StmtGroup {
-                            id: finally.id,
-                            children: finalizers.pop().unwrap().body,
-                        },
-                        &mut Vec::new(),
-                        finalizers,
-                    );
-                    Statement::try_(try_, Vec::new(), finally)
-                } else {
-                    let try_ = self.handle_group(try_, &mut Vec::new(), finalizers);
-                    let catch_body = self.handle_group(catch.body, &mut Vec::new(), finalizers);
-                    Statement::try_(
-                        try_,
-                        vec![Catch {
-                            class: catch.class,
-                            value_var: catch.value_var,
-                            body: catch_body,
-                            meta: catch.meta,
-                        }],
-                        StmtGroup {
-                            id: finally.id,
-                            children: Vec::new(),
-                        },
-                    )
-                }
+        let try_body_is_divergent = try_
+            .children
+            .last()
+            .is_some_and(|stmt_meta| stmt_meta.meta.is_divergent);
+        if try_body_is_divergent {
+            // Inline tail. This can inline more than just the `catch` body, since it can also
+            // inline e.g. the iteration statement of a `for` loop.
+            //
+            // This is somewhat confusing, but ultimately does not break any invariant. We need
+            // every block to either have a `break` to it or to end with something containing
+            // a `continue` to it, but we're inlining into `catch`, not into a block. The loop
+            // decoder is prepared to deal with this mess, since it has to deal with overinlining
+            // into an `if`'s `else` branch anyway.
+            for list in tail.iter_mut().rev() {
+                catch.body.children.extend(list);
             }
+        }
+
+        // Catch bodies typically begin by moving the exception value to stack, but we don't want to
+        // fixup `value_var` to `slotN` right now because `slotN` might be used outside `catch` and
+        // this would lead to shadowing. We play safe and delay this until a later pass.
+
+        // `finally` blocks typically translate to `catch` bodies as:
+        //     slotN = valueM
+        //     <body>
+        //     valueK = slotN
+        //     throw valueK
+        // Match this pattern exactly.
+        if catch.class.is_none()
+            && catch.body.children.len() >= 3
+            // `slotN = valueM`
+            && let Statement::Basic {
+                stmt:
+                    BasicStatement::Assign {
+                        target: store_target,
+                        value: store_source,
+                    },
+                ..
+            } = catch.body.children[0].stmt
+            && let Expression::Variable(store_target) = self.arena[store_target]
+            && store_target.name.namespace == VariableNamespace::Slot
+            && let Expression::Variable(store_source) = self.arena[store_source]
+            && store_source == catch.value_var
+            // `valueK = slotN`
+            && let Statement::Basic {
+                stmt:
+                    BasicStatement::Assign {
+                        target: load_target,
+                        value: load_source,
+                    },
+                ..
+            } = catch.body.children[catch.body.children.len() - 2].stmt
+            && let Expression::Variable(load_target) = self.arena[load_target]
+            && load_target.name.namespace == VariableNamespace::Value
+            && let Expression::Variable(load_source) = self.arena[load_source]
+            && load_source == store_target
+            // `throw valueK`
+            && let Statement::Basic {
+                stmt:
+                    BasicStatement::Throw { exception },
+                ..
+            } = catch.body.children.last().unwrap().stmt
+            && let Expression::Variable(exception) = self.arena[exception]
+            && exception == load_target
+            // Ensure the variables are not used anywhere else.
+            && [store_target, catch.value_var, exception].iter().all(|var| {
+                self.var_info.get(&var.version).expect("missing var").use_count == 2
+            })
+        {
+            let mut finally_children = catch.body.children;
+            // `access_range` is computed before poping elements so that we don't have to handle the
+            // empty `finally` case in a special way. It doesn't affect anything else.
+            let finally_access_range = finally_children[0].meta.access_range.start
+                ..finally_children.last().unwrap().meta.access_range.end;
+            finally_children.pop();
+            finally_children.pop();
+            finally_children.remove(0);
+            let finally_measure = finally_children
+                .iter()
+                .map(|stmt_meta| stmt_meta.meta.measure)
+                .sum();
+
+            catch.meta.active_index_ranges; // TODO
+
+            finalizers.push(Finalizer {
+                try_id: try_.id,
+                body: finally_children,
+                measure: finally_measure,
+                access_range: finally_access_range,
+            });
+            let try_ = self.handle_group(try_, &mut Vec::new(), finalizers);
+            let finally = self.handle_group(
+                StmtGroup {
+                    id: finally.id,
+                    children: finalizers.pop().unwrap().body,
+                },
+                &mut Vec::new(),
+                finalizers,
+            );
+            Statement::try_(try_, Vec::new(), finally)
+        } else {
+            let try_ = self.handle_group(try_, &mut Vec::new(), finalizers);
+            let catch_body = self.handle_group(catch.body, &mut Vec::new(), finalizers);
+            Statement::try_(
+                try_,
+                vec![Catch {
+                    class: catch.class,
+                    value_var: catch.value_var,
+                    body: catch_body,
+                    meta: catch.meta,
+                }],
+                StmtGroup {
+                    id: finally.id,
+                    children: Vec::new(),
+                },
+            )
         }
     }
 }
