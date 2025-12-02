@@ -87,7 +87,7 @@ impl DebugIr for CatchHandler<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         write!(
             f,
-            "try {{ {:?} }} catch ({} {}) {{",
+            "try {{ {:?} }} catch ({} {}) {{ ",
             self.active_ranges,
             self.class
                 .unwrap_or(Str(MStr::from_mutf8(b"Throwable").unwrap())),

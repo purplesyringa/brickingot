@@ -21,7 +21,7 @@ impl IrDef for Ir {
 pub type Program = StmtGroup<Ir>;
 
 #[derive(Clone, Copy, Debug, Display)]
-/// {index}
+/// {index}.
 pub struct IndexMeta {
     index: Index,
 }
@@ -37,10 +37,10 @@ impl IndexMeta {
 #[derive(Clone, Copy, Debug, Display)]
 pub enum Index {
     // An auto-generated non-throwing statement not linked to any position in the source code.
-    /// .syn
+    /// syn
     Synthetic,
     // Produced from the statement at the given position in the linear IR.
-    /// .{0}
+    /// {0}
     Real(usize),
 }
 
