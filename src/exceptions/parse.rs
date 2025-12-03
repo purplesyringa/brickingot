@@ -17,9 +17,10 @@ pub fn parse_try_blocks(arena: &Arena<'_>, ir: structured::Program) -> Program {
     // - Find patterns that exactly match such `finally`s inside `try` bodies.
 
     let analyzed = analysis::analyze(arena, ir);
-    let transformer = Transformer {
+    let mut transformer = Transformer {
         arena,
         var_info: analyzed.var_info,
+        try_depth: 0,
     };
     transformer.handle_group(analyzed.program, &mut Vec::new(), &mut Vec::new())
 }
@@ -37,6 +38,7 @@ struct Finalizer {
     body: StmtList<analysis::Ir>,
     measure: usize,
     access_range: Range<usize>,
+    try_depth: usize,
 }
 
 impl Finalizer {
@@ -45,29 +47,40 @@ impl Finalizer {
         arena: &Arena<'_>,
         var_info: &FxHashMap<Version, VariableInfo>,
         body: &[StmtMeta<analysis::Ir>],
+        try_depth: usize,
     ) -> bool {
         let body_measure = body.iter().map(|stmt_meta| stmt_meta.meta.measure).sum();
         // Comparing the measure is necessary to guarantee overall linear time, see the comment in
         // `handle_group` below.
         self.measure == body_measure
-            && isomorphism::compare(arena, &*self.body, body, |var| {
-                let use_range = &var_info
-                    .get(&var.version)
-                    .expect("missing variable info")
-                    .use_range;
-                self.access_range.start <= use_range.start && use_range.end <= self.access_range.end
-            })
+            && isomorphism::compare(
+                arena,
+                &*self.body,
+                body,
+                |var| {
+                    let use_range = &var_info
+                        .get(&var.version)
+                        .expect("missing variable info")
+                        .use_range;
+                    self.access_range.start <= use_range.start
+                        && use_range.end <= self.access_range.end
+                },
+                self.try_depth,
+                self.try_depth,
+                try_depth,
+            )
     }
 }
 
 struct Transformer<'arena, 'code> {
     arena: &'arena Arena<'code>,
     var_info: FxHashMap<Version, VariableInfo>,
+    try_depth: usize,
 }
 
 impl Transformer<'_, '_> {
     fn handle_group(
-        &self,
+        &mut self,
         mut group: StmtGroup<analysis::Ir>,
         tail: &mut Tail,
         finalizers: &mut Finalizers,
@@ -127,6 +140,7 @@ impl Transformer<'_, '_> {
                     self.arena,
                     &self.var_info,
                     &group.children[i.saturating_sub(finalizer.body.len())..i],
+                    self.try_depth,
                 ) {
                     i -= finalizer.body.len();
                 } else {
@@ -151,7 +165,7 @@ impl Transformer<'_, '_> {
     }
 
     fn handle_stmt(
-        &self,
+        &mut self,
         stmt_meta: StmtMeta<analysis::Ir>,
         tail: &mut Tail,
         finalizers: &mut Finalizers,
@@ -213,7 +227,7 @@ impl Transformer<'_, '_> {
     }
 
     fn handle_try(
-        &self,
+        &mut self,
         try_: StmtGroup<analysis::Ir>,
         mut catches: Vec<Catch<analysis::Ir>>,
         finally: StmtGroup<analysis::Ir>,
@@ -312,8 +326,13 @@ impl Transformer<'_, '_> {
                 body: finally_children,
                 measure: finally_measure,
                 access_range: finally_access_range,
+                try_depth: self.try_depth,
             });
+
+            self.try_depth += 1;
             let try_ = self.handle_group(try_, &mut Vec::new(), finalizers);
+            self.try_depth -= 1;
+
             let finally = self.handle_group(
                 StmtGroup {
                     id: finally.id,
@@ -324,7 +343,9 @@ impl Transformer<'_, '_> {
             );
             Statement::try_(try_, Vec::new(), finally)
         } else {
+            self.try_depth += 1;
             let try_ = self.handle_group(try_, &mut Vec::new(), finalizers);
+            self.try_depth -= 1;
             let catch_body = self.handle_group(catch.body, &mut Vec::new(), finalizers);
             Statement::try_(
                 try_,

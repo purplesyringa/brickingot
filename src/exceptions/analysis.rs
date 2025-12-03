@@ -1,11 +1,13 @@
 use crate::ast::{
     Arena, Catch, ExprId, Expression, GroupId, IrDef, Statement, StmtGroup, StmtMeta, Variable,
     Version,
+    isomorphism::{self, derive_deftly_template_Isomorphic},
 };
 use crate::structured::{self, CatchMeta};
 use alloc::fmt;
 use bitvec::vec::BitVec;
 use core::ops::Range;
+use derive_deftly::Deftly;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 pub struct Output {
@@ -25,7 +27,8 @@ impl IrDef for Ir {
     type CatchMeta = CatchMeta;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deftly)]
+#[derive_deftly(Isomorphic)]
 pub struct Meta {
     // A "size" of the subtree. Doesn't need to be connected to any "real" size, except that:
     //
@@ -37,7 +40,9 @@ pub struct Meta {
     // optimization for locating `finally` blocks.
     pub measure: usize,
     // Range of variable accesses located entirely within this statement.
+    #[deftly(ignore)]
     pub access_range: Range<usize>,
+    #[deftly(ignore)]
     pub is_divergent: bool,
 }
 
@@ -53,8 +58,10 @@ pub enum IndexMeta {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deftly)]
+#[derive_deftly(Isomorphic)]
 pub struct BlockMeta {
+    #[deftly(ignore)]
     pub has_break: bool,
 }
 
@@ -100,6 +107,33 @@ impl fmt::Display for BlockMeta {
             write!(f, "has_break ")?;
         }
         Ok(())
+    }
+}
+
+impl isomorphism::Isomorphic for IndexMeta {
+    fn compare(&self, other: &Self, checker: &mut isomorphism::Checker<'_, '_>) -> bool {
+        match (self, other) {
+            (IndexMeta::Synthetic, IndexMeta::Synthetic) => true,
+            (
+                IndexMeta::Real {
+                    active_tries: x, ..
+                },
+                IndexMeta::Real {
+                    active_tries: y, ..
+                },
+            ) => {
+                let shared_equal = x[..checker.shared_try_levels] == y[..checker.shared_try_levels];
+                let no_distinct = x[checker.shared_try_levels..checker.x_try_levels]
+                    .iter()
+                    .all(|bit| !*bit)
+                    && y[checker.shared_try_levels..checker.y_try_levels]
+                        .iter()
+                        .all(|bit| !*bit);
+                let isomorphic_equal = x[checker.x_try_levels..] == y[checker.y_try_levels..];
+                shared_equal && no_distinct && isomorphic_equal
+            }
+            _ => false,
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 #![cfg_attr(false, no_std)]
-#![feature(associated_type_defaults, substr_range)]
+#![feature(associated_type_defaults, substr_range, trait_alias)]
 
 extern crate alloc;
 

@@ -4,8 +4,9 @@ mod solver;
 mod structurizer;
 
 pub use self::structurizer::structure_control_flow;
-use crate::ast::{IrDef, StmtGroup};
+use crate::ast::{IrDef, StmtGroup, isomorphism::derive_deftly_template_Isomorphic};
 use core::ops::Range;
+use derive_deftly::Deftly;
 use displaydoc::Display;
 
 pub struct Ir;
@@ -44,8 +45,10 @@ pub enum Index {
     Real(usize),
 }
 
-#[derive(Debug, Display)]
+#[derive(Debug, Display, Deftly)]
+#[derive_deftly(Isomorphic)]
 /// in {active_index_ranges:?},
 pub struct CatchMeta {
+    #[deftly(ignore)] // checked separately on a per-statement level
     pub active_index_ranges: Vec<Range<usize>>,
 }

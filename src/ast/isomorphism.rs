@@ -8,12 +8,18 @@ pub fn compare<T: ?Sized + Isomorphic>(
     x: &T,
     y: &T,
     mut is_var_bound_in_x: impl FnMut(Variable) -> bool,
+    shared_try_levels: usize,
+    x_try_levels: usize,
+    y_try_levels: usize,
 ) -> bool {
     Checker {
         arena,
         group_maps: FxHashMap::default(),
         var_maps: FxHashMap::default(),
         is_var_bound_in_x: &mut is_var_bound_in_x,
+        shared_try_levels,
+        x_try_levels,
+        y_try_levels,
     }
     .compare(x, y)
 }
@@ -23,6 +29,9 @@ pub struct Checker<'a, 'code> {
     group_maps: FxHashMap<GroupId, GroupId>, // x -> y
     var_maps: FxHashMap<Version, Version>,   // x -> y
     is_var_bound_in_x: &'a mut dyn FnMut(Variable) -> bool,
+    pub shared_try_levels: usize,
+    pub x_try_levels: usize,
+    pub y_try_levels: usize,
 }
 
 impl Checker<'_, '_> {
@@ -42,7 +51,11 @@ pub trait Isomorphic {
 define_derive_deftly! {
     Isomorphic:
 
-    impl<$tgens> crate::ast::isomorphism::Isomorphic for $ttype where $twheres {
+    impl<$tgens> crate::ast::isomorphism::Isomorphic for $ttype
+    where
+        $twheres
+        ${if tmeta(derive_where) { ${tmeta(derive_where) as token_stream} }}
+    {
         #[allow(unused)]
         fn compare(
             &self,

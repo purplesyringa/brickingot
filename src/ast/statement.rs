@@ -1,5 +1,6 @@
 use super::{
-    Arena, DebugIr, ExprId, Str, Variable, isomorphism::derive_deftly_template_Isomorphic,
+    Arena, DebugIr, ExprId, Str, Variable,
+    isomorphism::{Isomorphic, derive_deftly_template_Isomorphic},
 };
 use core::fmt;
 use derive_deftly::Deftly;
@@ -13,13 +14,14 @@ impl<T: fmt::Debug + fmt::Display> MetaDef for T {}
 #[derive_where(Debug)]
 #[derive(Deftly)]
 #[derive_deftly(Isomorphic)]
+#[deftly(derive_where = "Ir: IsomorphicIrDef")]
 pub struct StmtMeta<Ir: IrDef> {
     pub stmt: Statement<Ir>,
-    #[deftly(ignore)]
     pub meta: Ir::Meta,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deftly)]
+#[derive_deftly(Isomorphic)]
 pub struct NoMeta;
 
 impl fmt::Display for NoMeta {
@@ -46,49 +48,56 @@ pub trait IrDef {
     type CatchMeta: MetaDef = NoMeta;
 }
 
+trait IsomorphicIrDef = Sized
+    + IrDef<
+        Meta: Isomorphic,
+        BasicMeta: Isomorphic,
+        BlockMeta: Isomorphic,
+        ContinueMeta: Isomorphic,
+        BreakMeta: Isomorphic,
+        IfMeta: Isomorphic,
+        SwitchMeta: Isomorphic,
+        TryMeta: Isomorphic,
+        CatchMeta: Isomorphic,
+    >;
+
 #[derive_where(Debug)]
 #[derive(Deftly)]
 #[derive_deftly(Isomorphic)]
+#[deftly(derive_where = "Ir: IsomorphicIrDef")]
 pub enum Statement<Ir: IrDef> {
     Basic {
         stmt: BasicStatement,
-        #[deftly(ignore)]
         meta: Ir::BasicMeta,
     },
     Block {
         body: StmtGroup<Ir>,
-        #[deftly(ignore)]
         meta: Ir::BlockMeta,
     },
     Continue {
         group_id: GroupId,
-        #[deftly(ignore)]
         meta: Ir::ContinueMeta,
     },
     Break {
         group_id: GroupId,
-        #[deftly(ignore)]
         meta: Ir::BreakMeta,
     },
     If {
         condition: ExprId,
         then: StmtGroup<Ir>,
         else_: StmtGroup<Ir>,
-        #[deftly(ignore)]
         meta: Ir::IfMeta,
     },
     Switch {
         id: GroupId,
         key: ExprId,
         arms: Vec<(Option<i32>, StmtGroup<Ir>)>,
-        #[deftly(ignore)]
         meta: Ir::SwitchMeta,
     },
     Try {
         try_: StmtGroup<Ir>,
         catches: Vec<Catch<Ir>>,
         finally: StmtGroup<Ir>,
-        #[deftly(ignore)]
         meta: Ir::TryMeta,
     },
 }
@@ -178,6 +187,7 @@ pub type StmtList<Ir> = Vec<StmtMeta<Ir>>;
 #[derive(Deftly)]
 #[derive_where(Debug)]
 #[derive_deftly(Isomorphic)]
+#[deftly(derive_where = "Ir: IsomorphicIrDef")]
 pub struct StmtGroup<Ir: IrDef> {
     #[deftly(definition)]
     pub id: GroupId,
@@ -199,6 +209,7 @@ pub enum BasicStatement {
 #[derive(Deftly)]
 #[derive_where(Debug)]
 #[derive_deftly(Isomorphic)]
+#[deftly(derive_where = "Ir: IsomorphicIrDef")]
 pub struct Catch<Ir: IrDef> {
     pub class: Option<super::String>, // don't want to pollute the types with lifetimes
     pub value_var: Variable,
