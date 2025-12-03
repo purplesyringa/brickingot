@@ -1,6 +1,5 @@
 use super::{
-    Arena, DebugIr, ExprId, Str, Variable,
-    isomorphism::{Isomorphic, derive_deftly_template_Isomorphic},
+    Arena, DebugIr, ExprId, Str, Variable, isomorphism::derive_deftly_template_Isomorphic,
 };
 use core::fmt;
 use derive_deftly::Deftly;
@@ -8,17 +7,8 @@ use derive_where::derive_where;
 use displaydoc::Display;
 use noak::MStr;
 
-pub trait MetaDef: fmt::Debug {
-    type WithStmt<Ir: IrDef<Meta = Self>>: fmt::Debug + DebugIr + Isomorphic;
-    fn display(&self) -> impl fmt::Display;
-}
-
-impl<T: fmt::Display + fmt::Debug> MetaDef for T {
-    type WithStmt<Ir: IrDef<Meta = Self>> = StmtMeta<Ir>;
-    fn display(&self) -> impl fmt::Display {
-        self
-    }
-}
+pub trait MetaDef: fmt::Debug + fmt::Display {}
+impl<T: fmt::Debug + fmt::Display> MetaDef for T {}
 
 #[derive_where(Debug)]
 #[derive(Deftly)]
@@ -32,10 +22,15 @@ pub struct StmtMeta<Ir: IrDef> {
 #[derive(Debug)]
 pub struct NoMeta;
 
-impl MetaDef for NoMeta {
-    type WithStmt<Ir: IrDef<Meta = Self>> = Statement<Ir>;
-    fn display(&self) -> impl fmt::Display {
-        ""
+impl fmt::Display for NoMeta {
+    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Ok(())
+    }
+}
+
+impl<Ir: IrDef<Meta = NoMeta>> From<Statement<Ir>> for StmtMeta<Ir> {
+    fn from(stmt: Statement<Ir>) -> Self {
+        Self { stmt, meta: NoMeta }
     }
 }
 
@@ -178,7 +173,7 @@ impl GroupId {
     pub const ROOT: GroupId = GroupId(0);
 }
 
-pub type StmtList<Ir> = Vec<<<Ir as IrDef>::Meta as MetaDef>::WithStmt<Ir>>;
+pub type StmtList<Ir> = Vec<StmtMeta<Ir>>;
 
 #[derive(Deftly)]
 #[derive_where(Debug)]
@@ -228,21 +223,21 @@ impl<Ir: IrDef> Catch<Ir> {
 
 impl<Ir: IrDef> DebugIr for StmtMeta<Ir> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
-        write!(f, "{}{}", self.meta.display(), arena.debug(&self.stmt))
+        write!(f, "{}{}", self.meta, arena.debug(&self.stmt))
     }
 }
 
 impl<Ir: IrDef> DebugIr for Statement<Ir> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>, arena: &Arena<'_>) -> fmt::Result {
         match self {
-            Self::Basic { stmt, meta } => write!(f, "{}{}", meta.display(), arena.debug(stmt)),
+            Self::Basic { stmt, meta } => write!(f, "{meta}{}", arena.debug(stmt)),
             Self::Block { body, meta } => {
-                write!(f, "{}block {}", meta.display(), arena.debug(body))
+                write!(f, "{meta}block {}", arena.debug(body))
             }
             Self::Continue { group_id, meta } => {
-                write!(f, "{}continue #{group_id};", meta.display())
+                write!(f, "{meta}continue #{group_id};")
             }
-            Self::Break { group_id, meta } => write!(f, "{}break #{group_id};", meta.display()),
+            Self::Break { group_id, meta } => write!(f, "{meta}break #{group_id};"),
             Self::If {
                 condition,
                 then,
@@ -251,8 +246,7 @@ impl<Ir: IrDef> DebugIr for Statement<Ir> {
             } => {
                 write!(
                     f,
-                    "{}if ({}) {}",
-                    meta.display(),
+                    "{meta}if ({}) {}",
                     arena.debug(condition),
                     arena.debug(then),
                 )?;
@@ -267,12 +261,7 @@ impl<Ir: IrDef> DebugIr for Statement<Ir> {
                 arms,
                 meta,
             } => {
-                writeln!(
-                    f,
-                    "{}switch #{id} ({}) {{",
-                    meta.display(),
-                    arena.debug(key),
-                )?;
+                writeln!(f, "{meta}switch #{id} ({}) {{", arena.debug(key))?;
                 for (value, body) in arms {
                     match value {
                         Some(value) => write!(f, "case {value}: ")?,
@@ -289,12 +278,12 @@ impl<Ir: IrDef> DebugIr for Statement<Ir> {
                 finally,
                 meta,
             } => {
-                write!(f, "{}try {}", meta.display(), arena.debug(try_))?;
+                write!(f, "{meta}try {}", arena.debug(try_))?;
                 for catch in catches {
                     write!(
                         f,
                         " catch ({}{} {}) {}",
-                        catch.meta.display(),
+                        catch.meta,
                         catch
                             .class
                             .as_ref()

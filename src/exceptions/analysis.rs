@@ -145,7 +145,7 @@ impl Analyzer<'_, '_> {
         let children = group
             .children
             .into_iter()
-            .map(|stmt| self.handle_stmt(stmt))
+            .map(|stmt_meta| self.handle_stmt(stmt_meta.stmt))
             .inspect(|stmt_meta| {
                 meta.measure += stmt_meta.meta.measure;
                 meta.is_divergent = stmt_meta.meta.is_divergent;

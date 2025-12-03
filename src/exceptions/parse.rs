@@ -141,7 +141,7 @@ impl Transformer<'_, '_> {
         let mut it = group.children.into_iter();
         while let Some(stmt) = it.next() {
             tail.push(it);
-            children.push(self.handle_stmt(stmt, tail, finalizers));
+            children.push(self.handle_stmt(stmt, tail, finalizers).into());
             it = tail.pop().unwrap();
         }
         StmtGroup {

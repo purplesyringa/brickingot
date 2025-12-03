@@ -7,7 +7,7 @@ use super::{
 };
 use crate::ast::{
     Arena, BasicStatement, Catch, ExprId, Expression, GroupId, Statement, StmtGroup, StmtList,
-    Version,
+    StmtMeta, Version,
 };
 use crate::{
     linear::{self, CatchHandler},
@@ -79,7 +79,8 @@ pub fn structure_control_flow<'code>(
                     value: arena.int(0),
                 },
                 meta: IndexMeta::synthetic(),
-            },
+            }
+            .into(),
         );
     }
     root
@@ -140,7 +141,7 @@ impl Structurizer<'_, '_> {
                 id: node_id,
                 children,
             } => {
-                out.push(Statement::block(self.emit_group(Some(node_id), children)));
+                out.push(Statement::block(self.emit_group(Some(node_id), children)).into());
             }
 
             Node::Try { id, children } => {
@@ -156,60 +157,72 @@ impl Structurizer<'_, '_> {
 
                 let mut catch = self.empty_group();
                 if let Some(stmt) = handler.stack_value_copy {
-                    catch.children.push(Statement::Basic {
-                        stmt,
-                        meta: IndexMeta::synthetic(),
-                    });
+                    catch.children.push(
+                        Statement::Basic {
+                            stmt,
+                            meta: IndexMeta::synthetic(),
+                        }
+                        .into(),
+                    );
                 }
                 let key = RequirementKey::BackwardCatch { handler_index };
                 if self.jump_implementations.contains_key(&key) {
                     self.emit_jump(key, Index::Synthetic, &mut catch.children);
                 }
 
-                out.push(Statement::try_(
-                    try_,
-                    vec![Catch {
-                        class: handler.class.map(|s| crate::ast::String(s.0.to_owned())),
-                        value_var: handler.value_var,
-                        body: catch,
-                        meta: CatchMeta {
-                            active_index_ranges: handler.active_ranges,
-                        },
-                    }],
-                    self.empty_group(),
-                ));
+                out.push(
+                    Statement::try_(
+                        try_,
+                        vec![Catch {
+                            class: handler.class.map(|s| crate::ast::String(s.0.to_owned())),
+                            value_var: handler.value_var,
+                            body: catch,
+                            meta: CatchMeta {
+                                active_index_ranges: handler.active_ranges,
+                            },
+                        }],
+                        self.empty_group(),
+                    )
+                    .into(),
+                );
             }
 
             Node::DispatchSwitch { dispatch_targets } => {
                 // Dispatch targets can never point to the statement after the switch, since such
                 // jumps would be trivially lowered to a normal, non-dispatch jump to this `switch`.
                 let group_id = self.alloc_group_id();
-                out.push(Statement::Switch {
-                    id: group_id,
-                    key: self.selector(),
-                    arms: dispatch_targets
-                        .into_iter()
-                        .map(|target| {
-                            let mut body = self.empty_group();
-                            body.children.push(Statement::Basic {
-                                stmt: BasicStatement::Assign {
-                                    target: self.selector(),
-                                    value: self.arena.int(0),
-                                },
-                                meta: IndexMeta::synthetic(),
-                            });
-                            self.emit_jump(
-                                RequirementKey::Dispatch {
-                                    req_id: target.jump_req_id,
-                                },
-                                Index::Synthetic,
-                                &mut body.children,
-                            );
-                            (Some(target.selector), body)
-                        })
-                        .collect(),
-                    meta: IndexMeta::synthetic(),
-                });
+                out.push(
+                    Statement::Switch {
+                        id: group_id,
+                        key: self.selector(),
+                        arms: dispatch_targets
+                            .into_iter()
+                            .map(|target| {
+                                let mut body = self.empty_group();
+                                body.children.push(
+                                    Statement::Basic {
+                                        stmt: BasicStatement::Assign {
+                                            target: self.selector(),
+                                            value: self.arena.int(0),
+                                        },
+                                        meta: IndexMeta::synthetic(),
+                                    }
+                                    .into(),
+                                );
+                                self.emit_jump(
+                                    RequirementKey::Dispatch {
+                                        req_id: target.jump_req_id,
+                                    },
+                                    Index::Synthetic,
+                                    &mut body.children,
+                                );
+                                (Some(target.selector), body)
+                            })
+                            .collect(),
+                        meta: IndexMeta::synthetic(),
+                    }
+                    .into(),
+                );
             }
         }
     }
@@ -226,18 +239,20 @@ impl Structurizer<'_, '_> {
         let meta = IndexMeta { index };
 
         match stmt {
-            linear::Statement::Basic(stmt) => out.push(Statement::Basic { stmt, meta }),
+            linear::Statement::Basic(stmt) => out.push(Statement::Basic { stmt, meta }.into()),
 
             linear::Statement::Jump { condition, .. } => {
                 let out = if let Expression::ConstInt(1) = self.arena[condition] {
                     out
                 } else {
-                    out.push(Statement::if_(
-                        condition,
-                        self.empty_group(),
-                        self.empty_group(),
-                    ));
-                    let Some(Statement::If { then, .. }) = out.last_mut() else {
+                    out.push(
+                        Statement::if_(condition, self.empty_group(), self.empty_group()).into(),
+                    );
+                    let Some(StmtMeta {
+                        stmt: Statement::If { then, .. },
+                        ..
+                    }) = out.last_mut()
+                    else {
                         unreachable!()
                     };
                     &mut then.children
@@ -254,40 +269,47 @@ impl Structurizer<'_, '_> {
                 arms.sort_unstable_by_key(|(_, target)| *target);
 
                 let group_id = self.alloc_group_id();
-                out.push(Statement::Switch {
-                    id: group_id,
-                    key,
-                    arms: arms
-                        .iter()
-                        .enumerate()
-                        .map(|(i, &(key, target))| {
-                            let mut body = self.empty_group();
-                            if let Some((_, next_target)) = arms.get(i + 1)
-                                && target == *next_target
-                            {
-                                // Allow arms to the same target to fallthrough, so that we get
-                                // a nice `case 1: case 2: ... case n:` decompilation.
-                                // `Optimizer::inline_switch` relies on this to produce good code,
-                                // though not for correctness.
-                            } else if target == stmt_index + 1 {
-                                // Jumps to the statement after the switch can be performed by
-                                // breaking from the switch itself. Breaks from the last arm don't
-                                // have to be emitted.
-                                if i != arms.len() - 1 {
-                                    body.children.push(Statement::Break { group_id, meta });
-                                }
-                            } else {
-                                self.emit_jump(
-                                    RequirementKey::Switch { stmt_index, key },
-                                    index,
-                                    &mut body.children,
-                                );
+
+                let arms = arms
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(key, target))| {
+                        let mut body = self.empty_group();
+                        if let Some((_, next_target)) = arms.get(i + 1)
+                            && target == *next_target
+                        {
+                            // Allow arms to the same target to fallthrough, so that we get a nice
+                            // `case 1: case 2: ... case n:` decompilation.
+                            // `Optimizer::inline_switch` relies on this to produce good code,
+                            // though not for correctness.
+                        } else if target == stmt_index + 1 {
+                            // Jumps to the statement after the switch can be performed by breaking
+                            // from the switch itself. Breaks from the last arm don't have to be
+                            // emitted.
+                            if i != arms.len() - 1 {
+                                body.children
+                                    .push(Statement::Break { group_id, meta }.into());
                             }
-                            (key, body)
-                        })
-                        .collect(),
-                    meta,
-                });
+                        } else {
+                            self.emit_jump(
+                                RequirementKey::Switch { stmt_index, key },
+                                index,
+                                &mut body.children,
+                            );
+                        }
+                        (key, body)
+                    })
+                    .collect();
+
+                out.push(
+                    Statement::Switch {
+                        id: group_id,
+                        key,
+                        arms,
+                        meta,
+                    }
+                    .into(),
+                );
             }
         }
     }
@@ -300,29 +322,41 @@ impl Structurizer<'_, '_> {
 
         match *imp {
             RequirementImplementation::Break { node_id } => {
-                out.push(Statement::Break {
-                    group_id: self.node_id_to_group_id[node_id.0 as usize],
-                    meta,
-                });
+                out.push(
+                    Statement::Break {
+                        group_id: self.node_id_to_group_id[node_id.0 as usize],
+                        meta,
+                    }
+                    .into(),
+                );
             }
             RequirementImplementation::Continue { node_id } => {
-                out.push(Statement::Continue {
-                    group_id: self.node_id_to_group_id[node_id.0 as usize],
-                    meta,
-                });
+                out.push(
+                    Statement::Continue {
+                        group_id: self.node_id_to_group_id[node_id.0 as usize],
+                        meta,
+                    }
+                    .into(),
+                );
             }
             RequirementImplementation::ContinueToDispatcher { node_id, selector } => {
-                out.push(Statement::Basic {
-                    stmt: BasicStatement::Assign {
-                        target: self.selector(),
-                        value: self.arena.int(selector),
-                    },
-                    meta,
-                });
-                out.push(Statement::Continue {
-                    group_id: self.node_id_to_group_id[node_id.0 as usize],
-                    meta,
-                });
+                out.push(
+                    Statement::Basic {
+                        stmt: BasicStatement::Assign {
+                            target: self.selector(),
+                            value: self.arena.int(selector),
+                        },
+                        meta,
+                    }
+                    .into(),
+                );
+                out.push(
+                    Statement::Continue {
+                        group_id: self.node_id_to_group_id[node_id.0 as usize],
+                        meta,
+                    }
+                    .into(),
+                );
             }
             RequirementImplementation::Try { .. } => {
                 panic!("jump cannot be implemented with try");

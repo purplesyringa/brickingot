@@ -455,14 +455,14 @@ impl Optimizer<'_, '_> {
         let mut children = Vec::with_capacity(stmts.len()); // only approximate, but that's fine
 
         let mut stmts = stmts.into_iter().peekable();
-        while let Some(stmt) = stmts.next() {
+        while let Some(stmt_meta) = stmts.next() {
             self.handle_stmt(
-                stmt,
-                if let Some(next_stmt) = stmts.peek() {
+                stmt_meta.stmt,
+                if let Some(next_stmt_meta) = stmts.peek() {
                     // This can happen in the middle of a `switch` if we `break` from a higher-level
                     // group.
-                    if let Statement::Break { group_id, .. } = next_stmt {
-                        Some(*group_id)
+                    if let Statement::Break { group_id, .. } = next_stmt_meta.stmt {
+                        Some(group_id)
                     } else {
                         None
                     }
